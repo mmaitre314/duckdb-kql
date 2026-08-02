@@ -1,0 +1,333 @@
+# Test Plan — `duckdb-kql`
+
+> Status: draft (2026-08-02). Companion to
+> [`implementation-plan.md`](./implementation-plan.md). This document addresses
+> the project's biggest risk: **KQL is a huge language, and "equivalent"
+> KQL/DuckDB operators and functions differ in subtle, silent ways.** A
+> hand-written test suite can't cover that surface. The strategy here is to
+> **harvest** a large acceptance corpus from Microsoft's own docs and from
+> existing KQL implementations, run it **differentially** against reference
+> engines, and drive implementation order from real usage signal.
+
+## 1. The core risk this plan exists to manage
+
+Two independent problems:
+
+1. **Breadth.** KQL has ~100+ tabular operators/plugins, 200+ scalar functions,
+   40+ aggregations, plus statements, literals, and type semantics. We cannot
+   hand-author enough tests to be confident.
+2. **Silent behavioral divergence.** Many KQL constructs have a DuckDB analogue
+   that is *almost* the same — and the differences don't error, they return
+   subtly wrong results. A non-exhaustive catalog of known traps is in §6; it is
+   the heart of why "it parses and runs" is nowhere near "it's correct."
+
+The plan attacks both: **automated corpus harvesting** for breadth (§3–§4), and
+a **differential oracle + a curated trap catalog** for divergence (§5–§6).
+
+## 2. Test architecture (six layers)
+
+| Layer | Question it answers | Source of cases | When |
+|-------|--------------------|-----------------|------|
+| L1 Parse/round-trip | Does it parse without crashing? | Every KQL string we can scrape (docs + libs) | CI, every push |
+| L2 Golden translation | Does KQL→SQL emit the SQL we expect? | Small curated set | CI, every push |
+| L3 Acceptance (docs) | Do we match Microsoft's documented outputs? | Scraped `dataexplorer-docs` examples | CI, every push |
+| L4 Differential (oracle) | Do we match a reference *engine's* results? | Same corpus, run on ADX/ClickHouse-KQL/KustoLoco/kql-to-sql | CI-only / nightly |
+| L5 Trap catalog | Do we get the known-divergent cases right? | Hand-authored from §6 | CI, every push |
+| L6 Fuzz/metamorphic | Does it stay robust on odd inputs? | Grammar-driven + mutations | Nightly |
+
+L3 and L5 are the correctness spine; L4 is what scales correctness beyond what
+the docs pin down; L1/L6 keep the parser honest; L2 catches regressions fast.
+
+## 3. Corpus harvesting — Microsoft docs (primary acceptance source)
+
+**Source:** [`MicrosoftDocs/dataexplorer-docs`](https://github.com/MicrosoftDocs/dataexplorer-docs),
+path `data-explorer/kusto/query/` — one markdown file per operator/function, plus
+management and reference pages. This is public, versioned markdown we can pin to
+a commit and re-scrape.
+
+**What the pages give us (confirmed by inspection):**
+- KQL queries in fenced ` ```kusto ` code blocks.
+- **Expected output rendered as markdown tables** (often truncated: "first N rows").
+- A run-link pattern `> [!div class="nextstepaction"]` → `dataexplorer.azure.com`
+  with the URL-encoded query (a second way to recover the exact query text).
+
+**Important structural catch:** most examples reference **shared sample
+datasets** (`StormEvents`, `Covid19`, `demo_*`, etc.) rather than inline data, so
+the output table alone isn't runnable without those datasets. The corpus
+therefore splits into:
+
+- **Self-contained examples** — queries whose input is *in* the query:
+  `datatable(...)`, `print`, `range`, `let T = datatable(...)`. These are
+  **directly runnable and checkable** against the documented output. **Prioritize
+  extracting these** — they need no external data and give exact input→output
+  pairs.
+- **Sample-DB examples** — need `StormEvents` et al. loaded into DuckDB as
+  fixtures (§4.3). Higher value (realistic) but require the datasets and tolerate
+  the docs' row-truncation.
+
+**Extraction tool (`tools/harvest_docs.py`, dev-time):**
+1. Pin a `dataexplorer-docs` commit; walk `query/**.md`.
+2. For each page, pair each ` ```kusto ` block with the following output table (if
+   present) and its run-link.
+3. Classify self-contained vs sample-DB (detect `datatable`/`print`/`range` vs
+   bare table refs).
+4. Tag each case with the operators/functions it exercises (from the page it
+   lives on + a lightweight token scan) — feeds the coverage matrix (§7).
+5. Emit machine-readable case files (§4.1).
+6. Normalize the documented output tables (types, truncation markers) into
+   expected results.
+
+**Licensing:** `dataexplorer-docs` prose is **CC-BY-4.0** and code samples
+**MIT** (standard MicrosoftDocs `LICENSE`/`LICENSE-CODE`). We store *derived test
+fixtures*, not doc prose; still add attribution + a `NOTICE` entry and record the
+source commit/URL per case. **Verify these license files before committing
+harvested data.**
+
+## 4. Corpus format, fixtures, and sample data
+
+### 4.1 Case file schema (one YAML/JSON per case, or sharded files)
+```yaml
+id: summarize-count-by-01
+source: https://github.com/MicrosoftDocs/dataexplorer-docs/.../summarize-operator.md
+source_commit: <sha>
+kql: |
+  StormEvents | summarize count() by State | sort by count_ desc | take 3
+fixtures: [StormEvents]          # or inline: true if datatable/print/range
+expected:                        # documented or oracle-derived
+  columns: [State, count_]
+  rows: [[TEXAS, 4701], [KANSAS, 3166], [FLORIDA, 1042]]
+tags:
+  operators: [summarize, sort, take]
+  functions: [count]
+status: xfail                    # supported | xfail(unsupported) | skip(needs-oracle)
+oracle: docs                     # docs | adx | clickhouse-kql | kustoloco | kql-to-sql
+notes: docs table truncated to first 3 rows
+```
+- `status: xfail` for not-yet-implemented constructs means **adding coverage is
+  free** — cases flip green automatically as features land, and the coverage
+  matrix (§7) is generated from these files.
+- `tags` are the join key between tests and the coverage/prioritization matrix.
+
+### 4.2 Comparison semantics (avoid false failures)
+Result comparison must be tolerant where KQL itself is:
+- **Order-insensitive** unless the query has a terminal `sort`/`top` (row order is
+  otherwise undefined in both engines).
+- **Type-normalized** (KQL `long`↔DuckDB `BIGINT`, `real`↔`DOUBLE`,
+  `datetime`↔`TIMESTAMP`, `dynamic`↔`JSON`).
+- **Float tolerance** (approximate aggregations: `dcount`, `percentile` — compare
+  within epsilon or assert "approx" only).
+- **Truncation-aware** for docs outputs that show only the first N rows (compare a
+  prefix after an explicit sort, or re-derive full expected via the oracle).
+
+### 4.3 Sample datasets as DuckDB fixtures
+- `StormEvents` (the canonical ADX demo table) is publicly downloadable as CSV;
+  load into DuckDB once and cache as Parquet under `tests/fixtures/`. Add others
+  as needed (`Covid19`, `demo_make_series1`, etc.).
+- A `tests/fixtures/loader.py` materializes each sample DB into a DuckDB
+  connection so both our engine and any local oracle query identical data.
+- Keep large fixtures out of git (download+cache in CI; check in only small ones).
+
+## 5. Differential testing against reference engines (L4)
+
+The docs pin *documented* outputs; the **oracle** pins *everything else*. Run the
+same KQL against a reference KQL engine and against `duckdb-kql`, compare with the
+§4.2 semantics. Candidate oracles, best-fidelity first:
+
+| Oracle | Fidelity | Cost / notes | Role |
+|--------|----------|--------------|------|
+| **Real ADX / Fabric free cluster** | Highest (ground truth) | Network, auth, rate limits | Nightly, canonical answers for the corpus |
+| **`saoc90/kql-to-sql` (→ DuckDB SQL)** | High for covered set; built on official parser | .NET, MIT; runs *on DuckDB* so data matches exactly | Best local oracle; also a translation cross-check |
+| **KustoLoco / BabyKusto** | Real KQL engine | .NET; verify license; own execution semantics | Local oracle for engine semantics |
+| **ClickHouse KQL dialect** | Partial, **experimental** (marked so upstream) | C++; Apache-2.0; diverges from ADX in places | Extra signal, not ground truth |
+
+**Recommended default:** generate canonical expected results **once** from ADX
+(or kql-to-sql-on-DuckDB) in a nightly/offline job, **freeze them into the case
+files**, and run the fast L3 comparison against those frozen expectations on every
+push. This keeps per-push CI hermetic (no .NET/network) while still being
+oracle-backed. Oracles are **never runtime dependencies** — dev/CI only.
+
+**Also harvest existing libraries' test corpora** (their inputs *and* expected
+outputs), converting into our case format:
+- **`kql-to-sql`** — `KqlToSql.DifferentialTests`, `KqlToSql.Tests`,
+  `KqlToSql.DuckDbExtension.Tests`, `IntegrationTests`, plus its `Fuzzer`. Its
+  `DifferentialTests` are precisely the KQL-vs-reference shape we want. (MIT.)
+- **ClickHouse** — `tests/queries/0_stateless/*kusto*/*kql*` `.sql` + `.reference`
+  files: KQL in, fully-expanded expected rows out. (Apache-2.0.)
+- **`microsoft/Kusto-Query-Language`** — parser test inputs: excellent **L1 parse
+  corpus** (breadth of syntax), even without result expectations. (Apache-2.0.)
+- **KustoLoco** — C# test cases (semantics). (Verify license.)
+
+Each import records provenance + upstream license in `NOTICE`.
+
+## 6. Behavioral divergence catalog (L5 — hand-authored trap tests)
+
+These are the "almost the same" cases that silently return wrong results. Each
+bullet becomes one or more targeted tests with an explicit expected value. This
+list is the **living registry of known KQL↔DuckDB semantic gaps** and should grow
+as we find more.
+
+**Joins & set ops**
+- `join` **default kind is `innerunique`** — it de-duplicates the *left* key set
+  before joining. This is **not** a SQL inner join; naively emitting `INNER JOIN`
+  is wrong. Must test all kinds: `innerunique`(default), `inner`, `leftouter`,
+  `rightouter`, `fullouter`, `leftsemi`, `rightsemi`, `leftanti`, `rightanti`.
+- `union` column unification (differing schemas → superset columns, nulls filled);
+  `kind=inner|outer`; `withsource=`.
+
+**Aggregation (`summarize`)**
+- `count()` (all rows) vs `count(Expr)` (**ignores nulls**) vs `countif()`.
+- `dcount`/`dcountif` are **approximate** (HLL) — never assert exact equality.
+- `percentile`/`percentiles` use a specific estimation algorithm — approximate,
+  needs tolerance and possibly a UDF/`quantile_cont` choice documented.
+- `avg`/`sum`/`min`/`max` **ignore nulls**; empty group behavior.
+- Implicit grouping-key null bucket; result column auto-naming (`count_`,
+  `avg_x`) must match KQL's naming.
+- `make_list`/`make_set` ordering and null handling; `make_set` distinctness.
+
+**Strings (very high risk)**
+- `==` is **case-sensitive**; `=~` is **case-insensitive**; `!=`/`!~` likewise.
+- `has`/`hasprefix`/`hassuffix` are **term-based** (tokenized, whole-word) and
+  **case-insensitive by default** — *not* substring; `contains` **is** substring
+  (case-insensitive). `_cs` variants force case-sensitivity. Emulating `has`'s
+  tokenization on DuckDB is nontrivial — dedicated tests required.
+- `startswith`/`endswith` default case-insensitive.
+- `substring` with negative/out-of-range indices; `strcat` null handling;
+  `split` empty-segment behavior; `strlen` counts characters not bytes.
+
+**Datetime / timespan**
+- `datetime` is UTC; `bin()`/`floor` semantics vs DuckDB `time_bucket`/`date_trunc`
+  origin; week/month binning edge cases.
+- `ago()`, `now()` determinism within a query.
+- timespan literals (`1d`,`90m`,`100ms`,`1tick`) → `INTERVAL`; arithmetic and
+  formatting round-trips.
+- `todatetime`/`totimespan` parsing of bad input → **null, not error**.
+
+**Numbers & null propagation**
+- Integer vs real division; `%` sign behavior; overflow (`long` 64-bit).
+- Conversions (`toint`/`tolong`/`todouble`/`tobool`) on unparseable input → **null,
+  not error** (DuckDB `CAST` would throw → must use `TRY_CAST`).
+- Null propagation in arithmetic/comparison; `isnull`/`isnan`/`isfinite`.
+
+**Dynamic / JSON**
+- Accessing a **missing property returns null**, never an error.
+- `parse_json`/`todynamic`; array indexing; `bag_unpack`/`mv-expand` expansion
+  order and null rows; nested access typing.
+
+**Row-shaping operators**
+- `take`/`limit` and bare `sample` are **nondeterministic order** — assert as sets.
+- `top N by X` = sort+take with **nondeterministic tie-breaking**.
+- `sort`/`order by` default **`desc`**; nulls-ordering convention.
+- `extend` may **overwrite** an existing column; `project` reorders and can
+  compute; `project-away`/`project-keep`/`project-rename` column-set effects.
+
+**Identifiers & typing**
+- KQL identifiers are **case-sensitive**; DuckDB is case-insensitive by default —
+  column/table name collisions and quoting must be handled.
+- Column type inference for `datatable`/`print` literals.
+
+## 7. Coverage matrix & tying tests to the language surface
+
+- Build the **full item inventory** by scraping the doc TOC/pages (§3): every
+  tabular operator, scalar function (by family: string, datetime, math,
+  dynamic/array, conversion, IP, geo, hash, window), aggregation, plugin, and
+  statement → a canonical list in `docs/coverage-matrix.md` (generated).
+- Every harvested/authored case carries `tags` (§4.1). A generator cross-joins
+  tags × cases to produce, per language item: **# cases, # passing, # xfail,
+  supported?**. This is published so users see exactly what works, and it makes
+  "breadth" measurable instead of vibes.
+- CI gate: implementing a feature must move its row from `xfail`→pass and must not
+  regress others.
+
+## 8. Prioritization plan (what to implement first, and why)
+
+Rank each language item by a simple composite signal, then implement in waves.
+
+**Priority signal = (A) doc-example frequency × (B) cross-library support × (C) inverse behavioral risk-to-value.**
+- **(A) Frequency** — count occurrences of each operator/function across *all*
+  harvested doc examples. High frequency = high user ROI. (The harvester already
+  tags every case, so this is a free aggregation.)
+- **(B) Cross-library support** — does `kql-to-sql` / ClickHouse-KQL / KustoLoco
+  implement it? Implemented-by-many = proven worth + a ready oracle. `kql-to-sql`
+  in particular already supports a very broad operator set (`where`, `project`,
+  `extend`, `summarize`, `sort`, `take`, `top`, `join`, `union`, `distinct`,
+  `parse`, `mv-expand`, `make-series`, `datatable`, `range`, `print`, `search`, …)
+  — treat its **supported list as the "worth-it" whitelist**.
+- **(C) Behavioral risk** — from §6. High-risk-but-high-frequency items (e.g.
+  `join`, `has`, `summarize`) get implemented early *with* their trap tests;
+  high-risk-but-rare items get deferred.
+
+**Explicit "defer / hard" bucket (negative signal).** `kql-to-sql` deliberately
+did **not** implement `facet`, `find`, `fork`, `invoke`, `macro-expand`,
+`partition`, `reduce`, `project-by-names` — because they yield multiple result
+sets, need function/catalog registries, or don't fit single-query SQL translation.
+That's a strong signal to **defer these** (or design a special path) rather than
+fight them early.
+
+**Proposed waves** (refined once the frequency scan runs):
+- **Wave 1 (MVP / M1):** `where`, `project`, `project-away`/`keep`/`rename`,
+  `extend`, `take`/`limit`, `top`, `sort`/`order`, `distinct`, `count`,
+  `summarize` (core aggregates), `union`, `join` (all kinds, incl. correct
+  `innerunique`), `let`, `datatable`/`print`/`range`; core scalar families
+  (string incl. `has`/`contains`, datetime incl. `ago`/`bin`, conversions,
+  `iff`/`case`, null funcs). These are the highest-frequency, broadly-supported,
+  self-contained-testable set.
+- **Wave 2 (M2):** `dynamic`/JSON access, `mv-expand`/`mv-apply`, `parse`,
+  `parse-where`, `make-series`, percentiles, richer datetime/regex, `search`,
+  `getschema`.
+- **Wave 3 (M3):** `evaluate` plugins (`bag_unpack`, `pivot`), `scan`, `top-nested`,
+  `range`-based generation, user-defined `let` functions, `externaldata`/
+  `datatable` edge cases.
+- **Deferred:** the `kql-to-sql` "unsupported" bucket above.
+
+Each wave ships with its slice of the acceptance corpus flipped from `xfail` to
+required-pass, plus its §6 trap tests.
+
+## 9. CI wiring & tooling
+
+- **Every push:** L1 parse, L2 golden, L3 acceptance (frozen expectations), L5
+  trap catalog. Hermetic — pure Python, DuckDB only, no .NET/network.
+- **Nightly:** L4 differential (regenerate/verify frozen expectations against
+  ADX and/or kql-to-sql-on-DuckDB and/or KustoLoco), L6 fuzz, coverage-matrix
+  regeneration + drift check vs pinned `dataexplorer-docs`.
+- **Dev tooling:** `tools/harvest_docs.py` (docs → cases), `tools/import_<lib>.py`
+  (reference corpora → cases), `tools/gen_coverage.py` (cases → matrix),
+  `tools/regen_expectations.py` (oracle → frozen expected). All pin upstream
+  commits; all record provenance/license into `NOTICE`.
+- **Fixtures:** `tests/fixtures/loader.py` for sample DBs; large data cached in CI,
+  not committed.
+
+## 10. Deliverables & sequencing
+
+1. **Corpus & harness first (parallel with M0):** case-file schema, comparison
+   engine (§4.2), `harvest_docs.py`, and the fixture loader. Land the *whole*
+   scraped corpus as `xfail` immediately — so from day one we have a measurable
+   breadth target and a green-lighting mechanism.
+2. **Import reference corpora** (kql-to-sql, ClickHouse, MS parser inputs).
+3. **Trap catalog (§6)** authored up front — these are cheap to write and are the
+   highest-value correctness guards.
+4. **Coverage matrix generator** + `docs/coverage-matrix.md`.
+5. **Frequency scan → finalize Wave 1 list**, then implement per §8, flipping
+   `xfail`→pass wave by wave.
+6. **Oracle/differential job** once Wave 1 runs, to backfill expectations the docs
+   don't pin.
+
+## 11. Open questions
+
+- **Primary oracle choice:** real ADX (ground truth, but auth/network) vs
+  kql-to-sql-on-DuckDB (local, exact-same-data, but bounded coverage) for
+  freezing expectations. Leaning kql-to-sql-on-DuckDB for the local set + ADX
+  spot-checks.
+- **Sample-dataset hosting:** where to cache `StormEvents` et al. for CI.
+- **Approx-aggregation policy:** exact tolerance/marking for `dcount`/`percentile`.
+- **Licensing sign-off:** confirm CC-BY-4.0/MIT terms for harvested docs data and
+  each imported library corpus before committing derived fixtures.
+
+## 12. Sources
+
+- Kusto docs source (harvest target): https://github.com/MicrosoftDocs/dataexplorer-docs — query reference under `data-explorer/kusto/query/`
+- Syntax conventions (entry point requested): https://learn.microsoft.com/en-us/kusto/query/syntax-conventions
+- kql-to-sql (differential tests, checklists, DuckDB oracle): https://github.com/saoc90/kql-to-sql
+- ClickHouse KQL tests (`.sql`/`.reference`): https://github.com/ClickHouse/ClickHouse/tree/master/tests/queries/0_stateless · KQL experimental status: https://github.com/ClickHouse/ClickHouse/pull/74224
+- Microsoft official parser (parse corpus): https://github.com/microsoft/Kusto-Query-Language
+- KustoLoco / BabyKusto (engine oracle): https://github.com/NeilMacMullen/kusto-loco · https://github.com/davidnx/baby-kusto-csharp
+- StormEvents sample dataset (fixtures): referenced throughout `dataexplorer-docs` query examples

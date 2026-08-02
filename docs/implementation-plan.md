@@ -255,6 +255,11 @@ duckdb_kql.to_sql(kql: str, schema=None) -> str            # translate only (no 
 
 ## 9. Testing & conformance
 
+> Expanded into a dedicated [`test-plan.md`](./test-plan.md), which covers corpus
+> harvesting from Microsoft's docs, differential testing against reference
+> engines, the KQL↔DuckDB behavioral-divergence catalog, and a usage-driven
+> implementation prioritization. Summary below.
+
 - **Parse tests** — parse a corpus of real‑world KQL; assert no crashes
   (fuzz‑friendly). Guards grammar regressions.
 - **Golden translation tests** — `to_sql(kql)` vs expected DuckDB SQL (normalized
