@@ -77,7 +77,7 @@ therefore splits into:
 6. Normalize the documented output tables (types, truncation markers) into
    expected results.
 
-**Licensing (verified — see §11):** `dataexplorer-docs` is dual-licensed —
+**Licensing (verified — see [`licensing.md`](./licensing.md)):** `dataexplorer-docs` is dual-licensed —
 prose **CC-BY-4.0** (`LICENSE`), code samples **MIT** (`LICENSE-CODE`). Since the
 example **output tables are prose**, our policy is to **harvest only the queries
 (MIT) and generate expectations ourselves on the emulator**, never committing doc
@@ -138,7 +138,7 @@ same KQL against a reference KQL engine and against `duckdb-kql`, compare with t
 | **Kusto Emulator (Docker)** ⭐ | **Ground truth** — the real MS engine, "understands KQL the same way the Azure service does" | Local Docker, free (EULA); **x64 only**, no cloud/auth needed | **Primary oracle** — generate canonical expected results for the whole corpus |
 | Real ADX / Fabric free cluster | Ground truth | Network, auth, rate limits | Spot-check / cross-cloud confirmation only |
 | `saoc90/kql-to-sql` (→ DuckDB SQL) | High for covered set; built on official parser, but a *translator* not an engine | .NET, MIT; runs *on DuckDB* so data matches exactly | Translation cross-check |
-| KustoLoco / BabyKusto | Real engine, but a *reimplementation* | .NET; verify license; own semantics | Secondary engine oracle |
+| KustoLoco / BabyKusto | Real engine, but a *reimplementation* | .NET, MIT; own semantics | Secondary engine oracle |
 | ClickHouse KQL dialect | Partial, **experimental** | C++; Apache-2.0; diverges from ADX | Extra signal only, not ground truth |
 
 ### 5.1 The Kusto Emulator — our ground-truth oracle ⭐
@@ -171,9 +171,12 @@ harvested corpus, not just the examples whose output the docs happen to print.
   and frozen expectations (below) keep local dev unblocked without it.
 - No queued/managed ingestion, no cross-cluster/external data, transient unless
   the volume is mounted, different performance profile — none of which matter for
-  correctness fixtures. Licensing: free under the MS Software License Terms with
-  `ACCEPT_EULA=Y`; **benchmarking with it is disallowed** (we only assert
-  correctness), and we pull the image in CI rather than redistributing it.
+  correctness fixtures.
+- **Licensing: reviewed and approved** — see [`licensing.md` §5](./licensing.md).
+  Free under the MS Software License Terms with `ACCEPT_EULA=Y`. Binding
+  constraints on this design: **never redistribute the image** (CI pulls from MCR
+  by digest), **never publish performance numbers** from it, and keep it
+  **dev/CI-only — never a runtime dependency**.
 
 ### 5.2 Freeze-and-compare workflow
 1. `tools/regen_expectations.py` spins up the emulator (via Docker Compose or
@@ -201,7 +204,7 @@ outputs), converting into our case format:
   files: KQL in, fully-expanded expected rows out. (Apache-2.0.)
 - **`microsoft/Kusto-Query-Language`** — parser test inputs: excellent **L1 parse
   corpus** (breadth of syntax), even without result expectations. (Apache-2.0.)
-- **KustoLoco** — C# test cases (semantics). (Verify license.)
+- **KustoLoco** — C# test cases (semantics). (MIT, verified.)
 
 Each import records provenance + upstream license in `NOTICE`.
 
@@ -365,121 +368,22 @@ required-pass, plus its §6 trap tests.
    are ground-truth from day one, and each feature flips `xfail`→pass against real
    ADX behavior rather than a hand-written guess.
 
-## 11. Licensing & provenance policy
+## 11. Licensing & provenance
 
-*Not legal advice — a practical working policy; the repo owner signs off.*
+Moved to its own document: **[`licensing.md`](./licensing.md)**.
 
-### 11.1 The frequency scan is not the risky part
-Counting operator/function occurrences across the docs (§8) yields **statistics**
-— facts, not copyrightable expression — and redistributes nothing. The committed
-artifact is our own ranking table. **No sign-off needed; it can proceed
-immediately.** Risk begins only when we **commit harvested content** as fixtures,
-because that is redistribution.
-
-### 11.2 `dataexplorer-docs` is dual-licensed (verified)
-| Part | File | License | Applies to |
-|------|------|---------|-----------|
-| Prose / doc body | `LICENSE` | **CC-BY-4.0** | narrative text **and the example output tables** |
-| Code samples | `LICENSE-CODE` | **MIT** | the ` ```kusto ` query blocks |
-
-The queries are MIT → trivially compatible with this MIT project (attribution
-only). The **expected-output tables are prose → CC-BY-4.0**: permissive, but a
-*different* license with attribution obligations, and embedding it would mean part
-of an MIT repo isn't MIT.
-
-### 11.3 Policy: harvest queries, generate expectations
-The emulator (§5.1) is a **licensing win as well as a fidelity win**. We therefore:
-- **Take the queries** (MIT) from the docs.
-- **Never commit the docs' output tables.** Generate expected results ourselves on
-  the Kusto Emulator (§5.2) — our own generated data, not Microsoft's prose.
-  (A doc table may be used as a transient dev-time cross-check, not committed.)
-- Record per-case provenance in the case file (`source`, `source_commit`,
-  `oracle`, image digest) — already in the §4.1 schema.
-
-This shrinks the CC-BY surface to ~zero while *improving* fidelity.
-
-### 11.4 Imported corpora — all permissive
-| Source | License | Obligation |
-|---|---|---|
-| `saoc90/kql-to-sql` | MIT | preserve notice |
-| ClickHouse KQL `.sql`/`.reference` | Apache-2.0 | notice + **state modifications** (§4) — we reformat into our case schema, so say so |
-| `microsoft/Kusto-Query-Language` (incl. vendored `Kql.g4`) | Apache-2.0 | notice + `NOTICE` |
-| KustoLoco / BabyKusto | MIT (verified) | preserve notice |
-
-None are copyleft; nothing affects our MIT license. Vendoring `Kql.g4` makes the
-repo "MIT + an Apache-2.0 subtree" — standard practice, handled by
-`NOTICE` / `THIRD-PARTY-NOTICES` plus `grammar/UPSTREAM.md`.
-
-### 11.5 Kusto Emulator EULA — review
-
-Reviewed against the actual *Microsoft Software License Terms — Azure Data
-Explorer Emulator* (accepted via `ACCEPT_EULA=Y`). **Not legal advice.**
-
-**Clearly permitted / compatible with our design**
-- §1(a) — install and use **any number of copies** on your devices for **internal
-  business purposes**. Our use (a dev/CI test oracle) is internal: we run it, we
-  never expose it.
-- §1(a) also bars use in a **"live operating environment"** — we never do; the
-  emulator is dev/CI-only and is **never a runtime dependency** (§5.2).
-
-**Prohibitions and how we comply**
-| Clause | Term | Our compliance |
-|---|---|---|
-| §2(g) | No **share/publish/distribute/lease** the software, or provide it as a stand-alone offering | We **never redistribute the image** — CI pulls it from MCR, pinned by digest. Referencing an image in CI config is not distribution. |
-| §2(d) | No **disclosing benchmark test results** to third parties without written approval | We assert **correctness only** and **never publish performance numbers** derived from it. |
-| §2(b) | No reverse engineer / decompile / **derive the source code** | We do **black-box** input→output observation, never derive source. Mitigated further by treating the **public CC-BY docs as the normative spec** and the emulator as a *checker* (below). |
-| §2(c) | No removing notices | N/A — we don't modify the image. |
-| §1(d) | Competitive-benchmarking waiver for **direct competitors** | An OSS KQL-to-SQL translator is not a direct competitor of ADX; and this is a waiver clause, not a prohibition. |
-| §3 | Feedback grants Microsoft broad rights | Be aware if we file issues/feedback. |
-| §5 | Export-control compliance | Standard. |
-| §10–11 | As-is, **no warranty**, damages capped at **US $5.00** | Reinforces: the emulator is a convenience oracle, not a guarantee. Our correctness story must not *depend* on it (see posture). |
-
-**⚠️ The one genuine ambiguity — §2(e)**
-> *"you will not … use the software for **commercial, non-profit, or
-> revenue-generating activities**"*
-
-Read literally, "non-profit activities" could sweep in an unpaid open-source
-project. That reading sits awkwardly against §1(a), which *expressly permits*
-use for "internal business purposes" (most of which are commercial) — so the
-sensible reading is that §2(e) bars using the software **as, or as part of, an
-offering** (commercial or not), rather than barring incidental dev/test use of it
-as a tool. **This is a judgment call for the repo owner**, and the one item worth
-a second opinion or a clarification request to Microsoft.
-
-**Notable absences (good news)**
-- **No "competing products" clause** — the worry flagged in earlier research does
-  not exist here (§1(d) is only a benchmarking waiver aimed at direct competitors).
-- **No general restriction on publishing the software's output.** The only
-  disclosure restriction is §2(d), specifically **benchmark** results. Microsoft
-  called that out explicitly and did *not* restrict functional output — so
-  publishing our frozen *expected-result* fixtures is not restricted by these
-  terms.
-
-**Recommended posture**
-1. Emulator stays a **dev/CI-only checker**: never shipped, never exposed as a
-   service, never a runtime dependency.
-2. **Never publish perf numbers** from it (§2(d)).
-3. Treat the **public docs (CC-BY) as the normative KQL specification** and the
-   emulator as *verification*. This keeps §2(b) comfortably clear and means the
-   project is not *dependent* on the emulator.
-4. Keep the emulator **optional and replaceable**: the freeze-and-compare design
-   (§5.2) already means contributors never need it.
-5. **Fallback if the owner is uncomfortable with §2(e):** drop to (a) the docs'
-   own published output tables (CC-BY — legally fine, just requires attribution
-   and the licensing hygiene of §11.2–11.3), and/or (b) `kql-to-sql` /
-   `KustoLoco` (both MIT). **We are not blocked either way** — the emulator is a
-   quality/convenience upgrade, not a prerequisite.
-
-### 11.6 Checklist before committing harvested data
-- [x] Read the emulator EULA — reviewed in §11.5. No restriction on publishing
-      functional output; no competing-products clause. **Owner decision pending on
-      §2(e)** ("non-profit activities") before wiring the emulator into CI.
-- [ ] `NOTICE` / `THIRD-PARTY-NOTICES` listing every upstream + license text.
-- [ ] Every case file carries `source`, `source_commit`, and upstream license.
-- [ ] No doc output tables committed (expectations are emulator-generated).
-- [ ] Apache-2.0 imports carry a "modified from" statement.
-- [ ] Large sample datasets downloaded/cached in CI, not committed; confirm
-      `StormEvents` provenance (NOAA-derived, likely public domain — verify).
+Summary of what it settles, for readers of this plan:
+- The **frequency scan** (§8) redistributes nothing — it needs no sign-off.
+- `dataexplorer-docs` is **dual-licensed**: queries are **MIT**, but prose —
+  **including the example output tables** — is **CC-BY-4.0**. So we **harvest the
+  queries and generate our own expectations** on the emulator, never committing
+  doc output tables.
+- All imported corpora and the vendored `Kql.g4` are **permissive** (MIT /
+  Apache-2.0) and compatible with shipping under MIT.
+- The **Kusto Emulator EULA has been reviewed and approved** by the repo owner for
+  dev/CI oracle use. Binding constraints: never redistribute the image, never
+  publish performance numbers from it, keep it dev/CI-only and never a runtime
+  dependency.
 
 ## 12. Open questions
 
@@ -494,12 +398,9 @@ a second opinion or a clarification request to Microsoft.
   emulator (`/kustodata` mount) and DuckDB load identical data.
 - **Approx-aggregation policy:** exact tolerance/marking for `dcount`/`percentile`
   (the emulator gives the reference values, but they're still algorithm-specific).
-- **Licensing:** resolved in §11 (docs dual-license verified; policy is harvest
-  MIT queries + generate our own expectations; emulator EULA reviewed in §11.5).
-  **One owner decision remains:** whether EULA §2(e) ("commercial, non-profit, or
-  revenue-generating activities") permits using the emulator for an OSS project.
-  If not, fall back to docs-published outputs (CC-BY) and/or kql-to-sql/KustoLoco
-  (MIT) — the plan works either way.
+- **Licensing: closed.** See [`licensing.md`](./licensing.md) — docs dual-license
+  verified, harvest-queries/generate-expectations policy set, and the emulator
+  EULA reviewed and **approved by the repo owner**.
 
 ## 13. Sources
 
