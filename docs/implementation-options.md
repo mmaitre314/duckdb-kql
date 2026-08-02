@@ -29,7 +29,7 @@ and what runtime baggage that requires.
 
 | # | Option | Core idea | Runtime deps beyond DuckDB+Python | Fidelity | Effort | Pure‑pip? |
 |---|--------|-----------|-----------------------------------|----------|--------|-----------|
-| 1 | Pure‑Python KQL→SQL transpiler | Own parser+emitter → DuckDB SQL | none | med (grows) | High | ✅ |
+| 1 | **Pure‑Python KQL→SQL transpiler ✅** | ANTLR(`Kql.g4`) parser + emitter → DuckDB SQL (+UDFs) | none | med (grows) | Med‑High | ✅ |
 | 2 | `sqlglot` KQL front‑end | Add KQL read‑dialect, transpile to DuckDB | none | med→high | High | ✅ |
 | 3 | pythonnet + official parser | Microsoft parser (AST) → our SQL emitter | .NET runtime + pythonnet | high | Med‑High | ❌ |
 | 4 | Reuse `kql-to-sql` (.NET / extension) | Call existing translator, run SQL on DuckDB | .NET or the DuckDB extension | high | Low‑Med | ❌ |
@@ -41,36 +41,52 @@ relative to reaching a *useful* subset, not 100% coverage.
 
 ---
 
-## Option 1 — Pure‑Python KQL → SQL transpiler
+## Option 1 — Pure‑Python KQL → SQL transpiler ✅ chosen direction
 
-Parse KQL in Python (own hand‑written parser, or a Python ANTLR grammar such as
-`kusto-query-language-parser`) and emit **DuckDB SQL**, then execute on DuckDB.
+Parse KQL in Python — bootstrapping from Microsoft's **official Apache‑2.0
+`grammar/Kql.g4`** compiled with **ANTLR's Python target** — and emit **DuckDB
+SQL**, then execute on DuckDB. Where a KQL function has no clean DuckDB SQL
+equivalent, fall back to a **DuckDB Python UDF** (`con.create_function(...)`),
+keeping any non‑Python code to essentially zero.
+
+> **Decision (2026‑08‑02):** we're aiming for this pure‑Python direction. See
+> "Why pure Python wins here" below and the updated closing framing.
 
 **Pros**
 - **Zero non‑Python runtime.** `pip install duckdb-kql` and go — no .NET, no
-  Node, no WASM. Best possible packaging/distribution story and matches user
-  expectations for a Python library.
+  Node, no WASM. Best packaging/distribution story and matches what users expect
+  from a Python library.
 - **DuckDB does the heavy lifting** — we inherit its speed, Arrow/Parquet, and
   scale; we only translate.
+- **We don't have to invent the grammar.** The official `Kql.g4` (~1,550 lines,
+  ~200+ rules, Apache‑2.0) → ANTLR Python target gives us a real parser cheaply;
+  `kusto-query-language-parser` already demonstrates this exact pipeline.
 - **Full control** over dialect mapping, error messages, and incremental scope.
-- Easiest to embed, test, and ship on PyPI; smallest dependency surface.
+- **Clean UDF escape hatch:** functions that don't map to DuckDB SQL become small
+  Python UDFs registered on the connection — pure Python, no compiled artifacts.
 
-**Cons**
-- **We own the parser.** KQL's grammar is large and only *unofficially*
-  documented as a grammar; no official `.g4`. Keeping up with KQL syntax is an
-  ongoing tax.
-- **Semantic gaps are the hard part**, not parsing: `dynamic`/JSON,
+**Cons / risks to manage**
+- **Semantic mapping is the real work**, not parsing: `dynamic`/JSON,
   `datetime`/`timespan` arithmetic, `has`/`contains` tokenization semantics,
   `mv-expand`, `make-series`, `parse`, percentiles, etc. Each needs a correct
-  DuckDB expansion.
-- Existing pure‑Python parser (`kusto-query-language-parser`) is **v0.0.2,
-  parse‑tree only, unproven coverage** — we may end up writing our own parser
-  anyway.
-- Risk of subtle **divergence from real ADX behavior** that's hard to detect
-  without a conformance suite.
+  DuckDB expansion (SQL or UDF).
+- **The `.g4` is a *reference* grammar** — the shipping C# parser is hand‑written,
+  so the grammar may lag or mismatch in edge cases; we may need local grammar
+  fixes. (Mitigation: pin a grammar commit; keep a conformance suite.)
+- The existing pure‑Python parser is **v0.0.2, parse‑tree only, unproven
+  coverage** — useful as a reference, but we likely generate our own from
+  `Kql.g4` rather than depend on it.
+- Risk of subtle **divergence from real ADX behavior**; needs a golden test
+  suite (Option 4/3 can serve as the oracle — see below).
+- **Per‑row Python UDFs can be slow**; prefer native SQL/vectorized expansions
+  first and reserve UDFs for genuinely hard functions.
 
-**Best when:** we want a clean, dependency‑free Python package and are willing to
-grow coverage operator‑by‑operator from an MVP.
+### Why pure Python wins here
+The whole value proposition is a **pip‑installable, embeddable** library where
+DuckDB is the engine. A .NET/WASM dependency (Options 3–6) undercuts that for
+every user to solve a problem most queries don't have. The grammar find removes
+the biggest objection to Option 1 (owning the parser), and DuckDB UDFs cover the
+long tail of function mappings **without leaving Python**.
 
 ---
 
@@ -233,23 +249,32 @@ validating other options' output against a KQL oracle, or a "correctness mode."
 - **API surface.** Regardless of engine, expose the pandas‑returning shape users
   know from `azure-kusto-python`/Kqlmagic, so migration from ADX is trivial.
 
-## Preliminary framing for the discussion (not a decision)
+## Direction (decided) and open questions
 
-Two coherent directions emerge:
+**Decided:** go **pure Python** — **Option 1**, bootstrapping the parser from
+Microsoft's official Apache‑2.0 `Kql.g4` via ANTLR's Python target, emitting
+DuckDB SQL, with **DuckDB Python UDFs** as the escape hatch for functions that
+don't map cleanly. Keep non‑Python code to ~zero.
 
-- **Pure‑Python transpiler** (Option 1 or **2**) — best long‑term fit for a
-  Python DuckDB library: no runtime baggage, DuckDB does the work, pip‑installable.
-  Cost is owning KQL parsing + semantic mapping. **Option 2 (sqlglot front‑end)**
-  is the most leveraged version of this.
-- **Reuse existing translation/engine** (Option **4**, later 3/6) — fastest to
-  broad coverage and highest fidelity, at the price of a .NET/WASM dependency and
-  dependence on a small upstream.
+**Still to settle before an implementation plan:**
+- **Parser build:** generate from `Kql.g4` with ANTLR (ship generated Python,
+  pin a grammar commit) vs. reuse/fork `kusto-query-language-parser` vs. a
+  hand‑written recursive‑descent parser for a curated subset. Leaning
+  ANTLR‑from‑`Kql.g4`.
+- **`sqlglot` (Option 2) as the *emitter* backend?** Even with our own KQL
+  front‑end, sqlglot could build/optimize the DuckDB SQL AST and handle
+  quoting/dialect details. Worth a spike — it stays pure Python.
+- **MVP scope:** which operators/functions ship first (suggest the ClickHouse
+  phase‑1 set: `where`/`project`/`extend`/`summarize`/`sort`/`take`/`top`/
+  `join`/`union`/`distinct` + common scalar/aggregate functions).
+- **Conformance oracle:** use Option 4 (`kql-to-sql`) and/or a real ADX/KustoLoco
+  instance **in CI only** (not as a runtime dependency) to generate golden
+  expected results.
+- **UDF policy:** guardrails for when a mapping may be a per‑row Python UDF vs.
+  must be native SQL, given performance.
 
-A plausible hybrid: **start on Option 4/3 to get coverage and an oracle, and to
-learn the mappings, then converge on a pure‑Python Option 1/2** for the shippable
-library — using the official‑parser path as the conformance reference.
-
-Let's discuss and pick a direction before writing an implementation plan.
+Next step: agree on the bullets above, then I'll write the implementation plan
+(package layout, parser pipeline, translation architecture, test harness).
 
 ## Sources
 
