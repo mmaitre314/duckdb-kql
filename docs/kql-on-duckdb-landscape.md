@@ -145,22 +145,45 @@ first:
   `getDiagnostics` for local syntax validation. This is the low‑level version of
   what Kustology packages.
 
-### 5.4 Pure‑Python / other‑language parsers
+### 5.4 Official ANTLR grammar in the Microsoft repo ⭐ (correcting an earlier assumption)
+
+An earlier draft repeated the common claim that "there is no official Microsoft
+ANTLR grammar." **That is wrong.** The `microsoft/Kusto-Query-Language` repo ships
+an **ANTLR4 grammar** under
+[`grammar/`](https://github.com/microsoft/Kusto-Query-Language/tree/master/grammar):
+
+- **`Kql.g4`** — the parser grammar: **~1,550 lines / ~41 KB, ~200+ parser
+  rules**. It covers the full tabular‑operator set (`where`, `summarize`, `join`,
+  `lookup`, `project`/`project-away`, `extend`, `sort`/`order`, `take`/`limit`,
+  `union`, `mv-expand`, `make-series`, `distinct`, `top`, `sample`, graph ops),
+  the full scalar‑expression hierarchy, and function‑call forms
+  (`toscalar`, `totable`, dotted/scoped functions).
+- **`KqlTokens.g4`** — the lexer/token grammar it imports.
+- a **`.antlr`** subdirectory.
+- **License: Apache‑2.0** (the repo license), i.e. safe to reuse/derive from.
+
+**Important caveat on provenance:** the *shipping* C# engine is a hand‑written
+recursive‑descent parser (see `src/Kusto.Language/Parser/*.cs`, e.g.
+`QueryGrammar.cs`, `CommandGrammar.cs`), **not** generated from these `.g4`
+files. The `.g4` grammar therefore reads as an **official reference grammar**
+that may occasionally lag the hand‑written parser and carries no semantic
+actions. Still, for our purposes it's a **massive head start**: an
+Apache‑2.0, Microsoft‑authored, comprehensive KQL grammar we can feed straight
+into ANTLR's **Python target** to generate a pure‑Python parser.
+
+### 5.5 Pure‑Python / other‑language parsers built on ANTLR
 
 - **`tedyeates/kusto-query-language-parser`** (PyPI:
-  `kusto-query-language-parser`) — a **pure‑Python ANTLR4‑based** KQL parser
-  producing a parse tree / JSON, with search helpers. **MIT**, Python ≥3.6,
-  depends on `antlr4-python3-runtime==4.8.0`. **Very early (v0.0.2, Apr 2025),
-  parse‑tree only, no SQL.** Attractive because it's dependency‑light and pure
-  Python, but its grammar coverage/maturity is unproven.
+  `kusto-query-language-parser`) — a **pure‑Python ANTLR4** KQL parser
+  producing a parse tree / JSON, with search helpers. **Apache‑2.0**, Python
+  ≥3.6, depends on `antlr4-python3-runtime==4.8.0`. Given it is ANTLR4‑based and
+  Apache‑2.0, it very likely derives from (or aligns with) Microsoft's `Kql.g4`.
+  **Very early (v0.0.2, Apr 2025), parse‑tree only, no SQL**, coverage unproven —
+  but it's a working example of exactly the pipeline we'd use (`Kql.g4` → ANTLR
+  Python runtime → parse tree).
 - **`CraftedSignal/kql-parser`** — a **Go** ANTLR4 KQL parser (extracts
-  conditions/fields/tables). Not Python, but another data point on grammar
-  availability.
-- **Grammar availability:** there is **no official Microsoft ANTLR `.g4`
-  grammar**; several unofficial community grammars exist (referenced from the
-  ANTLR ecosystem and the projects above). This matters: a from‑scratch
-  pure‑Python transpiler inherits the burden of maintaining an unofficial
-  grammar.
+  conditions/fields/tables). Not Python, but confirms the same grammar route
+  works across targets.
 
 > Note on naming collisions: "KQL" also refers to the **Kibana Query Language**
 > (e.g. `Aloshi/kql-parser`). Those projects are unrelated to Kusto and are not
@@ -214,8 +237,13 @@ which is exactly the gap this repository targets.
 3. **The official parser (`Microsoft.Azure.Kusto.Language`) is the fidelity
    ceiling**, reachable from Python via **pythonnet** (proven by **Kustology**)
    or from **JavaScript** (Microsoft ships a JS transpile of it).
-4. **Pure‑Python parsing exists but is immature** (`kusto-query-language-parser`,
-   v0.0.2, parse‑tree only); there is **no official ANTLR grammar**.
+4. **There IS an official, Apache‑2.0 ANTLR grammar** in the Microsoft repo
+   (`grammar/Kql.g4` + `KqlTokens.g4`, ~1,550 lines, ~200+ rules) — it can be
+   compiled with ANTLR's **Python target** to bootstrap a pure‑Python parser.
+   (Caveat: it's a reference grammar; the shipping C# parser is hand‑written, so
+   the grammar may lag slightly.) The existing pure‑Python parser
+   (`kusto-query-language-parser`, v0.0.2, parse‑tree only) demonstrates this
+   exact pipeline but is immature.
 5. **`sqlglot` is the natural transpiler backbone** (already outputs DuckDB SQL)
    but **lacks a KQL front‑end** — a bounded piece of net‑new work.
 6. **ClickHouse's KQL dialect** is the best **reference implementation** for
