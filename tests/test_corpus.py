@@ -71,11 +71,15 @@ def test_cases_carry_provenance() -> None:
 def test_no_expectations_harvested_from_docs() -> None:
     """Doc output tables are CC-BY prose and must never be copied in.
 
-    Expectations come from the emulator (docs/licensing.md §3).
+    Every expectation must be attributable to the emulator, which is what makes
+    it *generated* rather than *copied* (docs/licensing.md §3). A case with an
+    expectation but no oracle would mean prose leaked into the corpus.
     """
     for c in _cases():
-        assert c["expected"] is None, f"{c['id']} has a doc-sourced expectation"
-        assert c["oracle"] is None
+        if c["expected"] is not None:
+            assert c["oracle"] == "kusto-emulator", (
+                f"{c['id']} has an expectation with no oracle — possible doc-sourced result"
+            )
 
 
 def test_self_contained_cases_are_a_meaningful_share() -> None:
@@ -83,3 +87,64 @@ def test_self_contained_cases_are_a_meaningful_share() -> None:
     cases = _cases()
     inline = sum(1 for c in cases if c["inline_input"])
     assert inline / len(cases) > 0.5, "expected >50% of cases to be self-contained"
+
+
+# --- frozen expectations (test-plan §5.2) ---------------------------------
+
+#: Established by the first full emulator run. May only go UP.
+BASELINE_FROZEN = 785
+
+
+def _frozen() -> tuple[dict, ...]:
+    return tuple(c for c in _cases() if c.get("expected") is not None)
+
+
+def test_frozen_expectation_count_has_not_regressed() -> None:
+    assert len(_frozen()) >= BASELINE_FROZEN, (
+        f"frozen expectations regressed: {len(_frozen())} < {BASELINE_FROZEN}"
+    )
+
+
+def test_frozen_expectations_are_well_formed() -> None:
+    for c in _frozen():
+        exp = c["expected"]
+        assert isinstance(exp["columns"], list), c["id"]
+        assert isinstance(exp["rows"], list), c["id"]
+        # Every row must match the column arity, or comparison is meaningless.
+        for row in exp["rows"]:
+            assert len(row) == len(exp["columns"]), f"{c['id']}: ragged row"
+
+
+def test_frozen_expectations_record_their_oracle() -> None:
+    """Provenance: which engine produced this, and which image."""
+    for c in _frozen():
+        assert c["oracle"] == "kusto-emulator", c["id"]
+        assert c.get("oracle_image", "").startswith("mcr.microsoft.com/"), c["id"]
+
+
+def test_only_self_contained_cases_were_frozen() -> None:
+    """Fixture-dependent cases can't be frozen until fixtures are mounted."""
+    for c in _frozen():
+        assert c["inline_input"], f"{c['id']} was frozen without inline input"
+
+
+def test_refused_cases_have_no_expectation() -> None:
+    """A refusal must leave the expectation empty, never a partial result."""
+    for c in _cases():
+        if c.get("oracle_note"):
+            assert c["expected"] is None, c["id"]
+            assert c["oracle"] is None, c["id"]
+
+
+def test_frozen_expectations_round_trip_through_comparison() -> None:
+    """Every frozen result must compare equal to itself.
+
+    Guards against a result shape the comparison engine cannot handle (e.g.
+    unhashable payloads in the unordered path).
+    """
+    from duckdb_kql.comparison import ComparisonOptions, compare
+
+    for c in _frozen():
+        opts = ComparisonOptions.for_query(c["kql"])
+        result = compare(c["expected"], c["expected"], opts)
+        assert result.equal, f"{c['id']} does not compare equal to itself: {result}"

@@ -1,0 +1,35 @@
+# Kusto Emulator — the ground-truth oracle for expectation generation.
+#
+# Dev/CI only. Never a runtime dependency of the shipped library, never
+# redistributed — CI pulls it from MCR. See docs/licensing.md §5.
+#
+#   docker compose up -d kusto
+#   python tools/regen_expectations.py --limit 50
+#
+# Requirements: x86-64 with SSE4.2/AVX2. ARM (incl. Apple Silicon) is NOT
+# supported — that is why expectations are frozen into the case files, so the
+# everyday test loop never needs this container.
+
+services:
+  kusto:
+    # Pin by digest in CI so frozen expectations stay reproducible.
+    image: mcr.microsoft.com/azuredataexplorer/kustainer-linux:latest
+    container_name: duckdb-kql-kusto
+    environment:
+      # Accepting the Microsoft Software License Terms is required to start.
+      # Reviewed in docs/licensing.md §5 — dev/CI use, no benchmarking,
+      # no redistribution.
+      ACCEPT_EULA: "Y"
+    ports:
+      - "8080:8080"
+    mem_limit: 4g
+    volumes:
+      # Fixtures are mounted read-only; .ingest reads from here.
+      - ./tests/fixtures/kusto:/kustodata:ro
+    healthcheck:
+      # The emulator serves plain HTTP with no auth.
+      test: ["CMD-SHELL", "curl -fsS -X POST http://localhost:8080/v1/rest/query -H 'Content-Type: application/json' -d '{\"db\":\"NetDefaultDB\",\"csl\":\"print 1\"}' || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 60s
