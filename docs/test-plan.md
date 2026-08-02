@@ -31,7 +31,7 @@ a **differential oracle + a curated trap catalog** for divergence (§5–§6).
 | L1 Parse/round-trip | Does it parse without crashing? | Every KQL string we can scrape (docs + libs) | CI, every push |
 | L2 Golden translation | Does KQL→SQL emit the SQL we expect? | Small curated set | CI, every push |
 | L3 Acceptance (docs) | Do we match Microsoft's documented outputs? | Scraped `dataexplorer-docs` examples | CI, every push |
-| L4 Differential (oracle) | Do we match a reference *engine's* results? | Same corpus, run on ADX/ClickHouse-KQL/KustoLoco/kql-to-sql | CI-only / nightly |
+| L4 Differential (oracle) | Do we match the *real KQL engine's* results? | Same corpus, run on the **Kusto Emulator** (§5.1); optional ClickHouse-KQL/KustoLoco/kql-to-sql cross-checks | CI-only / nightly |
 | L5 Trap catalog | Do we get the known-divergent cases right? | Hand-authored from §6 | CI, every push |
 | L6 Fuzz/metamorphic | Does it stay robust on odd inputs? | Grammar-driven + mutations | Nightly |
 
@@ -135,16 +135,62 @@ same KQL against a reference KQL engine and against `duckdb-kql`, compare with t
 
 | Oracle | Fidelity | Cost / notes | Role |
 |--------|----------|--------------|------|
-| **Real ADX / Fabric free cluster** | Highest (ground truth) | Network, auth, rate limits | Nightly, canonical answers for the corpus |
-| **`saoc90/kql-to-sql` (→ DuckDB SQL)** | High for covered set; built on official parser | .NET, MIT; runs *on DuckDB* so data matches exactly | Best local oracle; also a translation cross-check |
-| **KustoLoco / BabyKusto** | Real KQL engine | .NET; verify license; own execution semantics | Local oracle for engine semantics |
-| **ClickHouse KQL dialect** | Partial, **experimental** (marked so upstream) | C++; Apache-2.0; diverges from ADX in places | Extra signal, not ground truth |
+| **Kusto Emulator (Docker)** ⭐ | **Ground truth** — the real MS engine, "understands KQL the same way the Azure service does" | Local Docker, free (EULA); **x64 only**, no cloud/auth needed | **Primary oracle** — generate canonical expected results for the whole corpus |
+| Real ADX / Fabric free cluster | Ground truth | Network, auth, rate limits | Spot-check / cross-cloud confirmation only |
+| `saoc90/kql-to-sql` (→ DuckDB SQL) | High for covered set; built on official parser, but a *translator* not an engine | .NET, MIT; runs *on DuckDB* so data matches exactly | Translation cross-check |
+| KustoLoco / BabyKusto | Real engine, but a *reimplementation* | .NET; verify license; own semantics | Secondary engine oracle |
+| ClickHouse KQL dialect | Partial, **experimental** | C++; Apache-2.0; diverges from ADX | Extra signal only, not ground truth |
 
-**Recommended default:** generate canonical expected results **once** from ADX
-(or kql-to-sql-on-DuckDB) in a nightly/offline job, **freeze them into the case
-files**, and run the fast L3 comparison against those frozen expectations on every
-push. This keeps per-push CI hermetic (no .NET/network) while still being
-oracle-backed. Oracles are **never runtime dependencies** — dev/CI only.
+### 5.1 The Kusto Emulator — our ground-truth oracle ⭐
+
+The user's suggestion is the key unlock. Microsoft ships the **Kusto Emulator**
+(a.k.a. `kustainer`), a Docker image that runs the **real Kusto query engine**
+locally and — per Microsoft — *"understands KQL the same way the Azure service
+does."* That makes it **ground truth**, unlike a translator (`kql-to-sql`) or a
+reimplementation (`KustoLoco`, ClickHouse). It removes the only bad option we had
+(cloud ADX with auth/network) and lets us derive expected results for the *entire*
+harvested corpus, not just the examples whose output the docs happen to print.
+
+**Mechanics (all confirmed from MS docs):**
+- Image: `mcr.microsoft.com/azuredataexplorer/kustainer-linux:latest`
+  (the Docker Hub `microsoft/kusto` listing).
+- Run: `docker run -e ACCEPT_EULA=Y -m 4G -d -p 8080:8080 -v <host>:/kustodata -t <image>`
+- Endpoint: plain **HTTP on `:8080`** — query at `/v1/rest/query`, management at
+  `/v1/rest/mgmt`. **No HTTPS, no Entra auth** → trivial to automate: point
+  `azure-kusto-python` at `http://localhost:8080` with a connection string that
+  drops `AAD Federated Security`.
+- Load data with **`.create table …`** + **`.ingest into table … (@"/kustodata/…")`**
+  from the mounted volume (and inline `datatable`/`.set-or-append` since it's the
+  real engine). This lets us ingest the **exact same fixtures** we load into DuckDB.
+- Supports "all commands and queries within its architecture limitations."
+
+**Constraints to design around:**
+- **x64 only** (needs SSE4.2/AVX2); **ARM not supported** → CI must use x64 Linux
+  runners (GitHub `ubuntu-latest` is fine); **Apple-Silicon dev machines can't run
+  it natively** (emulation is slow) — so the emulator is a *CI/generation* tool,
+  and frozen expectations (below) keep local dev unblocked without it.
+- No queued/managed ingestion, no cross-cluster/external data, transient unless
+  the volume is mounted, different performance profile — none of which matter for
+  correctness fixtures. Licensing: free under the MS Software License Terms with
+  `ACCEPT_EULA=Y`; **benchmarking with it is disallowed** (we only assert
+  correctness), and we pull the image in CI rather than redistributing it.
+
+### 5.2 Freeze-and-compare workflow
+1. `tools/regen_expectations.py` spins up the emulator (via Docker Compose or
+   `testcontainers`), ingests the shared fixtures (§4.3), runs every corpus case,
+   and captures its result table.
+2. Those results are **frozen into the case files** as `expected` (with
+   `oracle: kusto-emulator` + the image digest for provenance).
+3. Per-push CI runs the fast **L3** comparison against the *frozen* expectations —
+   **hermetic, pure-Python, DuckDB-only, no Docker/.NET/network**.
+4. A **nightly** lane re-runs `regen_expectations.py` on x64 and flags any drift
+   (engine version bumps, our fixture changes). Oracles are **never runtime
+   dependencies** — CI/generation only.
+
+This gives us ADX-faithful expectations for the whole corpus while keeping the
+everyday test loop fast and dependency-free. A dedicated **Testcontainers Kusto
+module** exists (and `testcontainers-python` can run the image generically), so
+the emulator lifecycle in CI is a solved problem.
 
 **Also harvest existing libraries' test corpora** (their inputs *and* expected
 outputs), converting into our case format:
@@ -162,9 +208,11 @@ Each import records provenance + upstream license in `NOTICE`.
 ## 6. Behavioral divergence catalog (L5 — hand-authored trap tests)
 
 These are the "almost the same" cases that silently return wrong results. Each
-bullet becomes one or more targeted tests with an explicit expected value. This
-list is the **living registry of known KQL↔DuckDB semantic gaps** and should grow
-as we find more.
+bullet becomes one or more targeted tests. Crucially, we **don't hand-assert the
+expected values** — we author the *queries*, then let the **Kusto Emulator (§5.1)
+supply the ground-truth output**, so the catalog documents ADX's real behavior
+rather than our guess about it. This list is the **living registry of known
+KQL↔DuckDB semantic gaps** and should grow as we find more.
 
 **Joins & set ops**
 - `join` **default kind is `innerunique`** — it de-duplicates the *left* key set
@@ -284,15 +332,19 @@ required-pass, plus its §6 trap tests.
 
 ## 9. CI wiring & tooling
 
-- **Every push:** L1 parse, L2 golden, L3 acceptance (frozen expectations), L5
-  trap catalog. Hermetic — pure Python, DuckDB only, no .NET/network.
-- **Nightly:** L4 differential (regenerate/verify frozen expectations against
-  ADX and/or kql-to-sql-on-DuckDB and/or KustoLoco), L6 fuzz, coverage-matrix
-  regeneration + drift check vs pinned `dataexplorer-docs`.
+- **Every push (hermetic, x64 or ARM):** L1 parse, L2 golden, L3 acceptance
+  (frozen expectations), L5 trap catalog. Pure Python, DuckDB only —
+  **no Docker/.NET/network** — so it runs anywhere, including Apple-Silicon dev.
+- **Nightly (x64 Linux runner):** L4 differential — spin up the **Kusto Emulator**
+  and `regen_expectations.py` to regenerate/verify frozen expectations (with
+  optional cross-checks against kql-to-sql-on-DuckDB / KustoLoco); L6 fuzz;
+  coverage-matrix regeneration + drift check vs pinned `dataexplorer-docs`. Pin
+  the emulator **image digest** so expectations are reproducible.
 - **Dev tooling:** `tools/harvest_docs.py` (docs → cases), `tools/import_<lib>.py`
   (reference corpora → cases), `tools/gen_coverage.py` (cases → matrix),
-  `tools/regen_expectations.py` (oracle → frozen expected). All pin upstream
-  commits; all record provenance/license into `NOTICE`.
+  `tools/regen_expectations.py` (**Kusto Emulator** → frozen expected, via
+  Docker Compose / testcontainers). All pin upstream commits/digests; all record
+  provenance/license into `NOTICE`.
 - **Fixtures:** `tests/fixtures/loader.py` for sample DBs; large data cached in CI,
   not committed.
 
@@ -308,22 +360,31 @@ required-pass, plus its §6 trap tests.
 4. **Coverage matrix generator** + `docs/coverage-matrix.md`.
 5. **Frequency scan → finalize Wave 1 list**, then implement per §8, flipping
    `xfail`→pass wave by wave.
-6. **Oracle/differential job** once Wave 1 runs, to backfill expectations the docs
-   don't pin.
+6. **Kusto Emulator oracle job** (§5.1–§5.2) stood up early — even before Wave 1
+   — so expected results for the whole `xfail` corpus (and the §6 trap catalog)
+   are ground-truth from day one, and each feature flips `xfail`→pass against real
+   ADX behavior rather than a hand-written guess.
 
 ## 11. Open questions
 
-- **Primary oracle choice:** real ADX (ground truth, but auth/network) vs
-  kql-to-sql-on-DuckDB (local, exact-same-data, but bounded coverage) for
-  freezing expectations. Leaning kql-to-sql-on-DuckDB for the local set + ADX
-  spot-checks.
-- **Sample-dataset hosting:** where to cache `StormEvents` et al. for CI.
-- **Approx-aggregation policy:** exact tolerance/marking for `dcount`/`percentile`.
+- **Primary oracle: resolved → the Kusto Emulator** (§5.1), ground-truth and
+  local. Remaining sub-questions: pin a specific image tag/digest; decide whether
+  the nightly emulator lane also cross-checks against KustoLoco for engine-version
+  differences.
+- **Emulator in CI:** confirm the x64 GitHub runner + Docker works within time
+  budget; document the Apple-Silicon local-dev story (rely on frozen expectations;
+  emulator optional via slow emulation or a remote x64 box).
+- **Sample-dataset hosting:** where to cache `StormEvents` et al. so both the
+  emulator (`/kustodata` mount) and DuckDB load identical data.
+- **Approx-aggregation policy:** exact tolerance/marking for `dcount`/`percentile`
+  (the emulator gives the reference values, but they're still algorithm-specific).
 - **Licensing sign-off:** confirm CC-BY-4.0/MIT terms for harvested docs data and
-  each imported library corpus before committing derived fixtures.
+  each imported library corpus before committing derived fixtures; confirm the
+  emulator EULA covers automated CI use (pull-only, no benchmarking, no redistribution).
 
 ## 12. Sources
 
+- **Kusto Emulator (ground-truth oracle):** https://learn.microsoft.com/en-us/azure/data-explorer/kusto-emulator-overview · install/ingest: https://learn.microsoft.com/en-us/azure/data-explorer/kusto-emulator-install · image: `mcr.microsoft.com/azuredataexplorer/kustainer-linux` (Docker Hub: https://hub.docker.com/r/microsoft/kusto) · Testcontainers module: https://testcontainers.com/modules/kusto/
 - Kusto docs source (harvest target): https://github.com/MicrosoftDocs/dataexplorer-docs — query reference under `data-explorer/kusto/query/`
 - Syntax conventions (entry point requested): https://learn.microsoft.com/en-us/kusto/query/syntax-conventions
 - kql-to-sql (differential tests, checklists, DuckDB oracle): https://github.com/saoc90/kql-to-sql
