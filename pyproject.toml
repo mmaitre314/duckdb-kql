@@ -1,0 +1,51 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "duckdb-kql"
+version = "0.0.1.dev0"
+description = "Run Kusto KQL queries on DuckDB, from Python"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.9"
+authors = [{ name = "Matthieu Maitre" }]
+keywords = ["kql", "kusto", "duckdb", "sql", "analytics"]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Database",
+]
+
+# The ANTLR runtime version must match the tool version used by
+# tools/regen_parser.sh — see grammar/UPSTREAM.md.
+dependencies = [
+    "antlr4-python3-runtime==4.13.2",
+    "duckdb>=0.10",
+]
+
+[project.optional-dependencies]
+pandas = ["pandas"]
+arrow = ["pyarrow"]
+dev = ["pytest>=7", "ruff"]
+
+[project.urls]
+Homepage = "https://github.com/mmaitre314/duckdb-kql"
+Issues = "https://github.com/mmaitre314/duckdb-kql/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/duckdb_kql"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = ["error"]
+
+[tool.ruff]
+line-length = 100
+# Generated parser code is vendored verbatim — never lint or reformat it.
+extend-exclude = ["src/duckdb_kql/_antlr"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
