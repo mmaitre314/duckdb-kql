@@ -8,11 +8,11 @@
 > **DuckDB Python UDFs** as the escape hatch for functions that don't map to SQL.
 > The sqlglot‑as‑emitter question is intentionally **deferred** (see §11).
 
-> Related: [`lessons-from-bun-rewrite.md`](./lessons-from-bun-rewrite.md) reviews
-> Bun's Zig→Rust rewrite for transferable practice. Its main proposals for this
-> plan: write a normative `TRANSLATION.md` **before** the translator, keep the
-> function mapping table as **data rather than code**, and adopt "fix the rule,
-> not the query."
+> **Normative mapping spec: [`TRANSLATION.md`](./TRANSLATION.md)** — the binding
+> KQL→DuckDB conventions and semantic invariants (R1–R12) the translator must
+> follow. Read it before implementing §5 below.
+>
+> Background: [`lessons-from-bun-rewrite.md`](./lessons-from-bun-rewrite.md).
 
 ## 1. Goal & non‑goals
 
