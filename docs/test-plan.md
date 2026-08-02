@@ -9,6 +9,14 @@
 > existing KQL implementations, run it **differentially** against reference
 > engines, and drive implementation order from real usage signal.
 
+> Related: [`lessons-from-bun-rewrite.md`](./lessons-from-bun-rewrite.md) — Bun's
+> rewrite succeeded because a language-independent test suite already existed to
+> act as the conformance gate, which independently validates this plan's
+> corpus-first sequencing (§10). Its proposals here: treat the harness as a hard
+> gate, emit a **ranked worklist** from failing `xfail` cases (a ticket system),
+> implement **family-at-once** within each wave (§8), and never report a bare pass
+> percentage or weaken a test to make it pass.
+
 ## 1. The core risk this plan exists to manage
 
 Two independent problems:

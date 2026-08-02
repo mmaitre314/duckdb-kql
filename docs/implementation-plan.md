@@ -8,6 +8,12 @@
 > **DuckDB Python UDFs** as the escape hatch for functions that don't map to SQL.
 > The sqlglot‑as‑emitter question is intentionally **deferred** (see §11).
 
+> Related: [`lessons-from-bun-rewrite.md`](./lessons-from-bun-rewrite.md) reviews
+> Bun's Zig→Rust rewrite for transferable practice. Its main proposals for this
+> plan: write a normative `TRANSLATION.md` **before** the translator, keep the
+> function mapping table as **data rather than code**, and adopt "fix the rule,
+> not the query."
+
 ## 1. Goal & non‑goals
 
 **Goal.** A pip‑installable Python library that runs Kusto KQL queries against
