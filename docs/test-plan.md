@@ -77,11 +77,11 @@ therefore splits into:
 6. Normalize the documented output tables (types, truncation markers) into
    expected results.
 
-**Licensing:** `dataexplorer-docs` prose is **CC-BY-4.0** and code samples
-**MIT** (standard MicrosoftDocs `LICENSE`/`LICENSE-CODE`). We store *derived test
-fixtures*, not doc prose; still add attribution + a `NOTICE` entry and record the
-source commit/URL per case. **Verify these license files before committing
-harvested data.**
+**Licensing (verified — see §11):** `dataexplorer-docs` is dual-licensed —
+prose **CC-BY-4.0** (`LICENSE`), code samples **MIT** (`LICENSE-CODE`). Since the
+example **output tables are prose**, our policy is to **harvest only the queries
+(MIT) and generate expectations ourselves on the emulator**, never committing doc
+output tables. Attribution + `NOTICE` + per-case provenance still apply.
 
 ## 4. Corpus format, fixtures, and sample data
 
@@ -365,7 +365,72 @@ required-pass, plus its §6 trap tests.
    are ground-truth from day one, and each feature flips `xfail`→pass against real
    ADX behavior rather than a hand-written guess.
 
-## 11. Open questions
+## 11. Licensing & provenance policy
+
+*Not legal advice — a practical working policy; the repo owner signs off.*
+
+### 11.1 The frequency scan is not the risky part
+Counting operator/function occurrences across the docs (§8) yields **statistics**
+— facts, not copyrightable expression — and redistributes nothing. The committed
+artifact is our own ranking table. **No sign-off needed; it can proceed
+immediately.** Risk begins only when we **commit harvested content** as fixtures,
+because that is redistribution.
+
+### 11.2 `dataexplorer-docs` is dual-licensed (verified)
+| Part | File | License | Applies to |
+|------|------|---------|-----------|
+| Prose / doc body | `LICENSE` | **CC-BY-4.0** | narrative text **and the example output tables** |
+| Code samples | `LICENSE-CODE` | **MIT** | the ` ```kusto ` query blocks |
+
+The queries are MIT → trivially compatible with this MIT project (attribution
+only). The **expected-output tables are prose → CC-BY-4.0**: permissive, but a
+*different* license with attribution obligations, and embedding it would mean part
+of an MIT repo isn't MIT.
+
+### 11.3 Policy: harvest queries, generate expectations
+The emulator (§5.1) is a **licensing win as well as a fidelity win**. We therefore:
+- **Take the queries** (MIT) from the docs.
+- **Never commit the docs' output tables.** Generate expected results ourselves on
+  the Kusto Emulator (§5.2) — our own generated data, not Microsoft's prose.
+  (A doc table may be used as a transient dev-time cross-check, not committed.)
+- Record per-case provenance in the case file (`source`, `source_commit`,
+  `oracle`, image digest) — already in the §4.1 schema.
+
+This shrinks the CC-BY surface to ~zero while *improving* fidelity.
+
+### 11.4 Imported corpora — all permissive
+| Source | License | Obligation |
+|---|---|---|
+| `saoc90/kql-to-sql` | MIT | preserve notice |
+| ClickHouse KQL `.sql`/`.reference` | Apache-2.0 | notice + **state modifications** (§4) — we reformat into our case schema, so say so |
+| `microsoft/Kusto-Query-Language` (incl. vendored `Kql.g4`) | Apache-2.0 | notice + `NOTICE` |
+| KustoLoco / BabyKusto | MIT (verified) | preserve notice |
+
+None are copyleft; nothing affects our MIT license. Vendoring `Kql.g4` makes the
+repo "MIT + an Apache-2.0 subtree" — standard practice, handled by
+`NOTICE` / `THIRD-PARTY-NOTICES` plus `grammar/UPSTREAM.md`.
+
+### 11.5 Kusto Emulator terms
+- Free under the **Microsoft Software License Terms**, accepted via
+  `ACCEPT_EULA=Y`; MS docs explicitly endorse *"local development and automated
+  testing"* — our exact use.
+- **Prohibited:** benchmarking (we assert correctness only, never publish perf
+  numbers from it) and production use.
+- **Do not redistribute the image**; pull it in CI, pin by digest.
+- ⚠️ **Open:** the full terms (`https://aka.ms/adx.emulator.license`) could not be
+  retrieved during research. **Read them before depending on the emulator in CI**,
+  specifically for any clause on use of output or competing products.
+
+### 11.6 Checklist before committing harvested data
+- [ ] Read the emulator EULA (§11.5) and confirm CI/output use.
+- [ ] `NOTICE` / `THIRD-PARTY-NOTICES` listing every upstream + license text.
+- [ ] Every case file carries `source`, `source_commit`, and upstream license.
+- [ ] No doc output tables committed (expectations are emulator-generated).
+- [ ] Apache-2.0 imports carry a "modified from" statement.
+- [ ] Large sample datasets downloaded/cached in CI, not committed; confirm
+      `StormEvents` provenance (NOAA-derived, likely public domain — verify).
+
+## 12. Open questions
 
 - **Primary oracle: resolved → the Kusto Emulator** (§5.1), ground-truth and
   local. Remaining sub-questions: pin a specific image tag/digest; decide whether
@@ -378,11 +443,11 @@ required-pass, plus its §6 trap tests.
   emulator (`/kustodata` mount) and DuckDB load identical data.
 - **Approx-aggregation policy:** exact tolerance/marking for `dcount`/`percentile`
   (the emulator gives the reference values, but they're still algorithm-specific).
-- **Licensing sign-off:** confirm CC-BY-4.0/MIT terms for harvested docs data and
-  each imported library corpus before committing derived fixtures; confirm the
-  emulator EULA covers automated CI use (pull-only, no benchmarking, no redistribution).
+- **Licensing:** largely resolved in §11 (docs dual-license verified; policy is
+  harvest MIT queries + generate our own expectations). One item remains: **read
+  the emulator EULA** (§11.5) before depending on it in CI.
 
-## 12. Sources
+## 13. Sources
 
 - **Kusto Emulator (ground-truth oracle):** https://learn.microsoft.com/en-us/azure/data-explorer/kusto-emulator-overview · install/ingest: https://learn.microsoft.com/en-us/azure/data-explorer/kusto-emulator-install · image: `mcr.microsoft.com/azuredataexplorer/kustainer-linux` (Docker Hub: https://hub.docker.com/r/microsoft/kusto) · Testcontainers module: https://testcontainers.com/modules/kusto/
 - Kusto docs source (harvest target): https://github.com/MicrosoftDocs/dataexplorer-docs — query reference under `data-explorer/kusto/query/`
