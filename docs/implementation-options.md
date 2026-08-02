@@ -261,9 +261,17 @@ don't map cleanly. Keep non‑Python code to ~zero.
   pin a grammar commit) vs. reuse/fork `kusto-query-language-parser` vs. a
   hand‑written recursive‑descent parser for a curated subset. Leaning
   ANTLR‑from‑`Kql.g4`.
-- **`sqlglot` (Option 2) as the *emitter* backend?** Even with our own KQL
-  front‑end, sqlglot could build/optimize the DuckDB SQL AST and handle
-  quoting/dialect details. Worth a spike — it stays pure Python.
+- **`sqlglot` as the *emitter* backend (not the parser)?** sqlglot is
+  **pure Python, zero required runtime deps, MIT, Python ≥3.9** — safe for our
+  goal (optional `[rs]`/`[c]` speed extras exist but we'd skip them). It has **no
+  KQL dialect**, so it can't be our front‑end; its only candidate role is the
+  back end: build a **DuckDB expression AST** from our KQL parse tree and let
+  sqlglot render correct, properly‑quoted DuckDB SQL instead of hand‑concatenating
+  strings. **We would NOT use sqlglot's optimizer** — that's a source‑level AST
+  rewriter (qualify/annotate/lineage) needing schemas and adding overhead;
+  **DuckDB's own engine optimizer handles query performance** on whatever SQL we
+  emit. Verdict: optional convenience, decide with a small spike; low‑risk since
+  it stays pure Python and is trivial to drop for string templating.
 - **MVP scope:** which operators/functions ship first (suggest the ClickHouse
   phase‑1 set: `where`/`project`/`extend`/`summarize`/`sort`/`take`/`top`/
   `join`/`union`/`distinct` + common scalar/aggregate functions).
