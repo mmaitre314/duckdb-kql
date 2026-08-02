@@ -140,8 +140,15 @@ tool at *dev* time, and **commit the generated Python** so end users need only
 to generate (the existing PyPI `kusto-query-language-parser` pins `4.8.0`; we'll
 target a current 4.13.x unless the grammar forces otherwise).
 
-**M0 spike / risk (do first):** confirm `Kql.g4` compiles cleanly to the **Python
-target**. Microsoft's grammar may contain target‑specific options, actions, or
+**M0 spike — ✅ DONE, PASSED.** See [`m0-grammar-spike.md`](./m0-grammar-spike.md).
+`Kql.g4` compiles to the Python target with **zero diagnostics** (ANTLR 4.13.2)
+and parses **97.8% of in-scope** real doc queries (1,281/1,427 raw; the rest are
+graph/management/cross-cluster constructs we don't support, plus 21 mislabeled
+non-query blocks). Only **one** genuine gap touches Wave 1 (`in` with a tabular
+subquery). The hand-written-parser fallback is **not needed**.
+
+Original spike statement, for the record: confirm `Kql.g4` compiles cleanly to
+the **Python target**. Microsoft's grammar may contain target‑specific options, actions, or
 semantic predicates (it's maintained as a *reference* alongside a hand‑written C#
 parser). Tasks:
 - Run the ANTLR tool with `-Dlanguage=Python3`; catch target‑specific constructs.
