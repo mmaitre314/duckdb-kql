@@ -242,7 +242,20 @@ duckdb_kql.to_sql(kql: str, schema=None) -> str            # translate only (no 
 - `parse(kql)` returns a CST; smoke test on a corpus of real KQL queries.
 - IR dataclasses + `lower.py` for the MVP operator set.
 
-**M1 — MVP transpiler (first useful release).**
+**M1 — MVP transpiler (first useful release). 🚧 IN PROGRESS.**
+
+*Wave 1 landed:* the full pipeline runs end to end — `parse → lower → translate
+→ DuckDB`. Sources `print` / `datatable` / table refs; operators `where`,
+`project`, `extend`, `take`, `sort`, `count`, `distinct`; ~70 scalar and
+aggregate functions and the string/equality operator family, each row citing the
+R-rules it honours (`translate/functions.py`). Measured against the emulator's
+frozen expectations: **25 pass, 0 wrong answers, 0 invalid SQL, 0 leaked
+exceptions, 1 tracked divergence** out of 785. The remaining 718 refuse with
+`KqlUnsupportedError`; most need `summarize`, `join`, or the `StormEvents`
+fixtures. The number that matters is *0 mismatches* — coverage is meant to be
+partial at this stage, wrong answers are not.
+
+*Wave 1 remainder:*
 - Operators: `where`, `project`, `project-away`, `project-rename`, `extend`,
   `take`/`limit`, `top`, `sort`/`order`, `distinct`, `count`, `summarize`
   (`count`/`sum`/`avg`/`min`/`max`/`make_list`/`make_set`/`dcount`≈approx, `by`),

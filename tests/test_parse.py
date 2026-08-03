@@ -9,7 +9,7 @@ from __future__ import annotations
 import pytest
 
 import duckdb_kql
-from duckdb_kql import KqlSyntaxError
+from duckdb_kql import KqlSyntaxError, KqlUnsupportedError
 
 # Shapes Wave 1 must be able to parse (docs/frequency-scan-results.md).
 WAVE1_QUERIES = [
@@ -99,16 +99,26 @@ def test_parse_rejects_non_string() -> None:
         duckdb_kql.parse(42)  # type: ignore[arg-type]
 
 
-def test_translation_entry_points_fail_loudly() -> None:
-    """Unimplemented translation must refuse, never return something plausible."""
-    for call in (
-        lambda: duckdb_kql.to_sql("T | count"),
-        lambda: duckdb_kql.sql(None, "T | count"),
-        lambda: duckdb_kql.df(None, "T | count"),
-        lambda: duckdb_kql.arrow(None, "T | count"),
+def test_translation_entry_points_translate() -> None:
+    """Wave 1 constructs go all the way to SQL through the public API."""
+    sql = duckdb_kql.to_sql("T | count")
+    assert "count(*)" in sql
+    assert '"T"' in sql  # R7: identifiers are quoted, never case-folded
+
+
+def test_translation_refuses_constructs_outside_the_wave() -> None:
+    """Anything unimplemented must refuse, never return something plausible.
+
+    ``KqlUnsupportedError`` is the contract: callers can distinguish "not yet"
+    from "your query is wrong", and a silent wrong answer is impossible.
+    """
+    for kql in (
+        "T | summarize count() by a",  # operator not in Wave 1
+        "let x = 5; T | where a > x",  # let bindings must not be dropped
+        "T | where a == totimespan_unmapped(1)",  # unmapped function
     ):
-        with pytest.raises(NotImplementedError):
-            call()
+        with pytest.raises(KqlUnsupportedError):
+            duckdb_kql.to_sql(kql)
 
 
 def test_translation_entry_points_still_report_syntax_errors() -> None:

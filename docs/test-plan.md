@@ -260,6 +260,14 @@ KQL↔DuckDB semantic gaps** and should grow as we find more.
 - timespan literals (`1d`,`90m`,`100ms`,`1tick`) → `INTERVAL`; arithmetic and
   formatting round-trips.
 - `todatetime`/`totimespan` parsing of bad input → **null, not error**.
+- **CONFIRMED (open)** — `todatetime` accepts date formats DuckDB's `TRY_CAST`
+  rejects. `print todatetime('12-02-2022') == datetime('12-02-2022')` is `true`
+  in ADX and `null` on DuckDB (corpus case `todatetime-function-01`, tracked in
+  `tests/test_behavior.py::KNOWN_DIVERGENCES`). The frozen expectation proves
+  only that both sides agree, not *which* date ADX produced, so the field order
+  (`MM-DD` vs `DD-MM`) must be settled with an oracle round-trip before a
+  `try_strptime` format list is written — a guess here swaps a visible null for
+  an invisible wrong date.
 
 **Numbers & null propagation**
 - Integer vs real division; `%` sign behavior; overflow (`long` 64-bit).

@@ -18,12 +18,17 @@ with false failures, too loose hides real divergence.
 
 from __future__ import annotations
 
+import datetime as _dt
 import math
 import re
+import uuid as _uuid
 from dataclasses import dataclass, field
 from typing import Any
 
-__all__ = ["compare", "ComparisonResult", "ComparisonOptions", "is_order_significant"]
+__all__ = [
+    "compare", "ComparisonResult", "ComparisonOptions",
+    "is_order_significant", "is_nondeterministic",
+]
 
 # KQL type name -> canonical bucket. DuckDB names map to the same buckets so
 # that "long" and "BIGINT" compare equal.
@@ -47,6 +52,13 @@ _TYPE_BUCKETS = {
     "list": "dynamic", "map": "dynamic", "array": "dynamic",
     "guid": "guid", "uuid": "guid",
 }
+
+#: Functions whose value changes between runs. A frozen expectation can never
+#: be meaningfully compared against these — the emulator's answer was true at
+#: freeze time and nothing can reproduce it (R10).
+NONDETERMINISTIC_FUNCTIONS = frozenset(
+    {"now", "rand", "new_guid", "ingestion_time", "current_principal"}
+)
 
 # Aggregates whose results are estimates, not exact values (R11).
 APPROXIMATE_FUNCTIONS = frozenset(
@@ -90,6 +102,16 @@ def is_order_significant(kql: str) -> bool:
 def uses_approximate_function(kql: str) -> bool:
     lowered = kql.lower()
     return any(f"{fn}(" in lowered for fn in APPROXIMATE_FUNCTIONS)
+
+
+def is_nondeterministic(kql: str) -> bool:
+    """True if the query's result cannot be reproduced across runs.
+
+    Such a query has no stable ground truth, so comparing it against a frozen
+    expectation tests nothing. Callers should skip rather than fail.
+    """
+    lowered = kql.lower()
+    return any(f"{fn}(" in lowered for fn in NONDETERMINISTIC_FUNCTIONS)
 
 
 @dataclass
@@ -146,13 +168,101 @@ def _values_equal(a: Any, b: Any, opts: ComparisonOptions) -> bool:
         return len(a) == len(b) and all(_values_equal(x, y, opts) for x, y in zip(a, b))
     if isinstance(a, dict) and isinstance(b, dict):
         return a.keys() == b.keys() and all(_values_equal(a[k], b[k], opts) for k in a)
+
+    # A GUID arrives as a string from the emulator and as a uuid.UUID from
+    # DuckDB; compare the identifiers, not their spellings.
+    if isinstance(a, _uuid.UUID) or isinstance(b, _uuid.UUID):
+        ua, ub = _as_uuid(a), _as_uuid(b)
+        if ua is not None and ub is not None:
+            return ua == ub
+
+    # Temporal values may arrive as an ISO/KQL string from the emulator and as a
+    # Python object from DuckDB; compare the instants, not the spellings.
+    if type(a) is not type(b):
+        ta, tb = _as_timedelta(a), _as_timedelta(b)
+        if ta is not None and tb is not None:
+            return ta == tb
+        da, db = _as_datetime(a), _as_datetime(b)
+        if da is not None and db is not None:
+            return da == db
+
     return _scalar_key(a) == _scalar_key(b)
+
+
+_TIMESPAN_RE = re.compile(
+    r"^(?P<sign>-)?(?:(?P<days>\d+)\.)?(?P<h>\d{1,2}):(?P<m>\d{2}):(?P<s>\d{2})"
+    r"(?:\.(?P<frac>\d+))?$"
+)
+
+
+def _as_timedelta(v: Any) -> _dt.timedelta | None:
+    """Coerce a KQL timespan string or a Python timedelta to a timedelta.
+
+    The emulator renders a timespan as ``[-][d.]hh:mm:ss[.fffffff]`` while DuckDB
+    returns an INTERVAL as ``datetime.timedelta``. They denote the same value, so
+    comparing their *representations* would report a difference that isn't one.
+    """
+    if isinstance(v, _dt.timedelta):
+        return v
+    if isinstance(v, str):
+        m = _TIMESPAN_RE.match(v.strip())
+        if not m:
+            return None
+        frac = m.group("frac") or ""
+        micros = int((frac + "000000")[:6]) if frac else 0
+        td = _dt.timedelta(
+            days=int(m.group("days") or 0),
+            hours=int(m.group("h")),
+            minutes=int(m.group("m")),
+            seconds=int(m.group("s")),
+            microseconds=micros,
+        )
+        return -td if m.group("sign") else td
+    return None
+
+
+def _as_datetime(v: Any) -> _dt.datetime | None:
+    """Coerce an ISO-8601 string or a Python datetime to a naive UTC datetime.
+
+    KQL datetimes are always UTC (R8), so a trailing ``Z`` and an explicit
+    +00:00 offset denote the same instant as DuckDB's naive TIMESTAMP.
+    """
+    if isinstance(v, _dt.datetime):
+        dt = v
+    elif isinstance(v, str):
+        text = v.strip()
+        if not re.match(r"^\d{4}-\d{2}-\d{2}[T ]", text):
+            return None
+        try:
+            dt = _dt.datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    else:
+        return None
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(_dt.timezone.utc).replace(tzinfo=None)
+    return dt
+
+
+def _as_uuid(v: Any) -> _uuid.UUID | None:
+    if isinstance(v, _uuid.UUID):
+        return v
+    if isinstance(v, str):
+        try:
+            return _uuid.UUID(v)
+        except ValueError:
+            return None
+    return None
 
 
 def _scalar_key(v: Any) -> Any:
     """A comparable, hashable key for a scalar."""
     if v is None:
         return None
+    if isinstance(v, (_dt.datetime, _dt.timedelta)):
+        return v
+    if isinstance(v, _uuid.UUID):
+        return str(v)
     if isinstance(v, str):
         # Trailing whitespace is not semantically meaningful in these results.
         return v.strip()
