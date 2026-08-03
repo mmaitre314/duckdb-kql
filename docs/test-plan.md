@@ -383,10 +383,37 @@ KQL↔DuckDB semantic gaps** and should grow as we find more.
   not error** (DuckDB `CAST` would throw → must use `TRY_CAST`).
 - Null propagation in arithmetic/comparison; `isnull`/`isnan`/`isfinite`.
 
-**Dynamic / JSON**
-- Accessing a **missing property returns null**, never an error.
-- `parse_json`/`todynamic`; array indexing; `bag_unpack`/`mv-expand` expansion
-  order and null rows; nested access typing.
+**Dynamic / JSON — implemented, pinned by [`tests/test_dynamic.py`](../tests/test_dynamic.py)**
+- **Navigation never errors** (R9): a missing property or an out-of-range index
+  is null. A **negative index counts from the end** — DuckDB spells that
+  `$[#-1]`, and a bare `$[-1]` silently returns null instead of the last element.
+- `array_index_of` returns **-1** when absent, not null: `== -1` is how KQL
+  queries test for absence, so a null would silently change the answer.
+- `array_slice` endpoints are **inclusive** and count from the end for negatives.
+- `array_sort_asc/desc` put **nulls last**, and the result must round-trip
+  through `to_json` or SQL NULLs leak out as the invalid JSON token `NULL`.
+- **`mv-expand` has three behaviours**: an array gives one row per element; an
+  **object gives one row per key**, each a single-key bag; a **null gives one
+  row**, while an **empty array gives none**.
+- **`make_set` unions dynamic arrays** rather than collecting them — a column of
+  `["A1","A2"]` and `["A2","C1"]` yields `{A1, A2, C1}`.
+- **A `dynamic` column is typed `Object`** in the emulator's metadata, not
+  `dynamic`. Missing that left every dynamic cell compared as raw JSON text
+  against a decoded value.
+
+**Strings, numbers, hashing — measured**
+- **`%` is a mathematical modulo**: always non-negative. `-10 % 4` is `2` in KQL
+  and `-2` in DuckDB — a silent wrong answer wherever negatives appear.
+- **`tostring` uses .NET's spelling**, not SQL's: a datetime is
+  `2020-01-01T00:00:00.0000000Z` (seven fractional digits and a `Z`), a bool is
+  `True`/`False`, and a dynamic string is unquoted.
+- **Hashing goes through that string form**, so the spelling is not cosmetic:
+  `hash_md5(datetime(2020-01-01))` is the md5 of the .NET rendering. `md5`,
+  `sha1` and `sha256` match the engine byte for byte. `hash()` and
+  `hash_xxhash64()` are xxhash64 and **refuse** — DuckDB's own `hash()` is a
+  *different* function, so mapping to it would return plausible-looking wrong
+  digests, the worst possible outcome for a hash. First UDF candidate.
+- Unnamed `project`/`extend` columns are numbered from **one** (`Column1`).
 
 **Sources, membership, and visualization — implemented, pinned by
 [`tests/test_range_in_render.py`](../tests/test_range_in_render.py)**

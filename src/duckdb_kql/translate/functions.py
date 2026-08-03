@@ -140,6 +140,46 @@ SCALAR_FUNCTIONS: dict[str, FunctionSpec] = {
            "KQL timespans carry a d. prefix that DuckDB's INTERVAL cast rejects"),
         _f("timespan", "template", _TOTIMESPAN, (1,), ("R1", "R8"), "alias of totimespan"),
         _f("toguid", "template", "TRY_CAST({0} AS UUID)", (1,), ("R1",)),
+        # --- dynamic / JSON (R9: missing -> null, never an error) -----------
+        _f("parse_json", "template", "TRY_CAST({0} AS JSON)", (1,), ("R9",)),
+        _f("todynamic", "template", "TRY_CAST({0} AS JSON)", (1,), ("R9",)),
+        _f("gettype", "template", "lower(json_type({0}))", (1,), ("R9",)),
+        _f("array_length", "template", "json_array_length({0})", (1,), ("R9",)),
+        # list_concat is binary in DuckDB, so a variadic KQL call has to fold.
+        _f("array_concat", "template", "", (), ("R9",), "variadic:fold-list_concat"),
+        # array_index_of returns -1 when absent, NOT null: `== -1` is how KQL
+        # queries test for absence, so a null would silently change the answer.
+        _f("array_index_of", "template",
+           "coalesce(list_position(CAST({0} AS JSON[]), CAST(to_json({1}) AS JSON)) - 1, -1)",
+           (2,), ("R9",)),
+        # KQL's array_slice takes start and END index, both INCLUSIVE, and
+        # counts from the end for negatives. SQL slicing is 1-based.
+        _f("array_slice", "template",
+           "to_json(list_slice(CAST({0} AS JSON[]), "
+           "CASE WHEN {1} < 0 THEN {1} ELSE {1} + 1 END, "
+           "CASE WHEN {2} < 0 THEN {2} ELSE {2} + 1 END))", (3,), ("R9",)),
+        _f("array_sort_asc", "template",
+           "to_json(list_sort(CAST({0} AS JSON[])))", (1,), ("R9",)),
+        _f("array_sort_desc", "template",
+           "to_json(list_reverse_sort(CAST({0} AS JSON[])))", (1,), ("R9",)),
+        _f("array_sum", "template",
+           "CAST(list_sum(CAST({0} AS DOUBLE[])) AS DOUBLE)", (1,), ("R9",)),
+        _f("array_reverse", "template",
+           "to_json(list_reverse(CAST({0} AS JSON[])))", (1,), ("R9",)),
+        _f("pack_array", "template", "to_json([{}])", (), ("R9",), "variadic"),
+        _f("set_has_element", "template",
+           "list_contains(CAST({0} AS JSON[]), CAST(to_json({1}) AS JSON))", (2,), ("R9",)),
+        # --- hashing --------------------------------------------------------
+        # md5/sha1/sha256 match KQL's output byte for byte (verified against the
+        # emulator). `hash()` and `hash_xxhash64()` are xxhash64, which DuckDB
+        # does not provide -- and DuckDB's own hash() is a DIFFERENT function,
+        # so mapping to it would return plausible-looking wrong digests.
+        # The CAST matters: KQL hashes any type by its string form
+        # (hash_md5(123) is md5("123")), while DuckDB's md5 only takes VARCHAR
+        # and would fail to bind.
+        _f("hash_md5", "native", "md5(CAST({0} AS VARCHAR))", (1,)),
+        _f("hash_sha1", "native", "sha1(CAST({0} AS VARCHAR))", (1,)),
+        _f("hash_sha256", "native", "sha256(CAST({0} AS VARCHAR))", (1,)),
         # --- math -----------------------------------------------------------
         _f("abs", "native", "abs({0})", (1,)),
         _f("ceiling", "native", "ceil({0})", (1,)),
@@ -225,7 +265,11 @@ BINARY_OPERATORS: dict[str, BinarySpec] = {
         BinarySpec("-", "({0} - {1})"),
         BinarySpec("*", "({0} * {1})"),
         BinarySpec("/", "({0} / {1})"),
-        BinarySpec("%", "({0} % {1})"),
+        # KQL's % is a MATHEMATICAL modulo: the result takes the sign of
+        # nothing -- it is always non-negative. SQL's % takes the dividend's
+        # sign, so `-10 % 4` is 2 in KQL and -2 in DuckDB. Measured, not assumed.
+        BinarySpec("%", "((({0} % {1}) + abs({1})) % abs({1}))", ("R11",),
+                   "always non-negative, unlike SQL"),
         BinarySpec("<", "({0} < {1})"),
         BinarySpec("<=", "({0} <= {1})"),
         BinarySpec(">", "({0} > {1})"),
@@ -361,9 +405,16 @@ AGGREGATE_FUNCTIONS: dict[str, AggregateSpec] = {
         # all-null group would come back as [null, null] instead of [].
         _a("make_list", f"coalesce(list({{0}}) FILTER (WHERE {{0}} IS NOT NULL), {_EMPTY_LIST})",
            (1, 2), name_prefix="list", rules=("R4",)),
+        # make_set UNIONS dynamic arrays rather than collecting them: a column
+        # of ["A1","A2"] and ["A2","C1"] gives {A1, A2, C1}, not two arrays.
+        # Measured on the emulator. Non-array values are collected as usual, so
+        # the runtime json_type check covers both without a schema.
         _a("make_set",
-           f"coalesce(list(DISTINCT {{0}}) FILTER (WHERE {{0}} IS NOT NULL), {_EMPTY_LIST})",
-           (1, 2), name_prefix="set", rules=("R4",)),
+           "to_json(coalesce(list_distinct(flatten(list("
+           "CASE WHEN json_type(TRY_CAST({0} AS JSON)) = 'ARRAY' "
+           "THEN CAST({0} AS JSON[]) ELSE [to_json({0})] END"
+           ") FILTER (WHERE {0} IS NOT NULL))), []))",
+           (1, 2), name_prefix="set", rules=("R4", "R9")),
         _a("any", "any_value({0})", (1,)),
         _a("take_any", "any_value({0})", (1,), name_is_argument=True),
         # quantile_DISC, not quantile_cont: KQL uses nearest-rank, not linear

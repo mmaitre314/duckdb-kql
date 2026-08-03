@@ -129,6 +129,12 @@ def _lower_expr(node: Any) -> ir.Expr:
     ):
         return _lower_binary(node)
 
+    if kind == "DynamicLiteralExpression":
+        return _lower_dynamic_literal(node)
+
+    if kind == "FunctionCallOrPathPathExpression":
+        return _lower_path(node)
+
     if kind == "ListEqualityExpression":
         return _lower_in_list(node)
 
@@ -152,6 +158,26 @@ def _lower_expr(node: Any) -> ir.Expr:
         return ir.UnaryOp("-", _lower_expr(_rule_children(node)[0]))
     if kind == "UnaryPlusExpression":
         return _lower_expr(_rule_children(node)[0])
+
+    if kind == "InvocationExpression":
+        # The grammar spells a unary operator as a leading token on
+        # `invocationExpression`, so `-1` never reaches UnaryMinusExpression.
+        # Without this, `d[-1]` was reported unsupported.
+        kids = _children(node)
+        rules = _rule_children(node)
+        if len(kids) == 2 and len(rules) == 1:
+            op = kids[0].getText().strip().lower()
+            operand = _lower_expr(rules[0])
+            if op == "-":
+                if isinstance(operand, ir.Literal) and isinstance(
+                    operand.value, (int, float)
+                ):
+                    return ir.Literal(-operand.value, operand.kind)
+                return ir.UnaryOp("-", operand)
+            if op == "+":
+                return operand
+            if op in ("not", "!"):
+                return ir.UnaryOp("not", operand)
 
     raise _unsupported(node, f"expression:{kind}")
 
@@ -409,6 +435,9 @@ def _lower_operator(node: Any) -> ir.Operator:
         if kids:  # `count as Name`
             return ir.Count(kids[-1].getText())
         return ir.Count()
+
+    if kind in ("MvexpandOperator", "MvExpandOperator"):
+        return _lower_mv_expand(node, kids)
 
     if kind == "RenderOperator":
         # `render` is a *visualization* directive. The emulator returns the
@@ -763,6 +792,24 @@ def _substitute(node: Any, scalars: dict) -> Any:
         )
     if isinstance(node, ir.NamedExpr):
         return dataclasses.replace(node, expr=_substitute(node.expr, scalars))
+    if isinstance(node, ir.PathAccess):
+        # `let d = dynamic({...}); print d.a` — without this the base stays an
+        # unbound column reference and the query fails to bind.
+        return dataclasses.replace(
+            node,
+            base=_substitute(node.base, scalars),
+            steps=tuple(
+                s if s.index is None
+                else dataclasses.replace(s, index=_substitute(s.index, scalars))
+                for s in node.steps
+            ),
+        )
+    if isinstance(node, ir.InList):
+        return dataclasses.replace(
+            node,
+            value=_substitute(node.value, scalars),
+            items=tuple(_substitute(i, scalars) for i in node.items),
+        )
     if isinstance(node, ir.SortKey):
         return dataclasses.replace(node, expr=_substitute(node.expr, scalars))
     return node
@@ -895,3 +942,110 @@ def _lower_in_list(node: Any) -> ir.Expr:
                 value, (), negated, case_insensitive, _lower_query_node(r)
             )
     return ir.InList(value, tuple(items), negated, case_insensitive)
+
+
+# ---------------------------------------------------------------------------
+# dynamic / JSON
+# ---------------------------------------------------------------------------
+
+
+def _lower_dynamic_literal(node: Any) -> ir.Expr:
+    """``dynamic(<json>)`` — keep the JSON text verbatim.
+
+    KQL's JSON dialect accepts single quotes where strict JSON requires double,
+    so the payload is normalised rather than passed straight through.
+    """
+    values = [c for c in _rule_children(node) if _cls(c) == "JsonValue"]
+    if not values:
+        return ir.Literal(None, "null")
+    text = values[0].getText().strip()
+    if text.lower() == "null":
+        return ir.Literal(None, "null")
+    return ir.Literal(_normalize_json(text), "dynamic")
+
+
+def _normalize_json(text: str) -> str:
+    """Rewrite KQL's JSON spelling into strict JSON.
+
+    `dynamic({'a':1})` is legal KQL but not legal JSON, and DuckDB's parser
+    rejects it. Converting quote by quote (rather than a blind replace) keeps
+    apostrophes inside double-quoted strings intact.
+    """
+    out: list[str] = []
+    in_double = in_single = False
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        if ch == "\\" and i + 1 < len(text):
+            out.append(text[i : i + 2])
+            i += 2
+            continue
+        if ch == '"' and not in_single:
+            in_double = not in_double
+            out.append(ch)
+        elif ch == "'" and not in_double:
+            in_single = not in_single
+            out.append('"')
+        else:
+            out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def _lower_path(node: Any) -> ir.Expr:
+    """``d.a``, ``d[0]``, ``d['a']`` and chains of them."""
+    kids = _rule_children(node)
+    if not kids:
+        raise _unsupported(node, "path")
+
+    base = _lower_expr(kids[0])
+    steps: list[ir.PathStep] = []
+    for op in kids[1:]:
+        inner = _collapse(op)
+        cls = _cls(inner)
+        if cls == "FunctionCallOrPathPathOperation":
+            names = _find_all(inner, "IdentifierName")
+            if not names:
+                raise _unsupported(inner, "path step")
+            steps.append(ir.PathStep(name=names[0].getText()))
+        elif cls == "FunctionCallOrPathElementOperation":
+            exprs = _rule_children(inner)
+            if not exprs:
+                raise _unsupported(inner, "path step")
+            index = _lower_expr(exprs[0])
+            # `d['a']` is property access spelled with brackets, not an index.
+            if isinstance(index, ir.Literal) and index.kind == "string":
+                steps.append(ir.PathStep(name=str(index.value)))
+            else:
+                steps.append(ir.PathStep(index=index))
+        else:
+            raise _unsupported(inner, "path step")
+
+    if not steps:
+        return base
+    return ir.PathAccess(base, tuple(steps))
+
+
+def _lower_mv_expand(node: Any, kids: list[Any]) -> ir.Operator:
+    """``mv-expand col`` — one output row per array element."""
+    item_index = None
+    named = []
+    for k in kids:
+        text = k.getText()
+        if text.lower().startswith("with_itemindex"):
+            item_index = text.split("=", 1)[1].strip()
+            continue
+        if "Parameter" in _cls(k):
+            raise _unsupported(k, f"mv-expand parameter:{text}")
+        named.append(k)
+
+    if not named:
+        raise _unsupported(node, "mv-expand")
+    if len(named) > 1:
+        # Expanding several columns in lockstep is a different operation from
+        # expanding one, and getting it wrong silently changes the row count.
+        raise _unsupported(node, "mv-expand", )
+    target = _lower_named(named[-1])
+    if not isinstance(target.expr, ir.ColumnRef):
+        raise _unsupported(node, "mv-expand", )
+    return ir.MvExpand(target.expr.name, target.name, item_index)

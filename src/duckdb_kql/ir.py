@@ -17,11 +17,12 @@ from dataclasses import dataclass, field
 __all__ = [
     "Node", "Expr", "Operator", "Query",
     # expressions
-    "Literal", "ColumnRef", "BinaryOp", "UnaryOp", "FunctionCall", "NamedExpr", "InList",
+    "Literal", "ColumnRef", "BinaryOp", "UnaryOp", "FunctionCall", "NamedExpr",
+    "InList", "PathAccess", "PathStep",
     # sources
     "TableRef", "DataTable", "PrintSource", "RangeSource",
     # operators
-    "Summarize", "Join", "JoinKey",
+    "Summarize", "Join", "JoinKey", "MvExpand",
     "Where", "Project", "Extend", "Take", "Sort", "SortKey", "Count", "Distinct",
 ]
 
@@ -230,6 +231,38 @@ class InList(Expr):
     #: ``items`` is empty and membership is tested against the query's first
     #: column.
     subquery: Query | None = None
+
+
+@dataclass(frozen=True)
+class PathStep(Node):
+    """One step of a ``dynamic`` access: ``.name``, ``['name']`` or ``[expr]``."""
+
+    #: Set for a property step; None for an index step.
+    name: str | None = None
+    #: Set for an index step; None for a property step.
+    index: Expr | None = None
+
+
+@dataclass(frozen=True)
+class PathAccess(Expr):
+    """``d.a.b`` / ``d[0]`` / ``d['a']`` — navigation into a dynamic value.
+
+    A missing property or an out-of-range index yields **null**, never an
+    error (docs/TRANSLATION.md R9).
+    """
+
+    base: Expr
+    steps: tuple[PathStep, ...]
+
+
+@dataclass(frozen=True)
+class MvExpand(Operator):
+    """``mv-expand col`` — one output row per array element."""
+
+    column: str
+    name: str | None = None
+    #: `with_itemindex=Name` adds a 0-based position column.
+    item_index: str | None = None
 
 
 @dataclass(frozen=True)

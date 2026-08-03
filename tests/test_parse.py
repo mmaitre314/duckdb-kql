@@ -113,7 +113,7 @@ def test_translation_refuses_constructs_outside_the_wave() -> None:
     from "your query is wrong", and a silent wrong answer is impossible.
     """
     for kql in (
-        "T | mv-expand a",  # operator not yet implemented
+        "T | partition by a (take 1)",  # operator not yet implemented
         "T | evaluate bag_unpack(a)",  # operator not yet implemented
         "let f = (a:int) { a + 1 }; print f(1)",  # user-defined functions
         "T | where a == totimespan_unmapped(1)",  # unmapped function

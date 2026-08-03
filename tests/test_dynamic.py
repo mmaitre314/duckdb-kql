@@ -1,0 +1,209 @@
+"""L5 trap tests — ``dynamic``/JSON, ``mv-expand``, and hashing.
+
+All expectations measured against the Kusto Emulator. The traps here are
+unusually dense because KQL's dynamic type is *untyped at the edges*:
+
+* **navigation never errors** — a missing property or an out-of-range index is
+  null (R9), and a negative index counts from the END;
+* **``mv-expand`` has three behaviours** depending on what it is given, and the
+  empty-array and null cases differ from each other;
+* **``tostring`` is .NET's spelling, not SQL's** — which matters beyond
+  cosmetics, because ``hash_md5`` hashes the string form.
+"""
+
+from __future__ import annotations
+
+import pytest
+
+import duckdb_kql
+
+duckdb = pytest.importorskip("duckdb")
+
+
+@pytest.fixture
+def con():
+    c = duckdb.connect()
+    c.execute("SET TimeZone='UTC'")
+    return c
+
+
+def _one(con, kql):
+    return duckdb_kql.sql(con, kql).fetchall()[0][0]
+
+
+def _rows(con, kql):
+    return duckdb_kql.sql(con, kql).fetchall()
+
+
+def _json(con, kql):
+    import json
+
+    v = _one(con, kql)
+    return json.loads(v) if isinstance(v, str) else v
+
+
+# --- navigation (R9) --------------------------------------------------------
+@pytest.mark.parametrize(
+    ("expr", "expected"),
+    [
+        ("dynamic([1,2,3])[0]", 1),
+        ("dynamic([1,2,3])[2]", 3),
+        # Negative indexing counts from the END. DuckDB's JSON path spells that
+        # `$[#-1]`; a bare `$[-1]` silently returns null instead.
+        ("dynamic([1,2,3])[-1]", 3),
+        ("dynamic({'a':1}).a", 1),
+        ("dynamic({'a':1})['a']", 1),
+        ("dynamic({'a':{'b':7}}).a.b", 7),
+    ],
+)
+def test_navigation(con, expr: str, expected) -> None:
+    assert _json(con, f"print x = {expr}") == expected
+
+
+@pytest.mark.parametrize(
+    "expr",
+    ["dynamic([1,2,3])[9]", "dynamic({'a':1}).zzz", "dynamic({'a':1}).a.b"],
+)
+def test_missing_navigation_is_null_never_an_error(con, expr: str) -> None:
+    """R9 — the whole point of the dynamic type is that lookups don't throw."""
+    assert _one(con, f"print x = {expr}") is None
+
+
+# --- array functions --------------------------------------------------------
+def test_array_index_of_returns_minus_one_when_absent(con) -> None:
+    """NOT null: `== -1` is how KQL queries test for absence."""
+    assert _one(con, "print array_index_of(dynamic(['a','b']), 'b')") == 1
+    assert _one(con, "print array_index_of(dynamic(['a','b']), 'z')") == -1
+
+
+def test_array_slice_endpoints_are_inclusive(con) -> None:
+    assert _json(con, "print array_slice(dynamic([1,2,3,4]), 1, 2)") == [2, 3]
+
+
+def test_array_sort_puts_nulls_last(con) -> None:
+    assert _json(
+        con, "print array_sort_asc(dynamic([null,'blue','yellow','green',null]))"
+    ) == ["blue", "green", "yellow", None, None]
+
+
+def test_array_length_and_concat(con) -> None:
+    assert _one(con, "print array_length(dynamic([1,2,3]))") == 3
+    assert _json(con, "print array_concat(dynamic([1,2]), dynamic([3]))") == [1, 2, 3]
+
+
+def test_pack_array_accepts_mixed_types(con) -> None:
+    """A timespan inside an array is rendered KQL-style, as "00:00:02"."""
+    assert _json(con, "print pack_array(1, 'a', 2*1s)") == [1, "a", "00:00:02"]
+
+
+def test_in_against_a_dynamic_array(con) -> None:
+    """`x in (dynamic([...]))` is membership, not equality with the array."""
+    rows = _rows(
+        con, "datatable(s:string)['a','B','z'] | where s in~ (dynamic(['A','b']))"
+    )
+    assert sorted(r[0] for r in rows) == ["B", "a"]
+
+
+# --- mv-expand --------------------------------------------------------------
+def test_mv_expand_array(con) -> None:
+    assert _rows(
+        con, "datatable(a:int, b:dynamic)[1, dynamic([10,20])] | mv-expand b"
+    ) == [(1, "10"), (1, "20")]
+
+
+def test_mv_expand_object_yields_one_row_per_key(con) -> None:
+    """A bag expands to single-key bags — two rows, not one."""
+    rows = _rows(
+        con,
+        'datatable(a:int, b:dynamic)[1, dynamic({"p":"x","q":"y"})] | mv-expand b',
+    )
+    assert rows == [(1, '{"p":"x"}'), (1, '{"q":"y"}')]
+
+
+def test_mv_expand_empty_array_drops_the_row(con) -> None:
+    assert _rows(con, "datatable(a:int, b:dynamic)[1, dynamic([])] | mv-expand b") == []
+
+
+def test_mv_expand_null_keeps_one_row(con) -> None:
+    """The null case differs from the empty-array case — one row, not zero."""
+    assert _rows(
+        con, "datatable(a:int, b:dynamic)[1, dynamic(null)] | mv-expand b"
+    ) == [(1, None)]
+
+
+def test_mv_expand_with_itemindex(con) -> None:
+    rel = duckdb_kql.sql(
+        con,
+        "range x from 1 to 4 step 1 | summarize x = make_list(x) "
+        "| mv-expand with_itemindex=Index x",
+    )
+    assert list(rel.columns) == ["x", "Index"]
+    assert [r[1] for r in rel.fetchall()] == [0, 1, 2, 3]
+
+
+def test_mv_expand_of_several_columns_refuses(con) -> None:
+    """Expanding in lockstep is a different operation; guessing changes rowcount."""
+    with pytest.raises(duckdb_kql.KqlUnsupportedError):
+        duckdb_kql.to_sql("T | mv-expand a, b")
+
+
+# --- tostring / hashing -----------------------------------------------------
+def test_tostring_uses_dotnet_spelling(con) -> None:
+    """Not cosmetic: hash_md5 hashes this string, so a wrong form is a wrong digest."""
+    assert _one(con, "print tostring(datetime(2020-01-01))") == (
+        "2020-01-01T00:00:00.0000000Z"
+    )
+
+
+def test_tostring_of_a_dynamic_string_is_unquoted(con) -> None:
+    assert _one(con, "print tostring(dynamic({'a':'s'}).a)") == "s"
+
+
+@pytest.mark.parametrize(
+    ("expr", "expected"),
+    [
+        ("hash_md5('World')", "f5a7924e621e84c9280a9a27e1bcb7f6"),
+        ("hash_sha1('abc')", "a9993e364706816aba3e25717850c26c9cd0d89d"),
+        (
+            "hash_sha256('abc')",
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+        ),
+        # Hashing a non-string goes through KQL's string form.
+        ("hash_md5(datetime(2020-01-01))", "786c530672d1f8db31fee25ea8a9390b"),
+        ("hash_md5(123)", "202cb962ac59075b964b07152d234b70"),
+    ],
+)
+def test_hash_digests_match_the_engine(con, expr: str, expected: str) -> None:
+    assert _one(con, f"print {expr}") == expected
+
+
+def test_unmappable_hashes_refuse(con) -> None:
+    """`hash()`/`hash_xxhash64()` are xxhash64, which DuckDB lacks.
+
+    DuckDB's own hash() is a *different* function, so mapping to it would return
+    plausible-looking wrong digests — the worst outcome for a hash.
+    """
+    for kql in ("print hash('abc')", "print hash_xxhash64('abc')"):
+        with pytest.raises(duckdb_kql.KqlUnsupportedError):
+            duckdb_kql.to_sql(kql)
+
+
+# --- modulo -----------------------------------------------------------------
+@pytest.mark.parametrize(
+    ("expr", "expected"),
+    [("10 % 4", 2), ("-10 % 4", 2), ("10 % -4", 2), ("-10 % -4", 2)],
+)
+def test_modulo_is_always_non_negative(con, expr: str, expected: int) -> None:
+    """KQL's % is a mathematical modulo; SQL's takes the dividend's sign."""
+    assert _one(con, f"print x = {expr}") == expected
+
+
+# --- summarize over dynamic -------------------------------------------------
+def test_make_set_unions_dynamic_arrays(con) -> None:
+    """A column of arrays gives the union of their ELEMENTS, not a list of arrays."""
+    got = _json(
+        con,
+        "datatable(a:dynamic)[dynamic(['A1','A2']), dynamic(['A2','C1'])] "
+        "| summarize make_set(a)",
+    )
+    assert sorted(got) == ["A1", "A2", "C1"]

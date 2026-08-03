@@ -100,7 +100,6 @@ def test_group_key_names_and_order(clause: str, expected: list[str]) -> None:
         ("stdev(x)", 0.0),
         ("variance(x)", 0.0),
         ("make_list(x)", []),
-        ("make_set(x)", []),
         ("min(x)", None),   # min/max DO stay null
         ("max(x)", None),
     ],
@@ -108,6 +107,15 @@ def test_group_key_names_and_order(clause: str, expected: list[str]) -> None:
 def test_neutral_values_not_null(source: str, agg: str, expected) -> None:
     """A plain SQL aggregate returns NULL here; KQL does not."""
     assert _one(f"{source} | summarize {agg}") == expected
+
+
+@pytest.mark.parametrize("source", [EMPTY, ALL_NULL], ids=["empty", "all-null"])
+def test_make_set_of_nothing_is_an_empty_array(source: str) -> None:
+    """make_set yields a `dynamic` column, so it comes back as JSON text."""
+    import json
+
+    value = _one(f"{source} | summarize make_set(x)")
+    assert json.loads(value) == []
 
 
 def test_count_counts_rows_not_values() -> None:

@@ -50,8 +50,11 @@ _TYPE_BUCKETS = {
     "datetime": "datetime", "timestamp": "datetime", "date": "datetime",
     "timespan": "timespan", "interval": "timespan", "time": "timespan",
     # structured
+    # The emulator reports a dynamic column's .NET type, which is "Object" —
+    # not "dynamic". Missing it left every dynamic cell compared as raw JSON
+    # text against a decoded value.
     "dynamic": "dynamic", "json": "dynamic", "struct": "dynamic",
-    "list": "dynamic", "map": "dynamic", "array": "dynamic",
+    "list": "dynamic", "map": "dynamic", "array": "dynamic", "object": "dynamic",
     "guid": "guid", "uuid": "guid",
 }
 
@@ -277,9 +280,15 @@ def _values_equal(a: Any, b: Any, opts: ComparisonOptions, in_dynamic: bool = Fa
     # True would equal 2 (bool(2) is True). KQL keeps bool and int distinct.
     if isinstance(a, bool) or isinstance(b, bool):
         return isinstance(a, bool) and isinstance(b, bool) and a is b
+    # The emulator sends non-finite reals as the STRINGS "NaN", "Infinity" and
+    # "-Infinity" (JSON has no literal for them), while DuckDB returns floats.
+    a, b = _as_nonfinite(a), _as_nonfinite(b)
+
     if isinstance(a, (int, float)) and isinstance(b, (int, float)):
         if math.isnan(a) and math.isnan(b):
             return True
+        if math.isinf(a) or math.isinf(b):
+            return a == b
         return math.isclose(a, b, rel_tol=opts.rel_tolerance, abs_tol=opts.abs_tolerance)
     # A `dynamic` column comes back parsed from the emulator and as a JSON
     # *string* from DuckDB, so one side must be decoded before they can be
@@ -334,6 +343,18 @@ def _values_equal(a: Any, b: Any, opts: ComparisonOptions, in_dynamic: bool = Fa
             return da == db
 
     return _scalar_key(a) == _scalar_key(b)
+
+
+#: How the emulator spells the values JSON cannot represent.
+_NONFINITE = {"nan": math.nan, "infinity": math.inf, "-infinity": -math.inf,
+              "inf": math.inf, "-inf": -math.inf}
+
+
+def _as_nonfinite(v: Any) -> Any:
+    """Map "NaN"/"Infinity"/"-Infinity" onto the floats they denote."""
+    if isinstance(v, str):
+        return _NONFINITE.get(v.strip().lower(), v)
+    return v
 
 
 def _is_structured(v: Any) -> bool:
@@ -491,6 +512,7 @@ def _scalar_key(v: Any) -> Any:
         if dt_value is not None:
             return dt_value
         return text
+    v = _as_nonfinite(v)
     if isinstance(v, float) and v.is_integer():
         return int(v)
     return v
@@ -559,6 +581,18 @@ def compare(
     if string_idx:
         exp_rows = _blank_nulls(exp_rows, string_idx)
         act_rows = _blank_nulls(act_rows, string_idx)
+
+    # A `dynamic` column comes back decoded from the emulator (1, 's', [1,2,3])
+    # and as JSON *text* from DuckDB ('1', '"s"', '[1,2,3]'). Structured values
+    # are already decoded downstream, but a JSON *scalar* is not — '1' would be
+    # compared against 1 and reported as a difference.
+    dynamic_idx = [
+        i
+        for i, t in enumerate(expected.get("column_types") or [])
+        if normalize_type(t) == "dynamic"
+    ]
+    if dynamic_idx:
+        act_rows = _decode_json_cells(act_rows, dynamic_idx)
 
     if len(exp_cols) != len(act_cols):
         diffs.append(f"column count {len(exp_cols)} != {len(act_cols)}")
@@ -707,5 +741,24 @@ def _blank_nulls(rows: list[list[Any]], indexes: list[int]) -> list[list[Any]]:
         for i in indexes:
             if i < len(new) and new[i] is None:
                 new[i] = ""
+        out.append(new)
+    return out
+
+
+def _decode_json_cells(rows: list[list[Any]], indexes: list[int]) -> list[list[Any]]:
+    """Decode JSON text in the given columns (see :func:`compare`).
+
+    Only applied to columns the *expected* side types as ``dynamic``, so a
+    genuine VARCHAR column holding JSON-looking text is left alone.
+    """
+    out = []
+    for row in rows:
+        new = list(row)
+        for i in indexes:
+            if i < len(new) and isinstance(new[i], str):
+                try:
+                    new[i] = _json.loads(new[i])
+                except ValueError:
+                    pass
         out.append(new)
     return out

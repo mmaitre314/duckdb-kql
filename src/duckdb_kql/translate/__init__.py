@@ -122,12 +122,39 @@ def render_expr(node: ir.Expr) -> str:
             )
         return spec.template.format(render_expr(node.left), render_expr(node.right))
 
+    if isinstance(node, ir.PathAccess):
+        return render_path(node)
+
     if isinstance(node, ir.InList):
         return render_in_list(node)
 
     if isinstance(node, ir.FunctionCall):
         if node.name.lower() == "bin":
             return render_bin(node)
+        if node.name.lower() == "tostring" and len(node.args) == 1:
+            return render_kql_tostring(node.args[0])
+        if node.name.lower() == "pack_array":
+            # json_array() takes mixed types, which to_json([...]) cannot —
+            # and it renders an INTERVAL as KQL spells it ("00:00:02").
+            return f"json_array({', '.join(render_expr(a) for a in node.args)})"
+        if node.name.lower() in ("hash_md5", "hash_sha1", "hash_sha256"):
+            fn = {"hash_md5": "md5", "hash_sha1": "sha1", "hash_sha256": "sha256"}[
+                node.name.lower()
+            ]
+            if len(node.args) == 1:
+                # Hashing goes through KQL's *string* form, so a datetime must
+                # be spelled the way KQL spells it or the digest is wrong —
+                # silently, and in security-relevant code.
+                return f"{fn}({render_kql_tostring(node.args[0])})"
+        if node.name.lower() == "array_concat":
+            # DuckDB's list_concat is binary; KQL's array_concat is variadic.
+            args = [f"CAST({render_expr(a)} AS JSON[])" for a in node.args]
+            if not args:
+                return "CAST('[]' AS JSON)"
+            folded = args[0]
+            for nxt in args[1:]:
+                folded = f"list_concat({folded}, {nxt})"
+            return f"CAST({folded} AS JSON)"
         if node.name.lower() in ("totimespan", "timespan") and len(node.args) == 1:
             # `totimespan(4d)` hands us an INTERVAL, not a string — the string
             # parser would fail to bind. Converting an already-converted value
@@ -228,7 +255,9 @@ def output_name(named: ir.NamedExpr, position: int) -> str:
         return named.name
     if isinstance(named.expr, ir.ColumnRef):
         return named.expr.name
-    return f"Column{position}"
+    # KQL numbers unnamed columns from ONE, per operator: `project x+1, x+2`
+    # yields Column1, Column2. Zero-based would be off by one on every one.
+    return f"Column{position + 1}"
 
 
 # ---------------------------------------------------------------------------
@@ -333,6 +362,9 @@ def render_operator(op: ir.Operator, prev: str) -> str:
     if isinstance(op, ir.Distinct):
         cols = ", ".join(quote_ident(c) for c in op.columns)
         return f"SELECT DISTINCT {cols} FROM {prev}"
+
+    if isinstance(op, ir.MvExpand):
+        return render_mv_expand(op, prev)
 
     if isinstance(op, ir.Summarize):
         return render_summarize(op, prev)
@@ -681,12 +713,38 @@ def render_in_list(node: ir.InList) -> str:
         sql = f"({value} IN ({inner}))"
         return f"(NOT {sql})" if node.negated else sql
 
+    # `x in (dynamic([...]))` tests membership in an ARRAY, not equality with
+    # one value — a plain IN would compare the value against the whole array.
+    if len(node.items) == 1 and _is_dynamic(node.items[0]):
+        arr = f"CAST({render_expr(node.items[0])} AS VARCHAR[])"
+        needle = f"CAST({value} AS VARCHAR)"
+        if node.case_insensitive:
+            arr = f"list_transform({arr}, v -> lower(v))"
+            needle = f"lower({needle})"
+        sql = f"list_contains({arr}, {needle})"
+        return f"(NOT {sql})" if node.negated else sql
+
     items = [render_expr(i) for i in node.items]
     if node.case_insensitive:
         value = f"lower({value})"
         items = [f"lower({i})" for i in items]
     sql = f"({value} IN ({', '.join(items)}))"
     return f"(NOT {sql})" if node.negated else sql
+
+
+def _is_dynamic_expr(node: ir.Expr) -> bool:
+    """Whether an expression statically yields a dynamic value."""
+    if isinstance(node, ir.PathAccess):
+        return True
+    return _is_dynamic(node)
+
+
+def _is_dynamic(node: ir.Expr) -> bool:
+    if isinstance(node, ir.Literal):
+        return node.kind == "dynamic"
+    if isinstance(node, ir.FunctionCall):
+        return node.name.lower() in ("parse_json", "todynamic", "pack_array")
+    return False
 
 
 def render_range(source: ir.RangeSource) -> str:
@@ -701,3 +759,154 @@ def render_range(source: ir.RangeSource) -> str:
         f"{render_expr(source.start)}, {render_expr(source.stop)}, "
         f"{render_expr(source.step)})) AS {quote_ident(source.name)}"
     )
+
+
+# ---------------------------------------------------------------------------
+# dynamic / JSON (R9)
+# ---------------------------------------------------------------------------
+
+
+def render_path(node: ir.PathAccess) -> str:
+    """``d.a``, ``d[0]``, ``d['a']`` — navigation into a dynamic value.
+
+    **A missing property or an out-of-range index is null, never an error**
+    (R9), which is what ``json_extract`` already does — so the mapping is a
+    good one *provided* the path is built correctly.
+
+    KQL indexes from the end with a negative index (``d[-1]`` is the last
+    element). DuckDB spells that ``$[#-1]``, so a bare ``$[-1]`` would silently
+    return null instead of the last element.
+    """
+    base = render_expr(node.base)
+
+    # A fully static path can be one json_extract call.
+    if all(s.name is not None or _static_index(s.index) is not None for s in node.steps):
+        path = "$"
+        for step in node.steps:
+            if step.name is not None:
+                path += f".{_json_path_key(step.name)}"
+            else:
+                i = _static_index(step.index)
+                path += f"[{'#' + str(i) if i < 0 else i}]"
+        return f"json_extract({base}, {quote_string(path)})"
+
+    # A runtime index has to build its own path fragment.
+    sql = base
+    for step in node.steps:
+        if step.name is not None:
+            sql = f"json_extract({sql}, {quote_string('$.' + _json_path_key(step.name))})"
+        else:
+            idx = render_expr(step.index)
+            frag = (
+                f"'$[' || CASE WHEN {idx} < 0 THEN '#' || CAST({idx} AS VARCHAR) "
+                f"ELSE CAST({idx} AS VARCHAR) END || ']'"
+            )
+            sql = f"json_extract({sql}, {frag})"
+    return sql
+
+
+def _static_index(expr: ir.Expr | None) -> int | None:
+    if isinstance(expr, ir.Literal) and isinstance(expr.value, int):
+        return expr.value
+    if isinstance(expr, ir.UnaryOp) and expr.op == "-":
+        inner = _static_index(expr.operand)
+        return None if inner is None else -inner
+    return None
+
+
+def _json_path_key(name: str) -> str:
+    """Quote a property name if it is not a bare JSON-path identifier."""
+    if name.isidentifier():
+        return name
+    escaped = name.replace('"', '\\"')
+    return f'"{escaped}"'
+
+
+def render_mv_expand(op: ir.MvExpand, prev: str) -> str:
+    """``mv-expand col`` — one output row per element.
+
+    Three shapes, all measured on the emulator:
+
+    * an **array** expands to one row per element;
+    * an **object** expands to one row per key, each a single-key bag —
+      ``{"a":1,"b":2}`` becomes two rows, not one;
+    * a **null** yields one row carrying null, while an **empty array** yields
+      *no* rows at all.
+    """
+    col = quote_ident(op.column)
+    out = quote_ident(op.name or op.column)
+    expanded = (
+        f"CAST(CASE json_type({col}) "
+        f"WHEN 'ARRAY' THEN json_extract({col}, '$[*]') "
+        f"WHEN 'OBJECT' THEN list_transform(json_keys({col}), "
+        f"k -> json_object(k, json_extract({col}, '$.\"' || k || '\"'))) "
+        f"ELSE json_array({col}) END AS JSON[])"
+    )
+    select = f"* EXCLUDE ({col}), UNNEST({expanded}) AS {out}"
+    if op.item_index:
+        # The index list must be exactly as long as the expanded list, or the
+        # two UNNESTs fall out of step and the shorter one pads with nulls.
+        length = (
+            f"CASE json_type({col}) "
+            f"WHEN 'ARRAY' THEN CAST(json_array_length({col}) AS BIGINT) "
+            f"WHEN 'OBJECT' THEN CAST(json_array_length(json_keys({col})) AS BIGINT) "
+            f"ELSE CAST(1 AS BIGINT) END"
+        )
+        select += (
+            f", UNNEST(generate_series(CAST(0 AS BIGINT), "
+            f"greatest({length}, CAST(1 AS BIGINT)) - 1)) AS {quote_ident(op.item_index)}"
+        )
+    return f"SELECT {select} FROM {prev}"
+
+
+def render_kql_tostring(node: ir.Expr) -> str:
+    """``tostring(x)`` using **KQL's** spelling, not SQL's.
+
+    Three cases differ from a plain CAST, all measured on the emulator:
+
+    * a **datetime** is ``2020-01-01T00:00:00.0000000Z`` — ISO 8601 with seven
+      fractional digits and a ``Z``, not ``2020-01-01 00:00:00``;
+    * a **bool** is ``True``/``False`` (.NET capitalisation), not ``true``;
+    * a **dynamic string** is the string itself, not its quoted JSON form.
+
+    This matters beyond formatting: ``hash_md5()`` hashes the string form, so
+    the wrong spelling produces a wrong digest with no error at all.
+    """
+    if _is_dynamic_expr(node):
+        return f"json_extract_string({render_expr(node)}, '$')"
+
+    rendered = render_expr(node)
+    if _is_datetime_expr(node):
+        # %f is microseconds (6 digits); KQL prints 100ns ticks (7), and the
+        # last is always 0 because DuckDB stores microseconds.
+        return f"(strftime({rendered}, '%Y-%m-%dT%H:%M:%S.%f') || '0Z')"
+    if _is_bool_expr(node):
+        return f"CASE WHEN {rendered} THEN 'True' ELSE 'False' END"
+    return f"CAST({rendered} AS VARCHAR)"
+
+
+#: Functions whose result is a datetime, for static type reasoning.
+_DATETIME_RETURNING = frozenset(
+    {"todatetime", "datetime", "now", "ago", "startofday", "startofmonth",
+     "startofyear", "startofweek", "endofday", "endofmonth", "endofyear"}
+)
+
+
+def _is_datetime_expr(node: ir.Expr) -> bool:
+    if isinstance(node, ir.Literal):
+        return node.kind == "datetime"
+    if isinstance(node, ir.FunctionCall):
+        return node.name.lower() in _DATETIME_RETURNING
+    return False
+
+
+def _is_bool_expr(node: ir.Expr) -> bool:
+    if isinstance(node, ir.Literal):
+        return node.kind == "bool"
+    if isinstance(node, ir.BinaryOp):
+        return node.op in (
+            "==", "!=", "<>", "<", "<=", ">", ">=", "and", "or", "=~", "!~",
+        )
+    if isinstance(node, ir.UnaryOp):
+        return node.op == "not"
+    return False
