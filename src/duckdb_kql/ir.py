@@ -22,7 +22,7 @@ __all__ = [
     # sources
     "TableRef", "DataTable", "PrintSource", "RangeSource",
     # operators
-    "Summarize", "Join", "JoinKey", "MvExpand",
+    "Summarize", "Join", "JoinKey", "MvExpand", "ProjectAway", "ProjectRename",
     "Where", "Project", "Extend", "Take", "Sort", "SortKey", "Count", "Distinct",
 ]
 
@@ -288,6 +288,20 @@ class Join(Operator):
     right: Query
     keys: tuple[JoinKey, ...]
     kind: str = "innerunique"
+
+
+@dataclass(frozen=True)
+class ProjectAway(Operator):
+    """``project-away c1, c2`` — drop columns, keep the rest in order."""
+
+    columns: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class ProjectRename(Operator):
+    """``project-rename new = old`` — rename in place, keeping position."""
+
+    renames: tuple[tuple[str, str], ...]
 
 
 @dataclass(frozen=True)

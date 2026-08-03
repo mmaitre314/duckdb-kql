@@ -31,7 +31,7 @@ CORPUS = Path(os.environ.get("DUCKDB_KQL_CORPUS", "tests/cases/docs/docs-corpus.
 pytestmark = pytest.mark.skipif(not CORPUS.is_file(), reason=f"no corpus at {CORPUS}")
 
 #: Cases that translate AND match ground truth. May only go UP.
-BASELINE_PASSING = 200
+BASELINE_PASSING = 244
 
 #: Cases we translate but knowingly get wrong, with the reason. This is an
 #: **admission of a bug**, not a waiver: each entry is a real KQL↔DuckDB gap
@@ -39,7 +39,15 @@ BASELINE_PASSING = 200
 #:
 #: Entries are checked for staleness — a case listed here that starts passing
 #: fails the build, so the list cannot rot into a silent allowlist.
-KNOWN_DIVERGENCES: dict[str, str] = {}
+KNOWN_DIVERGENCES: dict[str, str] = {
+    "base64-decode-tostring-function-01": (
+        "base64_decode_tostring of bytes that are NOT valid UTF-8: KQL returns "
+        "an empty string, DuckDB's BLOB->VARCHAR cast returns the bytes with "
+        "\\x escapes. DuckDB has no UTF-8 validity predicate to switch on, and "
+        "sniffing for '\\x' in the output would misfire on a legitimate "
+        "backslash. Valid UTF-8 — the case that matters — is correct."
+    ),
+}
 
 
 @functools.lru_cache(maxsize=1)

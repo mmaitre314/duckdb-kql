@@ -83,6 +83,15 @@ def _operator_columns(
         added = [output_name(e, i) for i, e in enumerate(op.expressions)]
         kept = [c for c in cols if c not in added]
         return kept + added
+    if isinstance(op, ir.ProjectAway):
+        return [c for c in cols if c not in op.columns]
+    if isinstance(op, ir.ProjectRename):
+        mapping = dict(op.renames)
+        return [mapping.get(c, c) for c in cols]
+    if isinstance(op, ir.MvExpand):
+        return [op.name or c if c == op.column else c for c in cols] + (
+            [op.item_index] if op.item_index else []
+        )
     if isinstance(op, ir.Count):
         return [op.name]
     if isinstance(op, ir.Distinct):

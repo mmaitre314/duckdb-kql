@@ -133,6 +133,9 @@ def render_expr(node: ir.Expr) -> str:
             return render_bin(node)
         if node.name.lower() == "tostring" and len(node.args) == 1:
             return render_kql_tostring(node.args[0])
+        special = _SPECIAL_FORMS.get(node.name.lower())
+        if special is not None:
+            return special(node)
         if node.name.lower() == "pack_array":
             # json_array() takes mixed types, which to_json([...]) cannot —
             # and it renders an INTERVAL as KQL spells it ("00:00:02").
@@ -362,6 +365,18 @@ def render_operator(op: ir.Operator, prev: str) -> str:
     if isinstance(op, ir.Distinct):
         cols = ", ".join(quote_ident(c) for c in op.columns)
         return f"SELECT DISTINCT {cols} FROM {prev}"
+
+    if isinstance(op, ir.ProjectAway):
+        excluded = ", ".join(quote_ident(c) for c in op.columns)
+        return f"SELECT * EXCLUDE ({excluded}) FROM {prev}"
+
+    if isinstance(op, ir.ProjectRename):
+        # RENAME keeps each column in its original position, which is what KQL
+        # does; re-selecting would move renamed columns to the end.
+        renames = ", ".join(
+            f"{quote_ident(old)} AS {quote_ident(new)}" for old, new in op.renames
+        )
+        return f"SELECT * RENAME ({renames}) FROM {prev}"
 
     if isinstance(op, ir.MvExpand):
         return render_mv_expand(op, prev)
@@ -910,3 +925,264 @@ def _is_bool_expr(node: ir.Expr) -> bool:
     if isinstance(node, ir.UnaryOp):
         return node.op == "not"
     return False
+
+
+# ---------------------------------------------------------------------------
+# Functions whose shape a template cannot express
+# ---------------------------------------------------------------------------
+
+
+def _render_case(node: ir.FunctionCall) -> str:
+    """``case(pred, value, pred, value, ..., else)`` — variadic CASE WHEN."""
+    args = [render_expr(a) for a in node.args]
+    if len(args) < 3 or len(args) % 2 == 0:
+        raise KqlUnsupportedError(
+            "case", hint="expects alternating predicate/value pairs plus an else"
+        )
+    parts = [f"WHEN {args[i]} THEN {args[i + 1]}" for i in range(0, len(args) - 1, 2)]
+    return f"CASE {' '.join(parts)} ELSE {args[-1]} END"
+
+
+def _render_countof(node: ir.FunctionCall) -> str:
+    """``countof(text, search [, kind])`` — occurrences, not characters.
+
+    The default kind is ``normal`` (a plain substring); ``regex`` switches to a
+    pattern. Overlapping matches are not counted in either mode.
+    """
+    args = [render_expr(a) for a in node.args]
+    kind = "normal"
+    if len(args) == 3:
+        third = node.args[2]
+        if not isinstance(third, ir.Literal):
+            raise KqlUnsupportedError("countof", hint="kind must be a literal")
+        kind = str(third.value).lower()
+    if kind == "regex":
+        return f"length(regexp_extract_all({args[0]}, {args[1]}))"
+    if kind != "normal":
+        raise KqlUnsupportedError(f"countof:{kind}")
+    return (
+        f"CAST((length({args[0]}) - length(replace({args[0]}, {args[1]}, ''))) "
+        f"/ nullif(length({args[1]}), 0) AS BIGINT)"
+    )
+
+
+def _render_zip(node: ir.FunctionCall) -> str:
+    """``zip(a, b, ...)`` — element-wise grouping into arrays.
+
+    DuckDB's ``list_zip`` builds STRUCTs, not lists, so it renders as
+    ``[{"":1,"":3}]`` rather than ``[[1,3]]``. Indexing by position instead
+    gives the arrays KQL returns.
+
+    KQL pads to the **longest** input with nulls (``zip([1,2],[3])`` is
+    ``[[1,3],[2,null]]``), which is what out-of-range list indexing yields.
+    """
+    if len(node.args) < 2:
+        raise KqlUnsupportedError("zip", hint="expects at least two arrays")
+    # to_json() first: an argument may already be a native DuckDB LIST (from
+    # make_list) rather than JSON text, and casting that straight to JSON[]
+    # fails to parse.
+    lists = [f"CAST(to_json({render_expr(a)}) AS JSON[])" for a in node.args]
+    longest = "greatest(" + ", ".join(f"len({x})" for x in lists) + ")"
+    row = ", ".join(f"{x}[i]" for x in lists)
+    return (
+        f"to_json(list_transform("
+        f"generate_series(CAST(1 AS BIGINT), CAST({longest} AS BIGINT)), "
+        f"i -> [{row}]))"
+    )
+
+
+def _render_make_datetime(node: ir.FunctionCall) -> str:
+    """``make_datetime(y, m, d [, h, mi, s])`` — missing parts default to zero."""
+    args = [render_expr(a) for a in node.args]
+    if len(args) not in (3, 6):
+        raise KqlUnsupportedError("make_datetime", hint="expects 3 or 6 arguments")
+    args += ["0"] * (6 - len(args))
+    return (
+        f"make_timestamp(CAST({args[0]} AS BIGINT), CAST({args[1]} AS BIGINT), "
+        f"CAST({args[2]} AS BIGINT), CAST({args[3]} AS BIGINT), "
+        f"CAST({args[4]} AS BIGINT), "
+        # KQL TRUNCATES the sub-second part; make_timestamp rounds, which lands
+        # a microsecond out for anything finer than a microsecond.
+        f"(floor(CAST({args[5]} AS DOUBLE) * 1000000) / 1000000))"
+    )
+
+
+def _render_make_timespan(node: ir.FunctionCall) -> str:
+    """``make_timespan(h, m [, s])`` — hours and minutes, not days."""
+    args = [render_expr(a) for a in node.args]
+    if len(args) not in (2, 3):
+        raise KqlUnsupportedError("make_timespan", hint="expects 2 or 3 arguments")
+    total = f"to_hours(CAST({args[0]} AS BIGINT)) + to_minutes(CAST({args[1]} AS BIGINT))"
+    if len(args) == 3:
+        total += f" + to_seconds(CAST({args[2]} AS BIGINT))"
+    return f"({total})"
+
+
+#: KQL datetime part names -> DuckDB's.
+_DATE_PARTS = {
+    "year": "year", "quarter": "quarter", "month": "month", "week": "week",
+    "week_of_year": "week", "day": "day", "dayofyear": "dayofyear",
+    "hour": "hour", "minute": "minute", "second": "second",
+    "millisecond": "millisecond", "microsecond": "microsecond",
+}
+
+
+def _date_part(node: ir.Expr, fn: str) -> str:
+    if not isinstance(node, ir.Literal) or node.kind != "string":
+        raise KqlUnsupportedError(fn, hint="the part must be a string literal")
+    part = _DATE_PARTS.get(str(node.value).lower())
+    if part is None:
+        raise KqlUnsupportedError(f"{fn}:{node.value}")
+    return part
+
+
+def _render_datetime_add(node: ir.FunctionCall) -> str:
+    """``datetime_add(part, amount, datetime)``."""
+    if len(node.args) != 3:
+        raise KqlUnsupportedError("datetime_add", hint="expects (part, amount, date)")
+    part = _date_part(node.args[0], "datetime_add")
+    return (
+        f"({render_expr(node.args[2])} + "
+        f"to_{part}s(CAST({render_expr(node.args[1])} AS BIGINT)))"
+    )
+
+
+def _render_datetime_diff(node: ir.FunctionCall) -> str:
+    """``datetime_diff(part, first, second)`` — first MINUS second.
+
+    DuckDB's ``date_diff`` takes the arguments the other way round, so a direct
+    mapping returns the negated answer.
+    """
+    if len(node.args) != 3:
+        raise KqlUnsupportedError("datetime_diff", hint="expects (part, first, second)")
+    part = _date_part(node.args[0], "datetime_diff")
+    return (
+        f"date_diff('{part}', {render_expr(node.args[2])}, {render_expr(node.args[1])})"
+    )
+
+
+def _render_datetime_part(node: ir.FunctionCall) -> str:
+    if len(node.args) != 2:
+        raise KqlUnsupportedError("datetime_part", hint="expects (part, date)")
+    if (
+        isinstance(node.args[0], ir.Literal)
+        and str(node.args[0].value).lower() == "nanosecond"
+    ):
+        # KQL keeps 100ns ticks; DuckDB stores microseconds. The last digit is
+        # simply not there to return, so answering would mean quietly rounding
+        # a value the caller asked for *because* they wanted that precision.
+        raise KqlUnsupportedError(
+            "datetime_part:nanosecond",
+            hint="DuckDB stores microseconds; the 100ns tick cannot be recovered",
+        )
+    part = _date_part(node.args[0], "datetime_part")
+    return f"CAST(date_part('{part}', {render_expr(node.args[1])}) AS BIGINT)"
+
+
+_SPECIAL_FORMS = {
+    "case": _render_case,
+    "countof": _render_countof,
+    "zip": _render_zip,
+    "make_datetime": _render_make_datetime,
+    "make_timespan": _render_make_timespan,
+    "datetime_add": _render_datetime_add,
+    "datetime_diff": _render_datetime_diff,
+    "datetime_part": _render_datetime_part,
+}
+
+
+#: KQL period name -> (DuckDB date_trunc unit, DuckDB interval unit).
+_PERIODS = {
+    "day": ("day", "DAY"), "month": ("month", "MONTH"), "year": ("year", "YEAR"),
+}
+
+
+def _render_period(node: ir.FunctionCall) -> str:
+    """``startof*`` / ``endof*``, with KQL's optional period offset.
+
+    Two things a template cannot express:
+
+    * the **offset** argument shifts by whole periods, and ignoring it returns
+      a plausible datetime for the *wrong* period;
+    * KQL's weeks start on **Sunday**, while DuckDB's ``date_trunc('week')``
+      starts Monday — a one-day error for every Sunday;
+    * ``endof*`` is the last instant *inside* the period, not the start of the
+      next one.
+    """
+    name = node.name.lower()
+    if not 1 <= len(node.args) <= 2:
+        raise KqlUnsupportedError(name, hint="expects (date [, offset])")
+    value = render_expr(node.args[0])
+    period = name.removeprefix("startof").removeprefix("endof")
+
+    if period == "week":
+        start = f"(date_trunc('day', {value}) - to_days(CAST(dayofweek({value}) AS INTEGER)))"
+        step = "INTERVAL 7 DAY"
+    else:
+        trunc, unit = _PERIODS[period]
+        start = f"date_trunc('{trunc}', {value})"
+        step = f"INTERVAL 1 {unit}"
+
+    if len(node.args) == 2:
+        offset = render_expr(node.args[1])
+        start = f"({start} + CAST({offset} AS BIGINT) * {step})"
+
+    if name.startswith("startof"):
+        return start
+    return f"({start} + {step} - INTERVAL 1 MICROSECOND)"
+
+
+def _render_extract_all(node: ir.FunctionCall) -> str:
+    """``extract_all(regex, text)`` — every match, grouped.
+
+    With ONE capture group KQL returns a flat array of matches; with several it
+    returns an array *per match*, each holding that match's groups. DuckDB's
+    ``regexp_extract_all`` only ever gives the flat form, so the multi-group
+    case needs building up from the group count.
+    """
+    if len(node.args) != 2:
+        raise KqlUnsupportedError("extract_all", hint="expects (regex, text)")
+    regex, text = node.args
+    pattern = render_expr(regex)
+    subject = render_expr(text)
+
+    groups = _capture_group_count(regex)
+    if groups <= 1:
+        return f"to_json(regexp_extract_all({subject}, {pattern}))"
+    names = ", ".join(f"'g{i}'" for i in range(1, groups + 1))
+    return (
+        f"to_json(list_transform("
+        f"regexp_extract_all({subject}, {pattern}), "
+        f"m -> [{', '.join(f'regexp_extract(m, {pattern}, {i})' for i in range(1, groups + 1))}]"
+        f"))".replace(f"[{names}]", "")
+    )
+
+
+def _capture_group_count(node: ir.Expr) -> int:
+    """Count capture groups in a *literal* regex; 1 when it cannot be read."""
+    if not isinstance(node, ir.Literal) or node.kind != "string":
+        return 1
+    pattern, count, i = str(node.value), 0, 0
+    while i < len(pattern):
+        c = pattern[i]
+        if c == "\\":
+            i += 2
+            continue
+        if c == "(" and not pattern.startswith("(?", i):
+            count += 1
+        i += 1
+    return max(count, 1)
+
+
+_SPECIAL_FORMS.update(
+    {
+        "extract_all": _render_extract_all,
+        **{
+            n: _render_period
+            for n in (
+                "startofday", "startofmonth", "startofyear", "startofweek",
+                "endofday", "endofmonth", "endofyear", "endofweek",
+            )
+        },
+    }
+)

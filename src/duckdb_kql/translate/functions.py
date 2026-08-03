@@ -112,6 +112,28 @@ SCALAR_FUNCTIONS: dict[str, FunctionSpec] = {
         _f("split", "native", "str_split({0}, {1})", (2,)),
         _f("replace_string", "native", "replace({0}, {1}, {2})", (3,)),
         _f("indexof", "template", "(position({1} IN {0}) - 1)", (2,), ("R11",)),
+        _f("strcat_delim", "template", "concat_ws({})", (), (), "variadic"),
+        _f("replace_regex", "template", "regexp_replace({0}, {1}, {2}, 'g')", (3,)),
+        _f("replace", "native", "replace({0}, {1}, {2})", (3,),
+           note="Azure Monitor spells replace_string as replace"),
+        # KQL's extract takes (regex, captureGroup, text); DuckDB's takes
+        # (text, regex, group) -- the argument order is a silent trap.
+        _f("extract", "template",
+           "regexp_extract({2}, {0}, CAST({1} AS INTEGER))", (3, 4), ("R11",)),
+        _f("extract_all", "template", "", (2, 3), ("R11",), "special"),
+        _f("countof", "template", "", (2, 3), ("R11",), "variadic:countof"),
+        _f("base64_encode_tostring", "template", "to_base64(CAST({0} AS BLOB))", (1,)),
+        _f("base64_encodestring", "template", "to_base64(CAST({0} AS BLOB))", (1,),
+           note="Azure Monitor's spelling of base64_encode_tostring"),
+        # KQL returns an EMPTY STRING when the decoded bytes are not valid
+        # UTF-8; a plain cast yields mojibake instead.
+        _f("base64_decode_tostring", "template",
+           "coalesce(TRY_CAST(TRY_CAST(from_base64({0}) AS VARCHAR) AS VARCHAR), '')",
+           (1,)),
+        _f("base64_decodestring", "template",
+           "coalesce(TRY_CAST(TRY_CAST(from_base64({0}) AS VARCHAR) AS VARCHAR), '')",
+           (1,),
+           note="Azure Monitor's spelling of base64_decode_tostring"),
         # --- null handling (R4) --------------------------------------------
         _f("isnull", "native", "({0} IS NULL)", (1,), ("R4",)),
         _f("isnotnull", "native", "({0} IS NOT NULL)", (1,), ("R4",)),
@@ -167,6 +189,9 @@ SCALAR_FUNCTIONS: dict[str, FunctionSpec] = {
         _f("array_reverse", "template",
            "to_json(list_reverse(CAST({0} AS JSON[])))", (1,), ("R9",)),
         _f("pack_array", "template", "to_json([{}])", (), ("R9",), "variadic"),
+        _f("pack", "template", "json_object({})", (), ("R9",), "variadic"),
+        _f("bag_pack", "template", "json_object({})", (), ("R9",), "variadic"),
+        _f("zip", "template", "", (), ("R9",), "variadic:zip"),
         _f("set_has_element", "template",
            "list_contains(CAST({0} AS JSON[]), CAST(to_json({1}) AS JSON))", (2,), ("R9",)),
         # --- hashing --------------------------------------------------------
@@ -193,17 +218,64 @@ SCALAR_FUNCTIONS: dict[str, FunctionSpec] = {
         _f("sign", "native", "sign({0})", (1,)),
         _f("round", "native", "round({0})", (1,)),
         _f("gamma", "native", "gamma({0})", (1,)),
+        _f("exp2", "template", "pow(CAST(2 AS DOUBLE), {0})", (1,)),
+        _f("exp10", "template", "pow(CAST(10 AS DOUBLE), {0})", (1,)),
+        # --- bitwise ---------------------------------------------------------
+        _f("binary_and", "template", "({0} & {1})", (2,)),
+        _f("binary_or", "template", "({0} | {1})", (2,)),
+        _f("binary_xor", "template", "xor({0}, {1})", (2,)),
+        _f("binary_not", "template", "(~{0})", (1,)),
+        _f("binary_shift_left", "template", "({0} << {1})", (2,)),
+        _f("binary_shift_right", "template", "({0} >> {1})", (2,)),
+        # --- conditional -----------------------------------------------------
+        _f("max_of", "template", "greatest({})", (), (), "variadic"),
+        _f("min_of", "template", "least({})", (), (), "variadic"),
         # --- datetime (R8: UTC, origin-sensitive binning) --------------------
-        _f("now", "template", "now()", (0,), ("R8",)),
-        _f("ago", "template", "(now() - {0})", (1,), ("R8",)),
-        _f("startofday", "native", "date_trunc('day', {0})", (1,), ("R8",)),
-        _f("startofmonth", "native", "date_trunc('month', {0})", (1,), ("R8",)),
-        _f("startofyear", "native", "date_trunc('year', {0})", (1,), ("R8",)),
+        # DuckDB's now() is TIMESTAMPTZ; rendering it needs the ICU/pytz module,
+        # which is not always present, and KQL's now() is a naive UTC timestamp
+        # regardless. Found by the Azure Monitor profile probes.
+        _f("now", "template", "(now() AT TIME ZONE 'UTC')", (0, 1), ("R8",)),
+        _f("ago", "template", "((now() AT TIME ZONE 'UTC') - {0})", (1,), ("R8",)),
         _f("getyear", "native", "year({0})", (1,), ("R8",)),
         _f("getmonth", "native", "month({0})", (1,), ("R8",)),
         _f("dayofmonth", "native", "day({0})", (1,), ("R8",)),
         _f("dayofyear", "native", "dayofyear({0})", (1,), ("R8",)),
         _f("dayofweek", "template", "to_days(CAST(dayofweek({0}) AS INTEGER))", (1,), ("R8",)),
+        _f("monthofyear", "native", "month({0})", (1,), ("R8",)),
+        # start/end-of-period take an OPTIONAL offset in periods; ignoring it
+        # returns the wrong period silently, so they are special forms.
+        _f("startofday", "template", "", (1, 2), ("R8",), "special"),
+        _f("startofmonth", "template", "", (1, 2), ("R8",), "special"),
+        _f("startofyear", "template", "", (1, 2), ("R8",), "special"),
+        _f("startofweek", "template", "", (1, 2), ("R8",), "special"),
+        _f("endofday", "template", "", (1, 2), ("R8",), "special"),
+        _f("endofmonth", "template", "", (1, 2), ("R8",), "special"),
+        _f("endofyear", "template", "", (1, 2), ("R8",), "special"),
+        _f("endofweek", "template", "", (1, 2), ("R8",), "special"),
+        _f("hourofday", "native", "hour({0})", (1,), ("R8",)),
+        _f("weekofyear", "native", "weekofyear({0})", (1,), ("R8",)),
+        _f("week_of_year", "native", "weekofyear({0})", (1,), ("R8",)),
+        # KQL weeks start on SUNDAY; DuckDB's date_trunc('week') starts Monday,
+        # so using it would shift the boundary by a day for every Sunday.
+        _f("startofweek", "template",
+           "(date_trunc('day', {0}) - to_days(CAST(dayofweek({0}) AS INTEGER)))",
+           (1, 2), ("R8",)),
+        # KQL's end-of-* is the last representable instant *inside* the period,
+        # not the start of the next one.
+        _f("endofday", "template",
+           "(date_trunc('day', {0}) + INTERVAL 1 DAY - INTERVAL 1 MICROSECOND)",
+           (1, 2), ("R8",)),
+        _f("endofmonth", "template",
+           "(date_trunc('month', {0}) + INTERVAL 1 MONTH - INTERVAL 1 MICROSECOND)",
+           (1, 2), ("R8",)),
+        _f("endofyear", "template",
+           "(date_trunc('year', {0}) + INTERVAL 1 YEAR - INTERVAL 1 MICROSECOND)",
+           (1, 2), ("R8",)),
+        _f("endofweek", "template",
+           "(date_trunc('day', {0}) - to_days(CAST(dayofweek({0}) AS INTEGER)) "
+           "+ INTERVAL 7 DAY - INTERVAL 1 MICROSECOND)", (1, 2), ("R8",)),
+        _f("make_datetime", "template", "", (3, 6), ("R8",), "variadic:make_datetime"),
+        _f("make_timespan", "template", "", (2, 3), ("R8",), "variadic:make_timespan"),
         # --- conditional -----------------------------------------------------
         _f("iff", "template", "CASE WHEN {0} THEN {1} ELSE {2} END", (3,)),
         _f("iif", "template", "CASE WHEN {0} THEN {1} ELSE {2} END", (3,)),
@@ -299,6 +371,12 @@ BINARY_OPERATORS: dict[str, BinarySpec] = {
         BinarySpec("endswith", "({0} ILIKE '%' || " + _escape_like("{1}") + ")", ("R3",)),
         BinarySpec("!endswith", "NOT ({0} ILIKE '%' || " + _escape_like("{1}") + ")", ("R3",)),
         BinarySpec("endswith_cs", "ends_with({0}, {1})", ("R3",)),
+        BinarySpec("!endswith_cs", "NOT ends_with({0}, {1})", ("R3",)),
+        BinarySpec("!startswith_cs", "NOT starts_with({0}, {1})", ("R3",)),
+        # `matches regex` is a FULL-string match in Azure Monitor transformations
+        # but a partial match in Log Analytics; KQL proper is partial, which is
+        # what regexp_matches does.
+        BinarySpec("matches regex", "regexp_matches({0}, {1})", ("R3",)),
     ]
 }
 

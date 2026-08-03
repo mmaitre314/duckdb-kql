@@ -1,0 +1,515 @@
+{
+ "profile": "azure-monitor-transformations",
+ "title": "Supported KQL features in Azure Monitor transformations",
+ "source": "https://learn.microsoft.com/en-us/azure/azure-monitor/data-collection/data-collection-transformations-kql",
+ "source_repo": "https://github.com/MicrosoftDocs/azure-monitor-docs/blob/main/articles/azure-monitor/data-collection/data-collection-transformations-kql.md",
+ "source_date": "2026-05-15",
+ "captured": "2026-08-03",
+ "note": "Azure Monitor transformations run row-by-row, so multi-row operators (summarize, join, sort, take) are deliberately absent from this profile \u2014 we support several of them anyway. Each entry carries a `probe`: a KQL snippet that must translate AND execute. Support is measured by running the probe, not by matching a function name.",
+ "tabular_operators": [
+  {
+   "name": "extend",
+   "probe": "datatable(a:int)[1] | extend b = a + 1"
+  },
+  {
+   "name": "project",
+   "probe": "datatable(a:int)[1] | project a"
+  },
+  {
+   "name": "print",
+   "probe": "print x = 1"
+  },
+  {
+   "name": "where",
+   "probe": "datatable(a:int)[1] | where a > 0"
+  },
+  {
+   "name": "parse",
+   "probe": "datatable(s:string)['a=1'] | parse s with 'a=' v:int"
+  },
+  {
+   "name": "project-away",
+   "probe": "datatable(a:int,b:int)[1,2] | project-away b"
+  },
+  {
+   "name": "project-rename",
+   "probe": "datatable(a:int)[1] | project-rename z = a"
+  },
+  {
+   "name": "datatable",
+   "probe": "datatable(a:int)[1]"
+  },
+  {
+   "name": "columnifexists",
+   "probe": "datatable(a:int)[1] | project columnifexists('a', 0)",
+   "note": "Azure Monitor spells it columnifexists, not column_ifexists"
+  }
+ ],
+ "string_operators": [
+  {
+   "name": "==",
+   "probe": "datatable(s:string)['x'] | where s == 'x'"
+  },
+  {
+   "name": "!=",
+   "probe": "datatable(s:string)['x'] | where s != 'x'"
+  },
+  {
+   "name": "=~",
+   "probe": "datatable(s:string)['x'] | where s =~ 'x'"
+  },
+  {
+   "name": "!~",
+   "probe": "datatable(s:string)['x'] | where s !~ 'x'"
+  },
+  {
+   "name": "contains",
+   "probe": "datatable(s:string)['x'] | where s contains 'x'"
+  },
+  {
+   "name": "!contains",
+   "probe": "datatable(s:string)['x'] | where s !contains 'x'"
+  },
+  {
+   "name": "contains_cs",
+   "probe": "datatable(s:string)['x'] | where s contains_cs 'x'"
+  },
+  {
+   "name": "!contains_cs",
+   "probe": "datatable(s:string)['x'] | where s !contains_cs 'x'"
+  },
+  {
+   "name": "has",
+   "probe": "datatable(s:string)['x'] | where s has 'x'"
+  },
+  {
+   "name": "!has",
+   "probe": "datatable(s:string)['x'] | where s !has 'x'"
+  },
+  {
+   "name": "has_cs",
+   "probe": "datatable(s:string)['x'] | where s has_cs 'x'"
+  },
+  {
+   "name": "!has_cs",
+   "probe": "datatable(s:string)['x'] | where s !has_cs 'x'"
+  },
+  {
+   "name": "startswith",
+   "probe": "datatable(s:string)['x'] | where s startswith 'x'"
+  },
+  {
+   "name": "!startswith",
+   "probe": "datatable(s:string)['x'] | where s !startswith 'x'"
+  },
+  {
+   "name": "startswith_cs",
+   "probe": "datatable(s:string)['x'] | where s startswith_cs 'x'"
+  },
+  {
+   "name": "!startswith_cs",
+   "probe": "datatable(s:string)['x'] | where s !startswith_cs 'x'"
+  },
+  {
+   "name": "endswith",
+   "probe": "datatable(s:string)['x'] | where s endswith 'x'"
+  },
+  {
+   "name": "!endswith",
+   "probe": "datatable(s:string)['x'] | where s !endswith 'x'"
+  },
+  {
+   "name": "endswith_cs",
+   "probe": "datatable(s:string)['x'] | where s endswith_cs 'x'"
+  },
+  {
+   "name": "!endswith_cs",
+   "probe": "datatable(s:string)['x'] | where s !endswith_cs 'x'"
+  },
+  {
+   "name": "matches regex",
+   "probe": "datatable(s:string)['x'] | where s matches regex 'x'"
+  },
+  {
+   "name": "in",
+   "probe": "datatable(s:string)['x'] | where s in ('x','y')"
+  },
+  {
+   "name": "!in",
+   "probe": "datatable(s:string)['x'] | where s !in ('y')"
+  }
+ ],
+ "scalar_functions": {
+  "bitwise": [
+   {
+    "name": "binary_and",
+    "probe": "print binary_and(3, 1)"
+   },
+   {
+    "name": "binary_or",
+    "probe": "print binary_or(2, 1)"
+   },
+   {
+    "name": "binary_not",
+    "probe": "print binary_not(1)"
+   },
+   {
+    "name": "binary_xor",
+    "probe": "print binary_xor(3, 1)"
+   },
+   {
+    "name": "binary_shift_left",
+    "probe": "print binary_shift_left(1, 2)"
+   },
+   {
+    "name": "binary_shift_right",
+    "probe": "print binary_shift_right(4, 2)"
+   }
+  ],
+  "conversion": [
+   {
+    "name": "tobool",
+    "probe": "print tobool('true')"
+   },
+   {
+    "name": "todatetime",
+    "probe": "print todatetime('2020-01-01')"
+   },
+   {
+    "name": "todouble",
+    "probe": "print todouble('1.5')"
+   },
+   {
+    "name": "toreal",
+    "probe": "print toreal('1.5')"
+   },
+   {
+    "name": "toguid",
+    "probe": "print toguid('00000000-0000-0000-0000-000000000000')"
+   },
+   {
+    "name": "toint",
+    "probe": "print toint('1')"
+   },
+   {
+    "name": "tolong",
+    "probe": "print tolong('1')"
+   },
+   {
+    "name": "tostring",
+    "probe": "print tostring(1)"
+   },
+   {
+    "name": "totimespan",
+    "probe": "print totimespan('00:01:00')"
+   }
+  ],
+  "datetime": [
+   {
+    "name": "ago",
+    "probe": "print ago(1h)"
+   },
+   {
+    "name": "datetime_add",
+    "probe": "print datetime_add('day', 1, datetime(2020-01-01))"
+   },
+   {
+    "name": "datetime_diff",
+    "probe": "print datetime_diff('day', datetime(2020-01-02), datetime(2020-01-01))"
+   },
+   {
+    "name": "datetime_part",
+    "probe": "print datetime_part('day', datetime(2020-01-02))"
+   },
+   {
+    "name": "dayofmonth",
+    "probe": "print dayofmonth(datetime(2020-01-02))"
+   },
+   {
+    "name": "dayofweek",
+    "probe": "print dayofweek(datetime(2020-01-02))"
+   },
+   {
+    "name": "dayofyear",
+    "probe": "print dayofyear(datetime(2020-01-02))"
+   },
+   {
+    "name": "endofday",
+    "probe": "print endofday(datetime(2020-01-02))"
+   },
+   {
+    "name": "endofmonth",
+    "probe": "print endofmonth(datetime(2020-01-02))"
+   },
+   {
+    "name": "endofweek",
+    "probe": "print endofweek(datetime(2020-01-02))"
+   },
+   {
+    "name": "endofyear",
+    "probe": "print endofyear(datetime(2020-01-02))"
+   },
+   {
+    "name": "getmonth",
+    "probe": "print getmonth(datetime(2020-01-02))"
+   },
+   {
+    "name": "monthofyear",
+    "probe": "print monthofyear(datetime(2020-01-02))"
+   },
+   {
+    "name": "getyear",
+    "probe": "print getyear(datetime(2020-01-02))"
+   },
+   {
+    "name": "hourofday",
+    "probe": "print hourofday(datetime(2020-01-02 05:00))"
+   },
+   {
+    "name": "make_datetime",
+    "probe": "print make_datetime(2020, 1, 2)"
+   },
+   {
+    "name": "make_timespan",
+    "probe": "print make_timespan(1, 2)"
+   },
+   {
+    "name": "now",
+    "probe": "print now()"
+   },
+   {
+    "name": "startofday",
+    "probe": "print startofday(datetime(2020-01-02))"
+   },
+   {
+    "name": "startofmonth",
+    "probe": "print startofmonth(datetime(2020-01-02))"
+   },
+   {
+    "name": "startofweek",
+    "probe": "print startofweek(datetime(2020-01-02))"
+   },
+   {
+    "name": "startofyear",
+    "probe": "print startofyear(datetime(2020-01-02))"
+   },
+   {
+    "name": "weekofyear",
+    "probe": "print week_of_year(datetime(2020-01-02))"
+   }
+  ],
+  "dynamic": [
+   {
+    "name": "array_concat",
+    "probe": "print array_concat(dynamic([1]), dynamic([2]))"
+   },
+   {
+    "name": "array_length",
+    "probe": "print array_length(dynamic([1,2]))"
+   },
+   {
+    "name": "pack",
+    "probe": "print pack('a', 1)"
+   },
+   {
+    "name": "pack_array",
+    "probe": "print pack_array(1, 2)"
+   },
+   {
+    "name": "parse_json",
+    "probe": "print parse_json('{\"a\":1}')"
+   },
+   {
+    "name": "parse_xml",
+    "probe": "print parse_xml('<a>1</a>')"
+   },
+   {
+    "name": "zip",
+    "probe": "print zip(dynamic([1,2]), dynamic([3,4]))"
+   }
+  ],
+  "math": [
+   {
+    "name": "abs",
+    "probe": "print abs(-1)"
+   },
+   {
+    "name": "bin",
+    "probe": "print bin(4.5, 1)"
+   },
+   {
+    "name": "floor",
+    "probe": "print floor(4.5)"
+   },
+   {
+    "name": "ceiling",
+    "probe": "print ceiling(4.2)"
+   },
+   {
+    "name": "exp",
+    "probe": "print exp(1)"
+   },
+   {
+    "name": "exp10",
+    "probe": "print exp10(2)"
+   },
+   {
+    "name": "exp2",
+    "probe": "print exp2(3)"
+   },
+   {
+    "name": "isfinite",
+    "probe": "print isfinite(1.0)"
+   },
+   {
+    "name": "isinf",
+    "probe": "print isinf(1.0)"
+   },
+   {
+    "name": "isnan",
+    "probe": "print isnan(1.0)"
+   },
+   {
+    "name": "log",
+    "probe": "print log(2.7)"
+   },
+   {
+    "name": "log10",
+    "probe": "print log10(100)"
+   },
+   {
+    "name": "log2",
+    "probe": "print log2(8)"
+   },
+   {
+    "name": "pow",
+    "probe": "print pow(2, 3)"
+   },
+   {
+    "name": "round",
+    "probe": "print round(1.5)"
+   },
+   {
+    "name": "sign",
+    "probe": "print sign(-3)"
+   }
+  ],
+  "conditional": [
+   {
+    "name": "case",
+    "probe": "print case(1 > 0, 'a', 'b')"
+   },
+   {
+    "name": "iif",
+    "probe": "print iif(1 > 0, 'a', 'b')"
+   },
+   {
+    "name": "max_of",
+    "probe": "print max_of(1, 2)"
+   },
+   {
+    "name": "min_of",
+    "probe": "print min_of(1, 2)"
+   }
+  ],
+  "string": [
+   {
+    "name": "base64_encodestring",
+    "probe": "print base64_encode_tostring('abc')",
+    "note": "Azure Monitor spells it base64_encodestring"
+   },
+   {
+    "name": "base64_decodestring",
+    "probe": "print base64_decode_tostring('YWJj')",
+    "note": "Azure Monitor spells it base64_decodestring"
+   },
+   {
+    "name": "countof",
+    "probe": "print countof('abcabc', 'a')"
+   },
+   {
+    "name": "extract",
+    "probe": "print extract('([0-9]+)', 1, 'x123')"
+   },
+   {
+    "name": "extract_all",
+    "probe": "print extract_all('([0-9])', 'a1b2')"
+   },
+   {
+    "name": "indexof",
+    "probe": "print indexof('abc', 'b')"
+   },
+   {
+    "name": "isempty",
+    "probe": "print isempty('')"
+   },
+   {
+    "name": "isnotempty",
+    "probe": "print isnotempty('a')"
+   },
+   {
+    "name": "replace",
+    "probe": "print replace_regex('abc', 'b', 'x')",
+    "note": "Azure Monitor spells replace_string as replace"
+   },
+   {
+    "name": "split",
+    "probe": "print split('a,b', ',')"
+   },
+   {
+    "name": "strcat",
+    "probe": "print strcat('a','b')"
+   },
+   {
+    "name": "strcat_delim",
+    "probe": "print strcat_delim('-', 'a', 'b')"
+   },
+   {
+    "name": "strlen",
+    "probe": "print strlen('abc')"
+   },
+   {
+    "name": "substring",
+    "probe": "print substring('abc', 1)"
+   },
+   {
+    "name": "tolower",
+    "probe": "print tolower('A')"
+   },
+   {
+    "name": "toupper",
+    "probe": "print toupper('a')"
+   },
+   {
+    "name": "hash_sha256",
+    "probe": "print hash_sha256('abc')"
+   }
+  ],
+  "type": [
+   {
+    "name": "gettype",
+    "probe": "print gettype(dynamic([1]))"
+   },
+   {
+    "name": "isnotnull",
+    "probe": "print isnotnull(1)"
+   },
+   {
+    "name": "isnull",
+    "probe": "print isnull(1)"
+   }
+  ],
+  "transformation_only": [
+   {
+    "name": "parse_cef_dictionary",
+    "probe": "print parse_cef_dictionary('a=1')",
+    "note": "Azure Monitor only; parses a CEF Extension into a bag"
+   },
+   {
+    "name": "geo_location",
+    "probe": "print geo_location('1.0.0.5')",
+    "note": "Azure Monitor only; calls an external IP geolocation service"
+   }
+  ]
+ }
+}

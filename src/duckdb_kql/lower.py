@@ -31,6 +31,7 @@ _BINARY_TEXT_OPS = {
     "startswith", "!startswith", "startswith_cs", "!startswith_cs",
     "endswith", "!endswith", "endswith_cs", "!endswith_cs",
     "hasprefix", "!hasprefix", "hassuffix", "!hassuffix",
+    "matches regex", "matchesregex",
 }
 
 
@@ -258,8 +259,13 @@ def _string_value(text: str) -> str:
 
 
 def _op_text(node: Any) -> str:
-    """The operator spelling, from a token or an ``*Operator`` rule node."""
-    return node.getText().strip().lower()
+    """The operator spelling, from a token or an ``*Operator`` rule node.
+
+    `getText()` drops whitespace, so the two-word `matches regex` arrives
+    glued together.
+    """
+    text = node.getText().strip().lower()
+    return "matches regex" if text == "matchesregex" else text
 
 
 def _lower_binary(node: Any) -> ir.Expr:
@@ -444,6 +450,23 @@ def _lower_operator(node: Any) -> ir.Operator:
         # primary result table unchanged and puts the chart hint in a separate
         # metadata table, so dropping it is correct, not a shortcut.
         return None
+
+    if kind == "ProjectAwayOperator":
+        names = [c.getText() for c in _find_all(node, "IdentifierName")]
+        if not names:
+            raise _unsupported(node, "project-away")
+        return ir.ProjectAway(tuple(names))
+
+    if kind == "ProjectRenameOperator":
+        renames = []
+        for k in kids:
+            named = _lower_named(k)
+            if not named.name or not isinstance(named.expr, ir.ColumnRef):
+                raise _unsupported(node, "project-rename")
+            renames.append((named.expr.name, named.name))
+        if not renames:
+            raise _unsupported(node, "project-rename")
+        return ir.ProjectRename(tuple(renames))
 
     if kind == "JoinOperator":
         return _lower_join(node, kids)
