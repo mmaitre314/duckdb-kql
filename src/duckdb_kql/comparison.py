@@ -19,6 +19,7 @@ with false failures, too loose hides real divergence.
 from __future__ import annotations
 
 import datetime as _dt
+import json as _json
 import math
 import re
 import uuid as _uuid
@@ -27,7 +28,7 @@ from typing import Any
 
 __all__ = [
     "compare", "ComparisonResult", "ComparisonOptions",
-    "is_order_significant", "is_nondeterministic",
+    "is_order_significant", "is_nondeterministic", "is_arbitrary_selection",
 ]
 
 # KQL type name -> canonical bucket. DuckDB names map to the same buckets so
@@ -84,6 +85,11 @@ _TERMINAL_ORDERING_RE = re.compile(
     r"\|\s*(sort|order|top|top-nested|top-hitters)\b", re.IGNORECASE
 )
 
+# `take`/`limit` return an ARBITRARY subset — KQL documents it that way, and the
+# emulator's five rows are not the five DuckDB's LIMIT picks. Asserting specific
+# rows there asserts something KQL never promised, exactly as with row order.
+_ARBITRARY_SELECTION_RE = re.compile(r"\|\s*(take|limit)\b", re.IGNORECASE)
+
 
 def normalize_type(name: str) -> str:
     """Map an engine-specific type name onto a canonical bucket."""
@@ -111,6 +117,25 @@ def is_order_significant(kql: str) -> bool:
         r"\|\s*(summarize|join|union|distinct|make-series|count|lookup)\b",
         tail,
         re.IGNORECASE,
+    )
+
+
+def is_arbitrary_selection(kql: str) -> bool:
+    """True when the query ends in ``take``/``limit`` with nothing ordering it.
+
+    Which rows come back is then the engine's choice, so only the *shape* of the
+    result — row count and columns — is meaningfully comparable. A preceding
+    terminal ``sort`` makes the selection deterministic again.
+    """
+    m = list(_ARBITRARY_SELECTION_RE.finditer(kql))
+    if not m:
+        return False
+    if is_order_significant(kql):
+        return False
+    # Only a trailing take matters; `take 100 | summarize count()` is fine.
+    tail = kql[m[-1].end():]
+    return not re.search(
+        r"\|\s*(summarize|count|distinct|join|union|make-series)\b", tail, re.IGNORECASE
     )
 
 
@@ -144,11 +169,17 @@ class ComparisonOptions:
     check_column_names: bool = True
     #: Compare canonical column types.
     check_column_types: bool = False
+    #: Compare row count and columns but not row values. For results whose row
+    #: *selection* is the engine's choice (`take` without a sort).
+    shape_only: bool = False
 
     @classmethod
     def for_query(cls, kql: str, **overrides: Any) -> ComparisonOptions:
         """Derive sensible options from the query text itself."""
-        opts = cls(ordered=is_order_significant(kql))
+        opts = cls(
+            ordered=is_order_significant(kql),
+            shape_only=is_arbitrary_selection(kql),
+        )
         if uses_approximate_function(kql):
             # An HLL estimate can legitimately differ by a few percent.
             opts.rel_tolerance = 0.05
@@ -169,7 +200,19 @@ class ComparisonResult:
         return "equal" if self.equal else "; ".join(self.differences[:5])
 
 
-def _values_equal(a: Any, b: Any, opts: ComparisonOptions) -> bool:
+def _values_equal(a: Any, b: Any, opts: ComparisonOptions, in_dynamic: bool = False) -> bool:
+    """Compare two cell values.
+
+    ``in_dynamic`` marks values reached *inside* a ``dynamic``/JSON value. There
+    the temporal normalisation is applied even when both sides are strings,
+    because ADX rewrites a datetime it finds inside a dynamic value into its own
+    7-digit-tick spelling at ingestion time — a storage artifact, not a
+    formatting choice either engine is making.
+
+    That relaxation is deliberately **not** applied to top-level strings: there,
+    two different spellings of the same instant is exactly the ``tostring()``
+    divergence this suite exists to catch.
+    """
     if a is None or b is None:
         return a is None and b is None
     # bool is a subclass of int in Python, so this must be checked before the
@@ -181,10 +224,26 @@ def _values_equal(a: Any, b: Any, opts: ComparisonOptions) -> bool:
         if math.isnan(a) and math.isnan(b):
             return True
         return math.isclose(a, b, rel_tol=opts.rel_tolerance, abs_tol=opts.abs_tolerance)
+    # A `dynamic` column comes back parsed from the emulator and as a JSON
+    # *string* from DuckDB, so one side must be decoded before they can be
+    # compared at all. Comparing the raw forms reports every dynamic value as a
+    # difference.
+    if _is_structured(a) or _is_structured(b):
+        pa, pb = _as_structured(a), _as_structured(b)
+        if pa is not None and pb is not None:
+            a, b, in_dynamic = pa, pb, True
+
     if isinstance(a, (list, tuple)) and isinstance(b, (list, tuple)):
-        return len(a) == len(b) and all(_values_equal(x, y, opts) for x, y in zip(a, b))
+        return len(a) == len(b) and all(
+            _values_equal(x, y, opts, in_dynamic) for x, y in zip(a, b)
+        )
     if isinstance(a, dict) and isinstance(b, dict):
-        return a.keys() == b.keys() and all(_values_equal(a[k], b[k], opts) for k in a)
+        # Recursive, not ==, because leaves need the same tolerance and temporal
+        # normalization as top-level cells: ADX canonicalises a datetime *inside*
+        # a dynamic value, rendering "…T00:41:00Z" as "…T00:41:00.0000000Z".
+        return a.keys() == b.keys() and all(
+            _values_equal(a[k], b[k], opts, in_dynamic) for k in a
+        )
 
     # A GUID arrives as a string from the emulator and as a uuid.UUID from
     # DuckDB; compare the identifiers, not their spellings.
@@ -195,7 +254,7 @@ def _values_equal(a: Any, b: Any, opts: ComparisonOptions) -> bool:
 
     # Temporal values may arrive as an ISO/KQL string from the emulator and as a
     # Python object from DuckDB; compare the instants, not the spellings.
-    if type(a) is not type(b):
+    if in_dynamic or type(a) is not type(b):
         ta, tb = _as_timedelta(a), _as_timedelta(b)
         if ta is not None and tb is not None:
             return ta == tb
@@ -204,6 +263,29 @@ def _values_equal(a: Any, b: Any, opts: ComparisonOptions) -> bool:
             return da == db
 
     return _scalar_key(a) == _scalar_key(b)
+
+
+def _is_structured(v: Any) -> bool:
+    return isinstance(v, (dict, list, tuple))
+
+
+def _as_structured(v: Any) -> Any | None:
+    """Decode a JSON string into dict/list, or pass a structure through.
+
+    Returns None when *v* is neither — the caller then falls through to the
+    scalar path rather than forcing a structural comparison.
+    """
+    if _is_structured(v):
+        return list(v) if isinstance(v, tuple) else v
+    if isinstance(v, str):
+        text = v.strip()
+        if not text.startswith(("{", "[")):
+            return None
+        try:
+            return _json.loads(text)
+        except ValueError:
+            return None
+    return None
 
 
 _TIMESPAN_RE = re.compile(
@@ -296,23 +378,69 @@ def _as_uuid(v: Any) -> _uuid.UUID | None:
 
 
 def _scalar_key(v: Any) -> Any:
-    """A comparable, hashable key for a scalar."""
+    """A comparable, hashable key for a scalar.
+
+    This is the fast path for unordered comparison, so it must agree with
+    :func:`_values_equal`: anything the two engines spell differently but mean
+    identically has to hash the same, or the multiset match fails and every row
+    falls into the O(n²) pairing fallback — which on a 5000-row result is 25
+    million comparisons and reports false "missing row" differences besides.
+
+    Two representations therefore get canonicalised here:
+
+    * **dynamic values** — a dict from the emulator, a JSON string from DuckDB;
+    * **datetimes** — an ISO string from the emulator, an object from DuckDB.
+
+    Canonicalising datetime-*looking strings* does mean that, in unordered mode,
+    two different string spellings of one instant hash alike. That is the same
+    rule :func:`_values_equal` already applies across types, and datetime
+    formatting divergence is asserted directly in ``tests/test_datetime_traps.py``
+    where the comparison is ordered.
+    """
     if v is None:
         return None
-    if isinstance(v, (_dt.datetime, _dt.timedelta)):
+    if isinstance(v, _dt.timedelta):
         return v
+    if isinstance(v, _dt.datetime):
+        return v.astimezone(_dt.timezone.utc).replace(tzinfo=None) if v.tzinfo else v
     if isinstance(v, _uuid.UUID):
         return str(v)
+    if isinstance(v, (list, dict, tuple)):
+        return _canonical_dynamic(v)
     if isinstance(v, str):
-        # Trailing whitespace is not semantically meaningful in these results.
-        return v.strip()
+        text = v.strip()
+        structured = _as_structured(text)
+        if structured is not None:
+            return _canonical_dynamic(structured)
+        dt_value = _as_datetime(text)
+        if dt_value is not None:
+            return dt_value
+        return text
     if isinstance(v, float) and v.is_integer():
         return int(v)
-    if isinstance(v, (list, dict, tuple)):
-        import json
-
-        return json.dumps(v, sort_keys=True, default=str)
     return v
+
+
+def _canonical_dynamic(v: Any) -> str:
+    """Canonical JSON for a dynamic value, with nested datetimes normalised.
+
+    ADX rewrites a datetime inside a dynamic value into its own 7-digit-tick
+    spelling at ingestion, so the raw text differs even when the value does not.
+    """
+
+    def norm(x: Any) -> Any:
+        if isinstance(x, dict):
+            return {k: norm(x[k]) for k in sorted(x)}
+        if isinstance(x, (list, tuple)):
+            return [norm(i) for i in x]
+        if isinstance(x, str):
+            d = _as_datetime(x)
+            return d.isoformat() if d is not None else x
+        if isinstance(x, _dt.datetime):
+            return x.isoformat()
+        return x
+
+    return _json.dumps(norm(v), sort_keys=True, default=str)
 
 
 def _row_key(row: list[Any]) -> tuple:
@@ -362,6 +490,11 @@ def compare(
     elif len(exp_rows) != len(act_rows):
         diffs.append(f"row count {len(exp_rows)} != {len(act_rows)}")
         return ComparisonResult(False, diffs)
+
+    if opts.shape_only:
+        # Row count and columns already checked above; which rows the engine
+        # picked is not ours to assert.
+        return ComparisonResult(not diffs, diffs)
 
     if opts.ordered:
         for i, (er, ar) in enumerate(zip(exp_rows, act_rows)):

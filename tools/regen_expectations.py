@@ -62,6 +62,16 @@ def regen(
     rejections: list[dict] = []
     drifts: list[dict] = []
 
+    def checkpoint() -> None:
+        """Persist progress mid-sweep.
+
+        A full fixture-backed sweep is hundreds of emulator round-trips and takes
+        many minutes. Writing only at the end means one timeout throws all of it
+        away, which is how a 20-minute job becomes a 20-minute job you run twice.
+        """
+        if not check:
+            corpus_path.write_text(json.dumps(doc, indent=1), encoding="utf-8")
+
     for case in cases:
         if not case.get("inline_input") and not include_fixture_cases:
             stats["skipped"] += 1
@@ -122,6 +132,9 @@ def regen(
             case["oracle_image"] = image_digest
         case.pop("oracle_note", None)
         stats["frozen"] += 1
+
+        if stats["frozen"] % 50 == 0:
+            checkpoint()
 
     if check:
         return {"stats": stats, "rejections": rejections, "drifts": drifts}

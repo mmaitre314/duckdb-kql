@@ -83,6 +83,11 @@ jobs:
           docker compose logs --tail 100 kusto
           exit 1
 
+      # Fixture-backed expectations were frozen against exactly these rows, so
+      # the emulator must be reloaded with them before anything is compared.
+      - name: Load fixtures
+        run: python tools/make_fixtures.py --check && python tools/make_fixtures.py --load
+
       - name: Record the exact image digest
         id: digest
         run: |

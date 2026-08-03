@@ -20,6 +20,7 @@ from pathlib import Path
 import pytest
 
 import duckdb_kql
+from duckdb_kql import fixtures
 from duckdb_kql.comparison import ComparisonOptions, compare, is_nondeterministic
 from duckdb_kql.errors import KqlError
 
@@ -30,7 +31,7 @@ CORPUS = Path(os.environ.get("DUCKDB_KQL_CORPUS", "tests/cases/docs/docs-corpus.
 pytestmark = pytest.mark.skipif(not CORPUS.is_file(), reason=f"no corpus at {CORPUS}")
 
 #: Cases that translate AND match ground truth. May only go UP.
-BASELINE_PASSING = 26
+BASELINE_PASSING = 50
 
 #: Cases we translate but knowingly get wrong, with the reason. This is an
 #: **admission of a bug**, not a waiver: each entry is a real KQL↔DuckDB gap
@@ -39,6 +40,23 @@ BASELINE_PASSING = 26
 #: Entries are checked for staleness — a case listed here that starts passing
 #: fails the build, so the list cannot rot into a silent allowlist.
 KNOWN_DIVERGENCES: dict[str, str] = {}
+
+
+@functools.lru_cache(maxsize=1)
+def _connection():
+    """One DuckDB connection with the fixture tables loaded.
+
+    The emulator froze its expectations against exactly these rows, so our side
+    must see exactly these rows too — that equality is the entire basis for
+    comparing the two engines.
+    """
+    con = duckdb.connect()
+    # R8 — KQL datetimes are UTC, and DuckDB reads the session TimeZone when
+    # casting offset-less strings. duckdb_kql.sql() sets this; the harness calls
+    # to_sql() directly, so it must set it itself.
+    con.execute("SET TimeZone='UTC'")
+    fixtures.load_duckdb(con)
+    return con
 
 
 @functools.lru_cache(maxsize=1)
@@ -67,8 +85,7 @@ def _run(case: dict) -> tuple[str, str]:
         return "crash", f"{type(e).__name__}: {e}"
 
     try:
-        con = duckdb.connect()
-        rel = con.sql(sql)
+        rel = _connection().sql(sql)
         actual = {
             "columns": list(rel.columns),
             "rows": [list(r) for r in rel.fetchall()],

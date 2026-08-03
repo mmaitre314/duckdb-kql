@@ -91,6 +91,15 @@ class KustoEmulator:
             raise EmulatorError(f"HTTP {e.code} from {path}: {detail}") from e
         except urllib.error.URLError as e:
             raise EmulatorError(f"cannot reach emulator at {self.endpoint}: {e.reason}") from e
+        except TimeoutError as e:
+            # A read timeout surfaces as a bare TimeoutError, NOT as URLError, so
+            # it used to escape this handler and abort whole sweeps. One slow
+            # query is information about that query, not a transport failure.
+            raise EmulatorError(
+                f"emulator timed out after {timeout or self.timeout}s"
+            ) from e
+        except OSError as e:  # connection reset, broken pipe, ...
+            raise EmulatorError(f"emulator transport error: {e}") from e
 
     # -- API ---------------------------------------------------------------
 

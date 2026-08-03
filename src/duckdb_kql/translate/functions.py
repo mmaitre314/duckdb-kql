@@ -102,9 +102,12 @@ SCALAR_FUNCTIONS: dict[str, FunctionSpec] = {
         _f("isnull", "native", "({0} IS NULL)", (1,), ("R4",)),
         _f("isnotnull", "native", "({0} IS NOT NULL)", (1,), ("R4",)),
         _f("notnull", "native", "({0} IS NOT NULL)", (1,), ("R4",)),
-        # isempty is null OR empty string — NOT the same as isnull.
-        _f("isempty", "template", "({0} IS NULL OR {0} = '')", (1,), ("R4",)),
-        _f("isnotempty", "template", "({0} IS NOT NULL AND {0} <> '')", (1,), ("R4",)),
+        # isempty is null OR empty string — NOT the same as isnull. The CAST is
+        # load-bearing: these accept any type, and comparing a DOUBLE column to
+        # '' makes DuckDB raise a conversion error instead of answering false.
+        _f("isempty", "template", "({0} IS NULL OR CAST({0} AS VARCHAR) = '')", (1,), ("R4",)),
+        _f("isnotempty", "template",
+           "({0} IS NOT NULL AND CAST({0} AS VARCHAR) <> '')", (1,), ("R4",)),
         _f("coalesce", "template", "coalesce({})", (), ("R4",), "variadic"),
         _f("isnan", "native", "isnan({0})", (1,)),
         _f("isfinite", "native", "isfinite({0})", (1,)),

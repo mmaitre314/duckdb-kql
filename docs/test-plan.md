@@ -127,7 +127,36 @@ Result comparison must be tolerant where KQL itself is:
 - **Truncation-aware** for docs outputs that show only the first N rows (compare a
   prefix after an explicit sort, or re-derive full expected via the oracle).
 
-### 4.3 Sample datasets as DuckDB fixtures
+### 4.3 Sample datasets as DuckDB fixtures — **implemented**
+
+`StormEvents` is referenced by 251 corpus cases and `PopulationData` by a
+handful more; together they were the single biggest blocker to coverage.
+[`duckdb_kql/fixtures.py`](../src/duckdb_kql/fixtures.py) generates both
+deterministically and loads them into **both** engines
+(`tools/make_fixtures.py [--load]`).
+
+The data is **synthetic**, for two reasons: the real CSV lives behind
+`kustosamples.blob.core.windows.net`, which is not reachable from every
+environment, and vendoring NOAA/Microsoft sample data adds a licensing question
+we do not need. It costs us nothing we were relying on — Microsoft's *published
+outputs* were never the oracle (§3), the **emulator** generates expectations
+from whatever data it is given. Stated plainly: numbers here will not match the
+outputs printed in the docs.
+
+Two properties the fixture must hold, both asserted by
+[`tests/test_fixtures.py`](../tests/test_fixtures.py):
+
+- **Non-vacuity.** `State == "FLORIDA"` against a fixture with no Florida rows
+  returns empty on both sides and *passes* while proving nothing — the most
+  expensive kind of green test. The vocabularies are therefore the real ones
+  (actual states, actual NOAA event types, 2007 dates), chosen to cover every
+  literal the corpus filters on, and each is asserted to select a strict subset.
+- **No ties in sort keys.** `sort`/`top` break ties arbitrarily, so duplicate
+  keys make a deterministic query produce engine-specific output and the suite
+  reports a divergence that is really just a tie. `StartTime` is unique and
+  `DamageProperty` is drawn from a wide range rather than a handful of values.
+
+### 4.4 Sample datasets — general
 - `StormEvents` (the canonical ADX demo table) is publicly downloadable as CSV;
   load into DuckDB once and cache as Parquet under `tests/fixtures/`. Add others
   as needed (`Covid19`, `demo_make_series1`, etc.).

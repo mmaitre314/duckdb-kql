@@ -377,7 +377,13 @@ def _lower_operator(node: Any) -> ir.Operator:
         return ir.Extend(tuple(_lower_named(k) for k in kids))
 
     if kind == "TakeOperator":
-        return ir.Take(int(kids[-1].getText()))
+        # The count is an expression, not a bare token: `take int(10)` is legal
+        # and used to reach int() as the literal text "int(10)", leaking a
+        # ValueError straight out of the public API.
+        count = _lower_expr(kids[-1])
+        if not isinstance(count, ir.Literal) or not isinstance(count.value, int):
+            raise _unsupported(node, "take", )
+        return ir.Take(int(count.value))
 
     if kind == "CountOperator":
         if kids:  # `count as Name`
@@ -388,11 +394,14 @@ def _lower_operator(node: Any) -> ir.Operator:
         return ir.Sort(tuple(_lower_sort_key(k) for k in kids))
 
     if kind == "DistinctOperator":
-        names = []
+        names: list[str] = []
         for k in kids:
             if _cls(k) == "DistinctOperatorStarTarget":
                 raise _unsupported(node, "distinct *")
-            names.append(k.getText())
+            # The column list arrives as a single wrapper node, so taking its
+            # raw text yields one bogus column literally named "State,EventType".
+            inner = _find_all(k, "IdentifierName") or _rule_children(k)
+            names.extend(c.getText() for c in inner) if inner else names.append(k.getText())
         return ir.Distinct(tuple(names))
 
     raise _unsupported(node, kind)

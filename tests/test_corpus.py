@@ -15,11 +15,13 @@ from __future__ import annotations
 import functools
 import json
 import os
+import re
 from pathlib import Path
 
 import pytest
 
 import duckdb_kql
+from duckdb_kql import fixtures
 
 # Established by the M0 spike + the in-subquery patch (docs/m0-grammar-spike.md).
 # This number may only ever go UP.
@@ -92,7 +94,7 @@ def test_self_contained_cases_are_a_meaningful_share() -> None:
 # --- frozen expectations (test-plan §5.2) ---------------------------------
 
 #: Established by the first full emulator run. May only go UP.
-BASELINE_FROZEN = 785
+BASELINE_FROZEN = 1036
 
 
 def _frozen() -> tuple[dict, ...]:
@@ -122,10 +124,48 @@ def test_frozen_expectations_record_their_oracle() -> None:
         assert c.get("oracle_image", "").startswith("mcr.microsoft.com/"), c["id"]
 
 
-def test_only_self_contained_cases_were_frozen() -> None:
-    """Fixture-dependent cases can't be frozen until fixtures are mounted."""
+def test_frozen_cases_supply_their_own_data() -> None:
+    """A frozen expectation must be reproducible from what the repo contains.
+
+    Either the case inlines its input (``datatable``/``print``/``range``) or it
+    reads a table the fixture provides. Anything else was frozen against data
+    nobody else can reconstruct, so re-running it later compares against a
+    result that cannot be regenerated.
+    """
+    available = {t.lower() for t, _, _ in fixtures.TABLES}
     for c in _frozen():
-        assert c["inline_input"], f"{c['id']} was frozen without inline input"
+        if c["inline_input"]:
+            continue
+        referenced = {t.lower() for t in _table_references(c["kql"])}
+        unknown = referenced - available
+        assert not unknown, (
+            f"{c['id']} was frozen against table(s) the fixture does not "
+            f"provide: {sorted(unknown)}"
+        )
+
+
+def _table_references(kql: str) -> set[str]:
+    """Identifiers used in table position — the start of the query or a pipe.
+
+    Deliberately conservative: it looks only where a table name can appear, so
+    a column or function of the same name is not mistaken for a table.
+    """
+    names = set()
+    for m in re.finditer(r"(?:^|\|\s*(?:join|union|lookup)\s*)\s*([A-Za-z_]\w*)", kql):
+        name = m.group(1)
+        if name.lower() not in _KQL_KEYWORDS:
+            names.add(name)
+    return names
+
+
+#: Words that can start a query or follow join/union without being a table.
+_KQL_KEYWORDS = {
+    "let", "set", "declare", "alias", "print", "range", "datatable", "externaldata",
+    "kind", "hint", "with", "materialize", "toscalar", "cluster", "database",
+    "find", "search", "evaluate", "union", "join", "lookup", "inner", "innerunique",
+    "leftouter", "rightouter", "fullouter", "leftsemi", "rightsemi", "leftanti",
+    "rightanti", "restrict", "access",
+}
 
 
 def test_refused_cases_have_no_expectation() -> None:
