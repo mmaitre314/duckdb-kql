@@ -176,6 +176,18 @@ def _is_timespan_expr(node: ir.Expr) -> bool:
     return False
 
 
+def print_column_name(named: ir.NamedExpr, position: int) -> str:
+    """An unnamed ``print`` column is ``print_0``, ``print_1``, ... in KQL.
+
+    Not a generic positional name — output names are user-visible.
+    """
+    if named.name:
+        return named.name
+    if isinstance(named.expr, ir.ColumnRef):
+        return named.expr.name
+    return f"print_{position}"
+
+
 def output_name(named: ir.NamedExpr, position: int) -> str:
     """Derive a column's output name.
 
@@ -200,14 +212,10 @@ def render_source(source: ir.Source) -> str:
         return f"SELECT * FROM {quote_ident(source.name)}"
 
     if isinstance(source, ir.PrintSource):
-        # An unnamed `print` column is named `print_0`, `print_1`, ... by KQL --
-        # not a generic positional name. Output names are user-visible.
-        cols = []
-        for i, e in enumerate(source.expressions):
-            name = e.name or (
-                e.expr.name if isinstance(e.expr, ir.ColumnRef) else f"print_{i}"
-            )
-            cols.append(f"{render_expr(e.expr)} AS {quote_ident(name)}")
+        cols = [
+            f"{render_expr(e.expr)} AS {quote_ident(print_column_name(e, i))}"
+            for i, e in enumerate(source.expressions)
+        ]
         return "SELECT " + ", ".join(cols)
 
     if isinstance(source, ir.DataTable):
@@ -300,6 +308,11 @@ def render_operator(op: ir.Operator, prev: str) -> str:
     if isinstance(op, ir.Sort):
         return f"SELECT * FROM {prev} ORDER BY {render_sort_keys(op.keys)}"
 
+    if isinstance(op, ir.Join):
+        # Joins need both sides' columns, so they are rendered by to_sql(),
+        # which threads the schema. Reaching here means a bug, not a gap.
+        raise KqlUnsupportedError("join", hint="internal: join must be rendered by to_sql")
+
     raise KqlUnsupportedError(f"operator:{type(op).__name__}")
 
 
@@ -324,17 +337,55 @@ def render_sort_keys(keys: tuple[ir.SortKey, ...]) -> str:
 # ---------------------------------------------------------------------------
 
 
-def to_sql(query: ir.Query) -> TranslationResult:
-    """Render an IR query as DuckDB SQL (a CTE chain)."""
+def to_sql(query: ir.Query, schema: dict | None = None) -> TranslationResult:
+    """Render an IR query as DuckDB SQL (a CTE chain).
+
+    *schema* maps table name to column names. It is only consulted for queries
+    containing a ``join``, which needs both sides' columns to reproduce KQL's
+    column renaming; everything else translates schema-free.
+    """
+    from ..schema import output_columns
+
     stages = [render_source(query.source)]
+    cols: list[str] | None = None
+
     for op in query.operators:
-        stages.append(render_operator(op, f"_s{len(stages) - 1}"))
+        prev = f"_s{len(stages) - 1}"
+        if isinstance(op, ir.Join):
+            # Only a join forces us to resolve columns, so only a join can fail
+            # for lack of a schema.
+            if cols is None:
+                cols = _source_cols(query, schema)
+            right_cols = output_columns(op.right, schema)
+            right_sql = str(to_sql(op.right, schema))
+            stages.append(render_join(op, prev, cols, right_sql, right_cols))
+            from ..schema import join_output_columns
+
+            cols = join_output_columns(cols, right_cols, op.kind)
+        else:
+            stages.append(render_operator(op, prev))
+            if cols is not None:
+                from ..schema import _operator_columns
+
+                cols = _operator_columns(op, cols, schema)
 
     if len(stages) == 1:
         return TranslationResult(stages[0])
 
     ctes = ",\n     ".join(f"_s{i} AS ({sql})" for i, sql in enumerate(stages))
     return TranslationResult(f"WITH {ctes}\nSELECT * FROM _s{len(stages) - 1}")
+
+
+def _source_cols(query: ir.Query, schema: dict | None) -> list[str]:
+    """Columns produced by the query up to (not including) its first join."""
+    from ..schema import _operator_columns, _source_columns
+
+    cols = _source_columns(query.source, schema)
+    for op in query.operators:
+        if isinstance(op, ir.Join):
+            break
+        cols = _operator_columns(op, cols, schema)
+    return cols
 
 
 # ---------------------------------------------------------------------------
@@ -455,3 +506,86 @@ def render_summarize(op: ir.Summarize, prev: str) -> str:
     if group:
         sql += f" GROUP BY {', '.join(group)}"
     return sql
+
+
+# ---------------------------------------------------------------------------
+# join (R5)
+# ---------------------------------------------------------------------------
+
+#: KQL join kind -> SQL join type. `innerunique` is handled separately.
+_SQL_JOIN_TYPE = {
+    "innerunique": "INNER",
+    "inner": "INNER",
+    "leftouter": "LEFT",
+    "rightouter": "RIGHT",
+    "fullouter": "FULL OUTER",
+    "leftsemi": "SEMI",
+    "rightsemi": "SEMI",
+    "leftanti": "ANTI",
+    "rightanti": "ANTI",
+}
+
+
+def render_join(
+    op: ir.Join, prev: str, left_cols: list[str], right_sql: str, right_cols: list[str]
+) -> str:
+    """Render ``join`` (docs/TRANSLATION.md R5).
+
+    The default kind, **innerunique**, is the most dangerous default in KQL: it
+    de-duplicates the *left* key set before joining, so the SQL that looks
+    equivalent — a plain INNER JOIN — silently returns more rows. Measured on
+    the emulator, a left side with two 'a' rows joined to two right 'a' rows
+    gives 2 rows under innerunique and 4 under inner.
+
+    Semi and anti joins return one side's columns only; every other kind returns
+    both, with the right side's colliding names suffixed (``k`` -> ``k1``).
+    """
+    kind = op.kind
+    sql_type = _SQL_JOIN_TYPE.get(kind)
+    if sql_type is None:
+        raise KqlUnsupportedError(f"join kind:{kind}")
+
+    left = prev
+    if kind == "innerunique":
+        # Keep one left row per key. DISTINCT ON keeps the first row it meets,
+        # which matched the emulator's choice on every probe — but neither
+        # engine *promises* which row survives, so a left side with duplicate
+        # keys and differing other columns is inherently engine-specific.
+        keys = ", ".join(quote_ident(k.left) for k in op.keys)
+        left = f"(SELECT DISTINCT ON ({keys}) * FROM {prev})"
+
+    on = " AND ".join(
+        f"_l.{quote_ident(k.left)} = _r.{quote_ident(k.right)}" for k in op.keys
+    )
+
+    # Anti/semi are directional: KQL's `rightanti` keeps unmatched RIGHT rows,
+    # which is DuckDB's ANTI JOIN with the sides swapped.
+    if kind in ("rightsemi", "rightanti"):
+        body = (
+            f"SELECT _r.* FROM ({right_sql}) AS _r "
+            f"{sql_type} JOIN {left} AS _l ON {on}"
+        )
+        return body
+    if kind in ("leftsemi", "leftanti"):
+        return (
+            f"SELECT _l.* FROM {left} AS _l "
+            f"{sql_type} JOIN ({right_sql}) AS _r ON {on}"
+        )
+
+    projection = ", ".join(
+        [f"_l.{quote_ident(c)} AS {quote_ident(c)}" for c in left_cols]
+        + [
+            f"_r.{quote_ident(src)} AS {quote_ident(out)}"
+            for src, out in zip(right_cols, _renamed(left_cols, right_cols))
+        ]
+    )
+    return (
+        f"SELECT {projection} FROM {left} AS _l "
+        f"{sql_type} JOIN ({right_sql}) AS _r ON {on}"
+    )
+
+
+def _renamed(left_cols: list[str], right_cols: list[str]) -> list[str]:
+    from ..schema import join_output_columns
+
+    return join_output_columns(left_cols, right_cols, "inner")[len(left_cols):]

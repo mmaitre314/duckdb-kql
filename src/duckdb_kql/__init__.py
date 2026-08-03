@@ -72,7 +72,7 @@ def to_sql(kql: str, schema: Any | None = None) -> str:
     from .lower import lower
     from .translate import to_sql as _emit
 
-    return str(_emit(lower(kql)))
+    return str(_emit(lower(kql), schema))
 
 
 def sql(con: Any, kql: str) -> Any:
@@ -81,9 +81,31 @@ def sql(con: Any, kql: str) -> Any:
     Sets ``TimeZone='UTC'`` on *con* first — see :func:`to_sql`. This changes
     connection state deliberately: leaving it to the caller means a machine in a
     non-UTC zone silently returns wrong datetimes.
+
+    The connection also supplies the schema that ``join`` needs, so joins work
+    here without the caller passing one.
     """
     con.execute("SET TimeZone='UTC'")
-    return con.sql(to_sql(kql))
+    return con.sql(to_sql(kql, schema=_connection_schema(con)))
+
+
+def _connection_schema(con: Any) -> dict[str, list[str]]:
+    """Read table -> column names from a DuckDB connection.
+
+    Only ``join`` consults this, but it is cheap enough to gather unconditionally
+    and keeps the public API free of a schema argument.
+    """
+    try:
+        rows = con.execute(
+            "SELECT table_name, column_name FROM information_schema.columns "
+            "ORDER BY table_name, ordinal_position"
+        ).fetchall()
+    except Exception:  # noqa: BLE001 - a schema-less connection is not an error
+        return {}
+    schema: dict[str, list[str]] = {}
+    for table, column in rows:
+        schema.setdefault(table, []).append(column)
+    return schema
 
 
 def df(con: Any, kql: str) -> Any:

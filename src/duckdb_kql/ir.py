@@ -21,7 +21,7 @@ __all__ = [
     # sources
     "TableRef", "DataTable", "PrintSource",
     # operators
-    "Summarize",
+    "Summarize", "Join", "JoinKey",
     "Where", "Project", "Extend", "Take", "Sort", "SortKey", "Count", "Distinct",
 ]
 
@@ -202,6 +202,31 @@ class Count(Operator):
 @dataclass(frozen=True)
 class Distinct(Operator):
     columns: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class JoinKey(Node):
+    """One equality in a join's ``on`` clause.
+
+    ``on k`` is shorthand for ``$left.k == $right.k``, so both sides default to
+    the same name.
+    """
+
+    left: str
+    right: str
+
+
+@dataclass(frozen=True)
+class Join(Operator):
+    """``join kind=... (rightQuery) on keys``.
+
+    The default kind is **innerunique**, which de-duplicates the *left* key set
+    before joining. It is NOT a SQL inner join (docs/TRANSLATION.md R5).
+    """
+
+    right: Query
+    keys: tuple[JoinKey, ...]
+    kind: str = "innerunique"
 
 
 @dataclass(frozen=True)

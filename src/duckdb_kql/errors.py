@@ -58,7 +58,16 @@ class KqlSchemaError(KqlError):
     KQL identifiers are case-sensitive while DuckDB folds case, so two distinct
     KQL columns can collide once quoted (``docs/TRANSLATION.md`` R7). That is a
     schema error, not something to resolve arbitrarily.
+
+    Also raised when translation needs a schema and none was supplied — ``join``
+    must know both sides' columns to reproduce KQL's column renaming.
     """
+
+    def __init__(self, name: str, hint: str | None = None):
+        self.name = name
+        self.hint = hint
+        because = f" ({hint})" if hint else ""
+        super().__init__(f"schema error for {name!r}{because}")
 
 
 @dataclass(frozen=True)

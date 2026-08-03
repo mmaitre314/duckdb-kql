@@ -254,11 +254,30 @@ supply the ground-truth output**, so the catalog documents ADX's real behavior
 rather than our guess about it. This list is the **living registry of known
 KQL↔DuckDB semantic gaps** and should grow as we find more.
 
-**Joins & set ops**
-- `join` **default kind is `innerunique`** — it de-duplicates the *left* key set
-  before joining. This is **not** a SQL inner join; naively emitting `INNER JOIN`
-  is wrong. Must test all kinds: `innerunique`(default), `inner`, `leftouter`,
-  `rightouter`, `fullouter`, `leftsemi`, `rightsemi`, `leftanti`, `rightanti`.
+**Joins & set ops — `join` measured and implemented, pinned by
+[`tests/test_join.py`](../tests/test_join.py)**
+- **CONFIRMED — `join`'s default kind is `innerunique`**, which de-duplicates the
+  *left* key set before joining. Emitting `INNER JOIN` is wrong. Measured with a
+  left side holding two `'a'` rows against a right side holding two `'a'` rows:
+  **innerunique gives 2 rows, inner gives 4**. All nine kinds are implemented and
+  their row counts pinned.
+- **Output schema.** KQL keeps *both* key columns and suffixes the right side's
+  colliding names: `k`→`k1`, and `k1`→`k2` when `k1` is taken. No separator, so
+  `k_1` would be wrong. Semi/anti kinds return **one side's columns only**.
+  Reproducing this needs both sides' column names, which is why `join` — alone
+  among the operators — requires a schema; `duckdb_kql.sql(con, …)` supplies it
+  from the connection, and `to_sql()` without one raises `KqlSchemaError` rather
+  than guessing.
+- **Open — `innerunique` picks an arbitrary left row per key.** DuckDB's
+  `DISTINCT ON` kept the same row as the emulator on every probe, but neither
+  engine *promises* which one survives. A left side with duplicate keys whose
+  other columns differ is therefore engine-specific.
+- `hint.strategy` / `hint.shufflekey` tune how a *cluster* executes the join.
+  They cannot change the result and DuckDB is single-node, so ignoring them is
+  correct rather than a shortcut.
+- **KQL has no null string distinct from empty**, so an outer join's unmatched
+  string column is `''` from the emulator and `NULL` from DuckDB. The comparison
+  normalizes this, but only where the *expected* column type says string.
 - `union` column unification (differing schemas → superset columns, nulls filled);
   `kind=inner|outer`; `withsource=`.
 

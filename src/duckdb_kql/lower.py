@@ -395,6 +395,9 @@ def _lower_operator(node: Any) -> ir.Operator:
             return ir.Count(kids[-1].getText())
         return ir.Count()
 
+    if kind == "JoinOperator":
+        return _lower_join(node, kids)
+
     if kind == "SummarizeOperator":
         aggregates, by = [], []
         for k in kids:
@@ -421,6 +424,120 @@ def _lower_operator(node: Any) -> ir.Operator:
         return ir.Distinct(tuple(names))
 
     raise _unsupported(node, kind)
+
+
+#: Join kinds we implement, KQL spelling -> canonical (docs/TRANSLATION.md R5).
+_JOIN_KINDS = {
+    "innerunique": "innerunique",
+    "inner": "inner",
+    "leftouter": "leftouter",
+    "rightouter": "rightouter",
+    "fullouter": "fullouter",
+    "leftsemi": "leftsemi",
+    "rightsemi": "rightsemi",
+    "leftanti": "leftanti",
+    "rightanti": "rightanti",
+    "anti": "leftanti",          # documented alias
+    "leftantisemi": "leftanti",
+    "rightantisemi": "rightanti",
+}
+
+
+def _lower_join(node: Any, kids: list[Any]) -> ir.Join:
+    """Lower ``join kind=... (right) on keys``.
+
+    The **default kind is innerunique**, not inner — the single most dangerous
+    default in KQL, because the SQL that looks equivalent silently returns more
+    rows (R5).
+    """
+    kind = "innerunique"
+    right_node = None
+    keys: list[ir.JoinKey] = []
+
+    for k in kids:
+        cls = _cls(k)
+        if cls in ("RelaxedQueryOperatorParameter", "QueryOperatorParameter"):
+            text = k.getText()
+            name, _, value = text.partition("=")
+            key = name.strip().lower()
+            if key.startswith("hint."):
+                # Distribution hints (hint.strategy, hint.shufflekey, ...) tune
+                # how a *cluster* executes the join. They cannot change the
+                # result, and DuckDB is single-node, so honouring them by
+                # ignoring them is correct rather than a shortcut.
+                continue
+            if key != "kind":
+                raise _unsupported(k, f"join parameter:{name.strip()}")
+            canonical = _JOIN_KINDS.get(value.strip().lower())
+            if canonical is None:
+                raise _unsupported(k, f"join kind:{value.strip()}")
+            kind = canonical
+        elif cls == "JoinOperatorOnClause":
+            keys.extend(_lower_join_key(c) for c in _rule_children(k))
+        elif right_node is None:
+            right_node = k
+
+    if right_node is None:
+        raise _unsupported(node, "join", )
+    if not keys:
+        raise _unsupported(node, "join", )
+
+    return ir.Join(_lower_join_right(right_node), tuple(keys), kind)
+
+
+def _lower_join_right(node: Any) -> ir.Query:
+    """The joined side is a parenthesised tabular expression."""
+    inner = _collapse(node)
+    while _cls(inner) == "ParenthesizedExpression":
+        rules = _rule_children(inner)
+        if not rules:
+            break
+        inner = _collapse(rules[0])
+
+    if _cls(inner) == "PipeExpression":
+        parts = _rule_children(inner)
+        return ir.Query(_lower_source(parts[0]), [_lower_operator(p) for p in parts[1:]])
+    return ir.Query(_lower_source(inner))
+
+
+def _lower_join_key(node: Any) -> ir.JoinKey:
+    """One ``on`` entry: ``k`` or ``$left.a == $right.b``.
+
+    ``on k`` is shorthand for the same column on both sides.
+    """
+    text = node.getText()
+    if "$left" in text.lower() or "$right" in text.lower():
+        # `$left.x` parses as a *path* expression, which is a dynamic/JSON
+        # feature we do not lower yet. In a join's `on` clause it is only ever a
+        # side-qualified column name, so read it off the text rather than
+        # pulling all of path lowering forward.
+        lhs, sep, rhs = text.partition("==")
+        if not sep:
+            raise _unsupported(node, "join key")
+        return ir.JoinKey(
+            _strip_side(lhs.strip(), "left"), _strip_side(rhs.strip(), "right")
+        )
+
+    expr = _lower_expr(node)
+    if isinstance(expr, ir.ColumnRef):
+        return ir.JoinKey(expr.name, expr.name)
+    if isinstance(expr, ir.BinaryOp) and expr.op == "==":
+        left, right = expr.left, expr.right
+        if isinstance(left, ir.ColumnRef) and isinstance(right, ir.ColumnRef):
+            return ir.JoinKey(_strip_side(left.name, "left"), _strip_side(right.name, "right"))
+    raise _unsupported(node, "join key")
+
+
+def _strip_side(name: str, side: str) -> str:
+    """Drop a ``$left.`` / ``$right.`` qualifier."""
+    prefix = f"${side}."
+    lowered = name.lower()
+    if lowered.startswith(prefix):
+        return name[len(prefix):]
+    # The lexer may deliver the qualifier without the '$'.
+    if lowered.startswith(f"{side}."):
+        return name[len(side) + 1:]
+    return name
 
 
 def _lower_sort_key(node: Any) -> ir.SortKey:

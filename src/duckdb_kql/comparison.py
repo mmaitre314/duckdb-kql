@@ -528,6 +528,21 @@ def compare(
     exp_rows = [list(r) for r in expected.get("rows", [])]
     act_rows = [list(r) for r in actual.get("rows", [])]
 
+    # KQL has no null string distinct from the empty string: `isnull('')` is
+    # false and `string(null)` round-trips as ''. So an outer join's unmatched
+    # string column comes back as '' from the emulator and as NULL from DuckDB —
+    # the same value, spelled differently. Only applied where the *expected*
+    # column type says string, so a genuine null/'' difference in another type
+    # still fails.
+    string_idx = [
+        i
+        for i, t in enumerate(expected.get("column_types") or [])
+        if normalize_type(t) == "string"
+    ]
+    if string_idx:
+        exp_rows = _blank_nulls(exp_rows, string_idx)
+        act_rows = _blank_nulls(act_rows, string_idx)
+
     if len(exp_cols) != len(act_cols):
         diffs.append(f"column count {len(exp_cols)} != {len(act_cols)}")
         return ComparisonResult(False, diffs)
@@ -661,3 +676,15 @@ def _compare_unordered(
     if len(diffs) > 8:
         diffs = diffs[:8] + ["... (further differences suppressed)"]
     return ComparisonResult(not diffs, diffs)
+
+
+def _blank_nulls(rows: list[list[Any]], indexes: list[int]) -> list[list[Any]]:
+    """Map None -> '' in the given string columns (see :func:`compare`)."""
+    out = []
+    for row in rows:
+        new = list(row)
+        for i in indexes:
+            if i < len(new) and new[i] is None:
+                new[i] = ""
+        out.append(new)
+    return out
