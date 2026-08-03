@@ -20,9 +20,9 @@
 data already resident in a DuckDB connection, returning Arrow/pandas results:
 
 ```python
-import duckdb, duckdb_kql
+import duckdb_kql
 
-con = duckdb.connect()
+con = duckdb_kql.connect()
 con.execute("CREATE TABLE Logs AS SELECT * FROM 'logs.parquet'")
 
 df = duckdb_kql.df(con, """
@@ -217,22 +217,37 @@ that need it.
 
 ## 7. Public API (stage 5)
 
-Small, functional, pandas‑friendly (mirrors what ADX users expect):
+Three layers, each adding exactly one dependency, so a caller installs only what
+they use. Full reference: [`api.md`](api.md).
 
 ```python
-duckdb_kql.sql(con, kql: str) -> duckdb.DuckDBPyRelation   # execute, lazy relation
-duckdb_kql.df(con, kql: str) -> pandas.DataFrame            # execute → pandas
-duckdb_kql.arrow(con, kql: str) -> pyarrow.Table            # execute → Arrow
-duckdb_kql.to_sql(kql: str, schema=None) -> str            # translate only (no exec)
+# Layer 0 — duckdb_kql — antlr4 only. KQL text in, DuckDB SQL out.
+duckdb_kql.to_sql(kql, schema=None, parameters=None) -> TranslationResult
+duckdb_kql.query_parameters(kql) -> list[ParameterDeclaration]
+duckdb_kql.parse(kql) -> ParseResult
+duckdb_kql.validate(kql) -> list[Diagnostic]
+
+# Layer 1 — duckdb_kql.engine — + duckdb. Also re-exported at the top level.
+duckdb_kql.connect(database=":memory:") -> DuckDBPyConnection
+duckdb_kql.sql(con, kql, parameters=None) -> DuckDBPyRelation
+duckdb_kql.df(con, kql, parameters=None) -> pandas.DataFrame
+duckdb_kql.arrow(con, kql, parameters=None) -> pyarrow.Table
+
+# Layer 2 — duckdb_kql.kusto — + pandas. An azure-kusto-data drop-in.
+KustoClient(kcsb).execute(database, query, properties) -> KustoResponseDataSet
 ```
 
+- Importing `duckdb_kql` does not import `duckdb`; Layer 1 resolves lazily.
 - `to_sql` needs no connection → cheap inspection/debugging and the core of
-  golden translation tests.
-- Optional `session.KqlSession(con)` wrapper for repeated queries.
+  golden translation tests. Its result is a `str` subclass carrying
+  `.parameters` and `.unbound`.
+- `declare query_parameters` binds **values**, never text: parameters render as
+  DuckDB placeholders, so the SQL holds nothing the caller supplied.
 - `pandas`/`pyarrow` are **optional** deps; default return is a DuckDB relation
   so the core has no heavy deps.
 - Errors: `KqlSyntaxError` (parse), `KqlUnsupportedError` (unmapped
-  operator/function, with name + span), `KqlSchemaError` (unknown table/column).
+  operator/function, with name + span), `KqlSchemaError` (unknown table/column,
+  or a parameter problem).
 
 ## 8. Milestones
 
