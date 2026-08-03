@@ -1,5 +1,11 @@
 # duckdb-kql
 
+[![CI](https://github.com/mmaitre314/duckdb-kql/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/mmaitre314/duckdb-kql/actions/workflows/ci.yml)
+[![Oracle](https://github.com/mmaitre314/duckdb-kql/actions/workflows/oracle.yml/badge.svg?branch=main)](https://github.com/mmaitre314/duckdb-kql/actions/workflows/oracle.yml)
+[![PyPI](https://img.shields.io/pypi/v/duckdb-kql.svg)](https://pypi.org/project/duckdb-kql/)
+[![Python versions](https://img.shields.io/pypi/pyversions/duckdb-kql.svg)](https://pypi.org/project/duckdb-kql/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/mmaitre314/duckdb-kql/blob/main/LICENSE)
+
 Run [Kusto KQL](https://learn.microsoft.com/kusto/query/) queries on
 [DuckDB](https://duckdb.org), from Python. Pure Python, no server, no JVM.
 
@@ -21,7 +27,7 @@ df = duckdb_kql.df(con, """
 """)
 ```
 
-**New here? Start with [Getting started](docs/getting-started.md).**
+**New here? Start with [Getting started](https://github.com/mmaitre314/duckdb-kql/blob/main/docs/getting-started.md).**
 
 ## Install
 
@@ -88,7 +94,7 @@ df = dataframe_from_result_table(response.primary_results[0])
 ```
 
 Details, including what it refuses and why:
-[`docs/kusto-client.md`](docs/kusto-client.md).
+[`docs/kusto-client.md`](https://github.com/mmaitre314/duckdb-kql/blob/main/docs/kusto-client.md).
 
 ## Query parameters
 
@@ -110,18 +116,20 @@ Measured against the real KQL engine (the Kusto Emulator), not asserted.
 | | |
 |---|---|
 | Doc-corpus cases matching ground truth | **245** of 1036 (0 mismatches) |
-| [Azure Monitor's published KQL subset](docs/azure-monitor-profile.md) | **114 / 119 (96%)** |
-| Scalar functions / aggregates / binary operators | 116 / 19 / 33 |
+| [Azure Monitor's published KQL subset](https://github.com/mmaitre314/duckdb-kql/blob/main/docs/azure-monitor-profile.md) | **114 / 119 (96%)** |
+| Tabular operators | **15 / 41** |
+| Scalar functions / aggregates / binary operators | **110 / 19 / 33** |
 
-Supported tabular operators: `where`, `project`, `project-away`,
-`project-rename`, `extend`, `summarize`, `join`, `mv-expand`, `distinct`,
-`count`, `sort` / `order by`, `take` / `limit`, `render`; sources `print`,
-`datatable`, `range`, and tables; plus `let` and `declare query_parameters`.
+Supported operators: `where`, `project`, `project-away`, `project-rename`,
+`extend`, `summarize`, `join`, `mv-expand`, `distinct`, `count`,
+`sort` / `order by`, `take` / `limit`, `render`; sources `print`, `datatable`,
+`range`, and tables; plus `let` and `declare query_parameters`.
 
-Not yet: `parse`, `union`, `top`, `make-series`, `evaluate`, `lookup`,
-`search`, `find`, `getschema`, `partition`, `fork`, `scan`, `top-nested`,
-`externaldata`. These raise `KqlUnsupportedError` — deliberately, rather than
-returning something plausible and wrong.
+**[The support matrix](https://github.com/mmaitre314/duckdb-kql/blob/main/docs/kql-support.md)
+lists every operator, function and type — supported or not — with the known
+limitations and Kusto discrepancies for each.** It is generated from the
+translator's own registries and probed at build time, so it cannot claim support
+that does not exist.
 
 ## Why refusal matters
 
@@ -139,18 +147,22 @@ approximation.
 
 | Document | What it covers |
 |---|---|
-| [Getting started](docs/getting-started.md) | Install, first query, the three layers |
-| [API reference](docs/api.md) | Every public function and type |
-| [Kusto SDK compatibility](docs/kusto-client.md) | What Layer 2 implements, no-ops, and refuses |
-| [Azure Monitor profile](docs/azure-monitor-profile.md) | Coverage against a published KQL subset |
-| [`docs/TRANSLATION.md`](docs/TRANSLATION.md) | **Normative** KQL→DuckDB mapping spec (R1–R12) |
-| [`docs/implementation-plan.md`](docs/implementation-plan.md) | Architecture and milestones |
-| [`docs/test-plan.md`](docs/test-plan.md) | Corpus harvesting, oracle, divergence catalog |
-| [`docs/kql-on-duckdb-landscape.md`](docs/kql-on-duckdb-landscape.md) | Survey of existing KQL-on-DuckDB work |
-| [`docs/implementation-options.md`](docs/implementation-options.md) | Six approaches considered, with the chosen one |
-| [`docs/m0-grammar-spike.md`](docs/m0-grammar-spike.md) | Grammar viability result |
-| [`docs/frequency-scan-results.md`](docs/frequency-scan-results.md) | What KQL constructs actually get used |
-| [`docs/licensing.md`](docs/licensing.md) | Third-party licensing review |
+| [Getting started](https://github.com/mmaitre314/duckdb-kql/blob/main/docs/getting-started.md) | Install, first query, the three layers |
+| [**KQL support matrix**](https://github.com/mmaitre314/duckdb-kql/blob/main/docs/kql-support.md) | Every operator and function, supported or not, each with its gotchas |
+| [API reference](https://github.com/mmaitre314/duckdb-kql/blob/main/docs/api.md) | Every public function and type |
+| [Kusto SDK compatibility](https://github.com/mmaitre314/duckdb-kql/blob/main/docs/kusto-client.md) | What Layer 2 implements, no-ops, and refuses |
+| [Azure Monitor profile](https://github.com/mmaitre314/duckdb-kql/blob/main/docs/azure-monitor-profile.md) | Coverage against a published KQL subset |
+| [`docs/TRANSLATION.md`](https://github.com/mmaitre314/duckdb-kql/blob/main/docs/TRANSLATION.md) | **Normative** KQL→DuckDB mapping spec (R1–R12) |
+| [`docs/implementation-plan.md`](https://github.com/mmaitre314/duckdb-kql/blob/main/docs/implementation-plan.md) | Architecture and milestones |
+| [`docs/test-plan.md`](https://github.com/mmaitre314/duckdb-kql/blob/main/docs/test-plan.md) | Corpus harvesting, oracle, divergence catalog |
+| [`docs/kql-on-duckdb-landscape.md`](https://github.com/mmaitre314/duckdb-kql/blob/main/docs/kql-on-duckdb-landscape.md) | Survey of existing KQL-on-DuckDB work |
+| [`docs/implementation-options.md`](https://github.com/mmaitre314/duckdb-kql/blob/main/docs/implementation-options.md) | Six approaches considered, with the chosen one |
+| [`docs/m0-grammar-spike.md`](https://github.com/mmaitre314/duckdb-kql/blob/main/docs/m0-grammar-spike.md) | Grammar viability result |
+| [`docs/frequency-scan-results.md`](https://github.com/mmaitre314/duckdb-kql/blob/main/docs/frequency-scan-results.md) | What KQL constructs actually get used |
+| [`docs/licensing.md`](https://github.com/mmaitre314/duckdb-kql/blob/main/docs/licensing.md) | Third-party licensing review |
+| [CONTRIBUTING.md](https://github.com/mmaitre314/duckdb-kql/blob/main/CONTRIBUTING.md) | How to add a mapping, and when not to |
+| [SECURITY.md](https://github.com/mmaitre314/duckdb-kql/blob/main/SECURITY.md) | Reporting vulnerabilities; what is in scope |
+| [CHANGELOG.md](https://github.com/mmaitre314/duckdb-kql/blob/main/CHANGELOG.md) | What changed, and when |
 
 ## Design
 
@@ -169,10 +181,10 @@ tools/regen_parser.sh        # regenerate the parser (maintainers; needs Java)
 ```
 
 The acceptance suite compares against the Kusto Emulator, which runs in Docker;
-see [`docs/oracle-harness.md`](docs/oracle-harness.md). It is a development and
+see [`docs/oracle-harness.md`](https://github.com/mmaitre314/duckdb-kql/blob/main/docs/oracle-harness.md). It is a development and
 CI tool only — never a runtime dependency, and never redistributed.
 
 ## License
 
-MIT — see [`LICENSE`](LICENSE). Vendors an Apache-2.0 grammar and MIT-licensed
-documentation samples; see [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md).
+MIT — see [`LICENSE`](https://github.com/mmaitre314/duckdb-kql/blob/main/LICENSE). Vendors an Apache-2.0 grammar and MIT-licensed
+documentation samples; see [`THIRD-PARTY-NOTICES.md`](https://github.com/mmaitre314/duckdb-kql/blob/main/THIRD-PARTY-NOTICES.md).

@@ -1,0 +1,23 @@
+name: Bug
+description: A crash, a confusing error, or something else that is not a wrong answer
+labels: ["bug"]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: How to reproduce
+      description: Ideally a snippet someone can paste and run.
+      render: python
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: "`duckdb_kql.__version__`, plus your DuckDB and Python versions."

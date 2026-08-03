@@ -1,0 +1,42 @@
+name: Wrong answer
+description: A query runs but returns something different from what Kusto returns
+labels: ["wrong-answer"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This is the most valuable report this project can receive. A query that
+        fails loudly is a nuisance; a query that succeeds and returns the wrong
+        number is the failure mode the whole design is built to prevent.
+  - type: textarea
+    id: kql
+    attributes:
+      label: The KQL
+      description: The smallest query that shows the difference.
+      render: kusto
+    validations:
+      required: true
+  - type: textarea
+    id: got
+    attributes:
+      label: What duckdb-kql returned
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What Kusto returned
+      description: From a real cluster, the emulator, or the published docs — say which.
+    validations:
+      required: true
+  - type: textarea
+    id: sql
+    attributes:
+      label: Generated SQL
+      description: "Output of `duckdb_kql.to_sql(your_query)`, if you have it."
+      render: sql
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: "`duckdb_kql.__version__`, plus your DuckDB and Python versions."

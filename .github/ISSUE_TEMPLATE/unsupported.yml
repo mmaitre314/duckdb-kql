@@ -1,0 +1,30 @@
+name: Unsupported construct
+description: Ask for an operator or function that currently raises KqlUnsupportedError
+labels: ["unsupported"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please check [the support matrix](https://github.com/mmaitre314/duckdb-kql/blob/main/docs/kql-support.md)
+        first — it lists what is missing and, for each entry, why. Some entries
+        are **deliberate refusals**: they raise because every available mapping
+        would return a different answer than Kusto. Those are worth discussing,
+        but they will not be closed by simply adding the mapping.
+  - type: input
+    id: construct
+    attributes:
+      label: Construct
+      description: The operator or function name.
+    validations:
+      required: true
+  - type: textarea
+    id: usage
+    attributes:
+      label: How you are using it
+      description: A real query, if you can share one. It helps to know which forms matter.
+      render: kusto
+  - type: textarea
+    id: workaround
+    attributes:
+      label: Workaround you are using instead
+      description: Optional, but it tells us how urgent this is.

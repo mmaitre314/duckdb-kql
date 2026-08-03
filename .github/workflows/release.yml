@@ -1,0 +1,214 @@
+# Build the distributions, and publish them when a release is made.
+#
+# Nothing here publishes on a push. Building runs on every push and pull request
+# so that a packaging break is caught with the commit that caused it rather than
+# at release time — but the artifacts only leave this repository when a GitHub
+# Release is published, or when someone manually dispatches the TestPyPI job.
+#
+# Publishing uses PyPI Trusted Publishing (OIDC), so there is no API token in
+# this repository to leak or rotate. Before the first release, register the
+# publisher at https://pypi.org/manage/account/publishing/ with:
+#
+#     owner:       mmaitre314
+#     repository:  duckdb-kql
+#     workflow:    release.yml
+#     environment: pypi          (and `testpypi` for the TestPyPI publisher)
+#
+# Release checklist is in CONTRIBUTING.md; the short version is: bump the
+# version in pyproject.toml and src/duckdb_kql/__init__.py, move the CHANGELOG's
+# Unreleased section under the new version, tag, and publish the GitHub Release.
+name: Release
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      publish_to_testpypi:
+        description: "Publish the built artifacts to TestPyPI"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build sdist and wheel
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Build
+        run: |
+          python -m pip install --upgrade build twine
+          python -m build
+
+      - name: Check the metadata renders
+        run: python -m twine check --strict dist/*
+
+      # The wheel is what almost everyone installs, so it is what gets smoke
+      # tested — installed into a clean environment from the built artifact
+      # rather than from the working tree, which is where packaging mistakes
+      # (a missing subpackage, an unshipped data file) actually show up.
+      - name: Smoke test the built wheel
+        run: |
+          python -m venv /tmp/wheeltest
+          /tmp/wheeltest/bin/pip install "$(ls dist/*.whl)[all]"
+          /tmp/wheeltest/bin/python - <<'PY'
+          import duckdb_kql
+          from duckdb_kql.kusto import KustoClient
+
+          con = duckdb_kql.connect()
+          con.sql("CREATE TABLE T AS SELECT 'x' AS s, 1 AS n")
+
+          assert duckdb_kql.sql(con, "T | where s == 'x' | count").fetchall() == [(1,)]
+          assert duckdb_kql.to_sql("print x = 1").startswith("SELECT")
+
+          # A parameter must still be bound rather than spliced, from the wheel.
+          kql = "declare query_parameters(p:string); T | where s == p | count"
+          assert duckdb_kql.sql(con, kql, {"p": "' OR 1=1 --"}).fetchall() == [(0,)]
+
+          with KustoClient(":memory:") as client:
+              assert client.execute("db", "print n = 1").primary_results[0].raw_rows == [[1]]
+
+          print("wheel", duckdb_kql.__version__, "OK")
+          PY
+
+      # The sdist has to be able to produce the wheel, or `pip install` from
+      # source is broken for anyone without a matching wheel.
+      - name: Build a wheel from the sdist
+        run: |
+          mkdir -p /tmp/sdist && tar xzf dist/*.tar.gz -C /tmp/sdist
+          python -m build --wheel --outdir /tmp/from-sdist /tmp/sdist/*/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: distributions
+          path: dist/
+          if-no-files-found: error
+
+  # A tag says a release is intended, so the thing being released has to be
+  # coherent: the tag, the package version and the changelog all naming the same
+  # release. Checked before publishing, not after.
+  version-matches-the-tag:
+    name: Version matches the tag
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'release'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Compare the tag, pyproject and __version__
+        run: |
+          python - <<'PY'
+          import os
+          import re
+          import sys
+          import tomllib
+          from pathlib import Path
+
+          tag = os.environ["GITHUB_REF_NAME"].lstrip("v")
+          pyproject = tomllib.loads(Path("pyproject.toml").read_text())["project"]["version"]
+          source = re.search(
+              r'^__version__ = "([^"]+)"',
+              Path("src/duckdb_kql/__init__.py").read_text(),
+              re.MULTILINE,
+          )
+          assert source, "src/duckdb_kql/__init__.py no longer defines __version__"
+
+          problems = []
+          if pyproject != tag:
+              problems.append(f"pyproject.toml says {pyproject}, tag says {tag}")
+          if source.group(1) != tag:
+              problems.append(f"__version__ is {source.group(1)}, tag says {tag}")
+          if f"[{tag}]" not in Path("CHANGELOG.md").read_text():
+              problems.append(f"CHANGELOG.md has no section for {tag}")
+
+          if problems:
+              sys.exit("::error::" + "; ".join(problems))
+          print(f"tag, package and changelog all agree on {tag}")
+          PY
+
+  publish-to-testpypi:
+    name: Publish to TestPyPI
+    needs: build
+    if: github.event_name == 'workflow_dispatch' && inputs.publish_to_testpypi
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/p/duckdb-kql
+    permissions:
+      id-token: write # OIDC, in place of an API token
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: distributions
+          path: dist/
+
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          # TestPyPI accumulates dry runs; re-uploading the same version should
+          # not fail the workflow.
+          skip-existing: true
+
+  publish-to-pypi:
+    name: Publish to PyPI
+    needs: [build, version-matches-the-tag]
+    # Only a published GitHub Release publishes. A tag push builds and checks
+    # but does not upload, so tagging is recoverable and releasing is deliberate.
+    if: github.event_name == 'release' && github.event.action == 'published'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: pypi
+      url: https://pypi.org/p/duckdb-kql
+    permissions:
+      id-token: write # OIDC, in place of an API token
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: distributions
+          path: dist/
+
+      - uses: pypa/gh-action-pypi-publish@release/v1
+
+  attach-to-release:
+    name: Attach distributions to the release
+    needs: publish-to-pypi
+    if: github.event_name == 'release' && github.event.action == 'published'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: distributions
+          path: dist/
+
+      - name: Upload
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ github.event.release.tag_name }}" dist/* --repo "${{ github.repository }}"

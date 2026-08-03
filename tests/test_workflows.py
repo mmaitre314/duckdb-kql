@@ -1,0 +1,102 @@
+"""The CI and release workflows make promises. These check they still hold.
+
+A workflow that stops running is invisible: the checks simply go green because
+there are none. The three things asserted here are the ones whose absence would
+be silent — that CI runs on pull requests and on `main`, that publishing needs a
+published release rather than a push, and that the badges in the README point at
+workflows that exist.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+yaml = pytest.importorskip("yaml")
+
+WORKFLOWS = Path(".github/workflows")
+
+pytestmark = pytest.mark.skipif(
+    not WORKFLOWS.is_dir(), reason="run from the repo root"
+)
+
+
+def _load(name: str) -> dict:
+    return yaml.safe_load((WORKFLOWS / name).read_text(encoding="utf-8"))
+
+
+def _triggers(workflow: dict) -> dict:
+    # `on` is YAML 1.1's boolean true, so PyYAML parses the key as True.
+    return workflow.get("on") or workflow[True]
+
+
+def test_ci_runs_on_pull_requests() -> None:
+    """Every pull request must be tested before it can be merged."""
+    triggers = _triggers(_load("ci.yml"))
+    assert "pull_request" in triggers, (
+        "CI no longer runs on pull requests — changes would reach main untested"
+    )
+    branches = (triggers["pull_request"] or {}).get("branches")
+    assert branches is None or "main" in branches, (
+        f"CI's pull_request trigger excludes main: {branches}"
+    )
+
+
+def test_ci_runs_on_pushes_to_main() -> None:
+    """The badge reports `main`, so something has to run there."""
+    triggers = _triggers(_load("ci.yml"))
+    assert "main" in triggers["push"]["branches"]
+
+
+def test_ci_still_runs_the_tests_and_the_linter() -> None:
+    steps = [
+        step.get("run", "")
+        for job in _load("ci.yml")["jobs"].values()
+        for step in job.get("steps", [])
+    ]
+    joined = "\n".join(steps)
+    assert "pytest" in joined, "CI no longer runs the test suite"
+    assert "ruff check" in joined, "CI no longer runs the linter"
+
+
+def test_release_builds_on_pull_requests_too() -> None:
+    """Packaging breaks with the commit that caused it, not at release time."""
+    triggers = _triggers(_load("release.yml"))
+    assert "pull_request" in triggers
+
+
+def test_publishing_requires_a_published_release() -> None:
+    """A push must never be able to publish.
+
+    Uploading to PyPI is irreversible — a version number cannot be reused — so
+    the trigger has to be something a person did on purpose.
+    """
+    publish = _load("release.yml")["jobs"]["publish-to-pypi"]
+    condition = publish["if"]
+    assert "github.event_name == 'release'" in condition
+    assert "github.event.action == 'published'" in condition
+
+
+def test_publishing_uses_trusted_publishing_not_a_stored_token() -> None:
+    """OIDC means there is no long-lived credential in this repository to leak."""
+    jobs = _load("release.yml")["jobs"]
+    for name in ("publish-to-pypi", "publish-to-testpypi"):
+        job = jobs[name]
+        assert job["permissions"]["id-token"] == "write", f"{name} lost OIDC access"
+        steps = "\n".join(str(s) for s in job["steps"])
+        assert "password" not in steps, f"{name} appears to use a stored token"
+
+
+def test_readme_badges_point_at_workflows_that_exist() -> None:
+    """A badge for a deleted workflow renders as a broken image, forever."""
+    import re  # noqa: PLC0415
+
+    readme = Path("README.md").read_text(encoding="utf-8")
+    referenced = set(
+        re.findall(r"actions/workflows/([\w.-]+\.yml)/badge\.svg", readme)
+    )
+    assert referenced, "the README no longer shows any CI badge"
+
+    missing = sorted(name for name in referenced if not (WORKFLOWS / name).is_file())
+    assert not missing, f"README badges reference missing workflows: {missing}"

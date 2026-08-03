@@ -18,6 +18,11 @@ import pytest
 
 DOCS = Path("docs")
 README = Path("README.md")
+#: Community files live at the root, and their links rot the same way.
+ROOT_DOCS = [
+    Path(name)
+    for name in ("CONTRIBUTING.md", "SECURITY.md", "CODE_OF_CONDUCT.md", "CHANGELOG.md")
+]
 
 pytestmark = pytest.mark.skipif(not README.is_file(), reason="run from the repo root")
 
@@ -34,10 +39,14 @@ def _read(path: Path) -> str:
 _LINK = re.compile(r"(?<!!)\[[^\]]*\]\(([^)#][^)]*)\)")
 
 
-@pytest.mark.parametrize(
-    "doc",
-    sorted(str(p) for p in [README, *DOCS.glob("*.md")]),
-)
+#: The README doubles as the PyPI landing page, where a relative link 404s, so
+#: its links into this repo are absolute. They still have to point somewhere.
+_REPO_BLOB = "https://github.com/mmaitre314/duckdb-kql/blob/main/"
+
+MARKDOWN = sorted(str(p) for p in [README, *DOCS.glob("*.md"), *ROOT_DOCS])
+
+
+@pytest.mark.parametrize("doc", MARKDOWN)
 def test_relative_links_resolve(doc: str) -> None:
     """A broken link in the entry-point docs is the first thing a reader hits."""
     path = Path(doc)
@@ -49,6 +58,23 @@ def test_relative_links_resolve(doc: str) -> None:
         if not resolved.exists():
             missing.append(target)
     assert not missing, f"{doc} links to files that do not exist: {missing}"
+
+
+@pytest.mark.parametrize("doc", MARKDOWN)
+def test_absolute_links_into_this_repo_resolve(doc: str) -> None:
+    """An absolute link to our own files is still a link that can rot.
+
+    Making them absolute for PyPI's sake removes them from the check above, so
+    they get their own: the URL is resolved back to a path in the working tree.
+    """
+    missing = []
+    for target in _LINK.findall(_read(Path(doc))):
+        if not target.startswith(_REPO_BLOB):
+            continue
+        relative = target[len(_REPO_BLOB) :].split("#")[0]
+        if relative and not Path(relative).exists():
+            missing.append(target)
+    assert not missing, f"{doc} links to repo files that do not exist: {missing}"
 
 
 # ---------------------------------------------------------------------------
@@ -150,6 +176,42 @@ def test_layer_zero_has_exactly_one_dependency() -> None:
 # ---------------------------------------------------------------------------
 # Coverage numbers
 # ---------------------------------------------------------------------------
+
+
+def test_readme_counts_match_the_generated_support_matrix() -> None:
+    """The README quotes the matrix's numbers; the matrix is generated.
+
+    Two numbers in two files is one number too many, and the README is the one
+    nobody regenerates.
+    """
+    matrix = _read(DOCS / "kql-support.md")
+    readme = _read(README)
+
+    for pattern, label in (
+        (r"^(\d+) of (\d+) supported\.$", "tabular operators"),
+        (r"^(\d+) supported, grouped by family\.$", "scalar functions"),
+    ):
+        found = re.search(pattern, matrix, re.MULTILINE)
+        assert found, f"the support matrix no longer states its {label} count"
+
+    operators = re.search(r"^(\d+) of (\d+) supported\.$", matrix, re.MULTILINE)
+    scalars = re.search(r"^(\d+) supported, grouped by family\.$", matrix, re.MULTILINE)
+
+    claimed_ops = re.search(r"\| Tabular operators \| \*\*(\d+) / (\d+)\*\* \|", readme)
+    assert claimed_ops, "README no longer states a tabular-operator count"
+    assert claimed_ops.groups() == operators.groups(), (
+        f"README says {claimed_ops.groups()} tabular operators, the matrix says "
+        f"{operators.groups()}"
+    )
+
+    claimed_scalars = re.search(
+        r"\| Scalar functions / aggregates / binary operators \| \*\*(\d+) /", readme
+    )
+    assert claimed_scalars, "README no longer states a scalar-function count"
+    assert claimed_scalars.group(1) == scalars.group(1), (
+        f"README says {claimed_scalars.group(1)} scalar functions, the matrix says "
+        f"{scalars.group(1)}"
+    )
 
 
 def test_readme_coverage_number_is_not_ahead_of_the_baseline() -> None:

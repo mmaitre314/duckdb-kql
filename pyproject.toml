@@ -10,13 +10,28 @@ readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.9"
 authors = [{ name = "Matthieu Maitre" }]
-keywords = ["kql", "kusto", "duckdb", "sql", "analytics"]
+keywords = [
+    "kql", "kusto", "duckdb", "sql", "analytics", "transpiler",
+    "azure-data-explorer", "azure-monitor", "log-analytics", "query",
+]
 classifiers = [
     "Development Status :: 2 - Pre-Alpha",
     "Intended Audience :: Developers",
+    "Intended Audience :: Information Technology",
+    "Intended Audience :: System Administrators",
     "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Database",
+    "Topic :: Database :: Front-Ends",
+    "Topic :: Software Development :: Compilers",
+    "Topic :: Scientific/Engineering :: Information Analysis",
 ]
 
 # Layer 0 — turning KQL text into DuckDB SQL — needs only the parser runtime.
@@ -42,14 +57,35 @@ dev = [
     "ruff",
     # tests/test_docs.py reads pyproject.toml; tomllib arrived in 3.11.
     "tomli; python_version < '3.11'",
+    # tests/test_workflows.py reads the GitHub Actions definitions.
+    "pyyaml",
 ]
 
 [project.urls]
 Homepage = "https://github.com/mmaitre314/duckdb-kql"
+Documentation = "https://github.com/mmaitre314/duckdb-kql/blob/main/docs/getting-started.md"
+Source = "https://github.com/mmaitre314/duckdb-kql"
+Changelog = "https://github.com/mmaitre314/duckdb-kql/blob/main/CHANGELOG.md"
 Issues = "https://github.com/mmaitre314/duckdb-kql/issues"
+"KQL support matrix" = "https://github.com/mmaitre314/duckdb-kql/blob/main/docs/kql-support.md"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/duckdb_kql"]
+
+# The sdist ships what someone needs to build, read and test the package. The
+# frozen oracle corpus and its fixtures are deliberately left out: together they
+# are ~29 MB of CI input that no installing user reads, and the acceptance suite
+# already skips itself when they are absent. Everything needed to reproduce them
+# is in the repository.
+[tool.hatch.build.targets.sdist]
+exclude = [
+    "/.claude",
+    "/.devcontainer",
+    "/.github",
+    "/docker-compose.yml",
+    "/tests/cases",
+    "/tests/fixtures",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -62,3 +98,9 @@ extend-exclude = ["src/duckdb_kql/_antlr"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
+
+[tool.ruff.lint.per-file-ignores]
+# The support matrix is a data table of one-line prose notes. Wrapping them to
+# 100 columns splits sentences across lines and makes the table harder to read
+# and to diff, which is the opposite of what the limit is for.
+"tools/gen_support_matrix.py" = ["E501"]
