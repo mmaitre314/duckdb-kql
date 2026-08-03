@@ -1,0 +1,29 @@
+{
+  "name": "duckdb-kql",
+  "image": "mcr.microsoft.com/devcontainers/python:1-3.13-bookworm",
+
+  // Docker-in-Docker is the whole point of this file: the Kusto Emulator is
+  // this project's ground-truth oracle (docs/test-plan.md §5.1), and without a
+  // working daemon `docker compose up -d kusto` fails and the oracle looks
+  // unavailable when it is not.
+  "features": {
+    "ghcr.io/devcontainers/features/docker-in-docker:2": {},
+    // ANTLR is a Java tool. Only tools/regen_parser.sh needs it — the generated
+    // parser is committed so installing the package never requires a JDK.
+    "ghcr.io/devcontainers/features/java:1": { "version": "17" }
+  },
+
+  // The emulator image is ~1.2 GB and the engine wants room to initialise.
+  "hostRequirements": { "cpus": 4, "memory": "8gb", "storage": "32gb" },
+
+  "postCreateCommand": "pip install -e '.[dev]'",
+
+  "customizations": {
+    "vscode": {
+      "extensions": ["ms-python.python", "charliermarsh.ruff"],
+      "settings": {
+        "python.testing.pytestEnabled": true
+      }
+    }
+  }
+}

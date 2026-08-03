@@ -1,0 +1,75 @@
+# Per-push CI — hermetic. No Docker, no emulator, no network.
+#
+# Everything here runs against expectations already frozen into the corpus, so
+# this lane stays fast and works on any architecture (including Apple Silicon,
+# which the emulator does not support). The emulator lives in oracle.yml.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        # Floor and ceiling of the supported range (pyproject requires-python).
+        python-version: ["3.9", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install
+        run: python -m pip install -e ".[dev]"
+
+      - name: Lint
+        run: ruff check src tools tests
+
+      - name: Test
+        run: python -m pytest -q
+
+  # The generated parser is committed (see grammar/UPSTREAM.md) so that installs
+  # need no Java. That only stays honest if the checked-in code still matches
+  # the grammar it claims to come from.
+  parser-is-in-sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Regenerate the parser
+        run: ./tools/regen_parser.sh
+
+      - name: Fail if the committed parser differs from the grammar
+        run: |
+          if ! git diff --quiet -- src/duckdb_kql/_antlr; then
+            echo "::error::Committed parser is stale. Run tools/regen_parser.sh and commit."
+            git diff --stat -- src/duckdb_kql/_antlr
+            exit 1
+          fi
+          echo "Committed parser matches grammar/Kql.g4"

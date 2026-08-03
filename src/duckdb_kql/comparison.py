@@ -57,12 +57,27 @@ _TYPE_BUCKETS = {
 #: be meaningfully compared against these — the emulator's answer was true at
 #: freeze time and nothing can reproduce it (R10).
 NONDETERMINISTIC_FUNCTIONS = frozenset(
-    {"now", "rand", "new_guid", "ingestion_time", "current_principal"}
+    {
+        "now", "rand", "new_guid", "ingestion_time", "current_principal",
+        # Cursors encode the engine's current commit position — a clock in
+        # disguise. Caught by the drift lane, which saw cursor_current() return
+        # a different value on every run.
+        "cursor_current", "current_cursor", "cursor_after",
+        "current_database", "current_cluster_endpoint", "current_principal_details",
+    }
 )
 
 # Aggregates whose results are estimates, not exact values (R11).
 APPROXIMATE_FUNCTIONS = frozenset(
     {"dcount", "dcountif", "percentile", "percentiles", "percentilew", "tdigest"}
+)
+
+# Operators that pick rows arbitrarily. `sample` re-rolls on every execution, so
+# its output is not reproducible even on the same engine and the same data —
+# unlike `take`, whose *order* is undefined but whose row set is stable enough to
+# compare unordered.
+_NONDETERMINISTIC_OPERATOR_RE = re.compile(
+    r"\|\s*(sample|sample-distinct)\b", re.IGNORECASE
 )
 
 _TERMINAL_ORDERING_RE = re.compile(
@@ -111,7 +126,9 @@ def is_nondeterministic(kql: str) -> bool:
     expectation tests nothing. Callers should skip rather than fail.
     """
     lowered = kql.lower()
-    return any(f"{fn}(" in lowered for fn in NONDETERMINISTIC_FUNCTIONS)
+    if any(f"{fn}(" in lowered for fn in NONDETERMINISTIC_FUNCTIONS):
+        return True
+    return _NONDETERMINISTIC_OPERATOR_RE.search(kql) is not None
 
 
 @dataclass
@@ -221,6 +238,29 @@ def _as_timedelta(v: Any) -> _dt.timedelta | None:
     return None
 
 
+_FRACTION_RE = re.compile(r"(?<=:\d\d)\.(\d+)")
+
+
+def _iso_for_fromisoformat(text: str) -> str:
+    """Rewrite an ISO-8601 instant into the narrow dialect old Pythons accept.
+
+    ``datetime.fromisoformat`` only became a full ISO-8601 parser in 3.11.
+    Before that it rejects a trailing ``Z`` and accepts *exactly* 3 or 6
+    fractional digits — so the emulator's ``23:59:59.9Z`` and its 7-digit
+    ``.1234567`` ticks both raise on 3.9/3.10.
+
+    That failure is invisible in the worst way: ``_as_datetime`` returns None,
+    the comparison falls back to comparing a string against a datetime, and the
+    case is reported as a mismatch. The suite would silently under-report
+    matches on the oldest Python we claim to support.
+    """
+    text = text.replace("Z", "+00:00").replace("z", "+00:00")
+    # Pad or truncate the fractional second to exactly 6 digits (microseconds,
+    # the most a datetime can hold — KQL ticks are 100ns so the 7th digit is
+    # dropped by any Python version).
+    return _FRACTION_RE.sub(lambda m: "." + (m.group(1) + "000000")[:6], text, count=1)
+
+
 def _as_datetime(v: Any) -> _dt.datetime | None:
     """Coerce an ISO-8601 string or a Python datetime to a naive UTC datetime.
 
@@ -234,7 +274,7 @@ def _as_datetime(v: Any) -> _dt.datetime | None:
         if not re.match(r"^\d{4}-\d{2}-\d{2}[T ]", text):
             return None
         try:
-            dt = _dt.datetime.fromisoformat(text.replace("Z", "+00:00"))
+            dt = _dt.datetime.fromisoformat(_iso_for_fromisoformat(text))
         except ValueError:
             return None
     else:

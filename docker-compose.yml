@@ -12,8 +12,11 @@
 
 services:
   kusto:
-    # Pin by digest in CI so frozen expectations stay reproducible.
-    image: mcr.microsoft.com/azuredataexplorer/kustainer-linux:latest
+    # Pinned by digest so frozen expectations stay reproducible: a moving
+    # `:latest` would silently change the ground truth the whole suite is judged
+    # against. Override with KUSTO_IMAGE=...:latest to test a newer build; the
+    # nightly drift lane does exactly that.
+    image: ${KUSTO_IMAGE:-mcr.microsoft.com/azuredataexplorer/kustainer-linux@sha256:de542bb2eda4ca71330c707b13c8b4cb77d46d202cf96b129ac1390e2c6ea5b2}
     container_name: duckdb-kql-kusto
     environment:
       # Accepting the Microsoft Software License Terms is required to start.

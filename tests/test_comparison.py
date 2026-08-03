@@ -7,11 +7,14 @@ hides real KQL/DuckDB divergence.
 
 from __future__ import annotations
 
+import datetime as dt
+
 import pytest
 
 from duckdb_kql.comparison import (
     ComparisonOptions,
     compare,
+    is_nondeterministic,
     is_order_significant,
     normalize_type,
     uses_approximate_function,
@@ -169,3 +172,43 @@ def test_allow_prefix_handles_truncated_doc_output():
 def test_missing_tables():
     assert compare(None, None).equal
     assert not compare(None, tbl(["a"], [[1]])).equal
+
+
+# --- temporal normalization across Python versions --------------------------
+#
+# `datetime.fromisoformat` only became a full ISO-8601 parser in 3.11. On 3.9/3.10
+# a trailing `Z` or a non-3/6-digit fraction raises, which used to make the
+# comparison fall back to string-vs-datetime and report a false mismatch — so the
+# acceptance suite quietly scored lower on the oldest Python we support.
+@pytest.mark.parametrize(
+    "emulator_value",
+    [
+        "2015-12-31T23:59:59.9Z",        # 1 fractional digit
+        "2015-12-31T23:59:59.90Z",       # 2
+        "2015-12-31T23:59:59.900Z",      # 3  (the only one old Pythons took)
+        "2015-12-31T23:59:59.900000Z",   # 6
+        "2015-12-31T23:59:59.9000000Z",  # 7 — KQL ticks are 100ns
+    ],
+)
+def test_fractional_seconds_parse_on_every_supported_python(emulator_value):
+    """All of these denote the same instant DuckDB returns as a datetime."""
+    duckdb_value = dt.datetime(2015, 12, 31, 23, 59, 59, 900000)
+    assert compare(tbl(["t"], [[emulator_value]]), tbl(["t"], [[duckdb_value]])).equal
+
+
+def test_utc_offsets_normalize_to_the_same_instant():
+    """R8 — same instant, different spelling."""
+    naive = dt.datetime(2022, 12, 2, 11, 45, 56)
+    for spelling in ("2022-12-02T11:45:56Z", "2022-12-02T13:45:56+02:00"):
+        assert compare(tbl(["t"], [[spelling]]), tbl(["t"], [[naive]])).equal
+
+
+def test_sample_operator_is_nondeterministic():
+    """`sample` re-rolls every run, so it has no reproducible ground truth.
+
+    Found by the drift lane: four corpus cases reported drift on every pass.
+    """
+    assert is_nondeterministic("range x from 1 to 100 step 1 | sample 1")
+    assert is_nondeterministic("T | sample-distinct 5 of x")
+    assert is_nondeterministic("print cursor_current()")
+    assert not is_nondeterministic("T | take 5")

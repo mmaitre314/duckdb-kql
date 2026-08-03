@@ -58,6 +58,13 @@ __all__ = [
 def to_sql(kql: str, schema: Any | None = None) -> str:
     """Translate *kql* to DuckDB SQL. Requires no connection.
 
+    .. important::
+       KQL datetimes are UTC (``docs/TRANSLATION.md`` R8), and DuckDB reads the
+       **session** ``TimeZone`` when casting a string that carries no offset. Run
+       the returned SQL on a connection with ``SET TimeZone='UTC'`` or datetime
+       values will be silently shifted. :func:`sql` does this for you; the
+       requirement only falls to callers who execute the SQL themselves.
+
     Raises:
         KqlSyntaxError: the query does not parse.
         KqlUnsupportedError: it parses but uses a construct outside this wave.
@@ -69,7 +76,13 @@ def to_sql(kql: str, schema: Any | None = None) -> str:
 
 
 def sql(con: Any, kql: str) -> Any:
-    """Execute *kql* against a DuckDB connection, returning a relation."""
+    """Execute *kql* against a DuckDB connection, returning a relation.
+
+    Sets ``TimeZone='UTC'`` on *con* first — see :func:`to_sql`. This changes
+    connection state deliberately: leaving it to the caller means a machine in a
+    non-UTC zone silently returns wrong datetimes.
+    """
+    con.execute("SET TimeZone='UTC'")
     return con.sql(to_sql(kql))
 
 

@@ -11,14 +11,47 @@
 |---|---|
 | Image | `mcr.microsoft.com/azuredataexplorer/kustainer-linux` |
 | Pinned digest | `sha256:de542bb2eda4ca71330c707b13c8b4cb77d46d202cf96b129ac1390e2c6ea5b2` |
-| Size | 4.57 GB |
+| Size | 1.18 GB on disk (measured on the pinned digest) |
 | Endpoint | `http://localhost:8080` — plain HTTP, no auth |
 | Requirements | x86‑64 with SSE4.2/AVX2, ≥4 GB RAM |
 
 ```bash
 docker compose up -d kusto
-python tools/regen_expectations.py --image-digest <digest>
+python tools/regen_expectations.py --image-digest <digest>   # freeze
+python tools/regen_expectations.py --check                   # verify, writes nothing
 ```
+
+## Where it runs
+
+The emulator is x86‑64 only and the image is over a gigabyte, so it is
+deliberately **not** on the per-push path. Three places can run it:
+
+| Environment | How | Notes |
+|---|---|---|
+| **GitHub Actions** | [`.github/workflows/oracle.yml`](../.github/workflows/oracle.yml) | `ubuntu-latest` only — the ARM runners cannot run it. Nightly drift check plus a `workflow_dispatch` **regenerate** mode that uploads the corpus as an artifact instead of committing it. |
+| **Dev container / Codespaces** | [`.devcontainer/devcontainer.json`](../.devcontainer/devcontainer.json) | Enables docker-in-docker, which is the only reason the file exists. |
+| **Claude Code web session** | `sudo -n dockerd &` then `docker compose up -d kusto` | Docker is installed but **the daemon is not started**, so `docker compose` fails with "Cannot connect to the Docker daemon" and the oracle looks unavailable when it is not. Roughly 30 s to first query. |
+
+Per-push CI ([`ci.yml`](../.github/workflows/ci.yml)) never touches any of this —
+it compares against frozen expectations, so it is fast, hermetic, and runs on any
+architecture.
+
+## Drift checking
+
+`--check` re-runs every frozen case and compares, writing nothing. It exists
+because the frozen expectations *are* the yardstick for the entire acceptance
+suite: if they silently move, every measurement built on them is wrong.
+
+It must use the same comparison semantics as the acceptance suite rather than a
+byte diff — the first run proved why. Comparing raw JSON reported **hundreds** of
+false drifts: `rand()`-seeded plugin queries return new numbers every run, and
+unordered results came back in a different row order (R10). A lane that is red
+every night is a lane nobody reads. With `compare()` + `is_nondeterministic()`
+the same sweep reports **737 checked, 0 drifted**.
+
+Two genuinely nondeterministic constructs were found this way and added to
+`NONDETERMINISTIC_FUNCTIONS`: `cursor_current()` (a commit position — a clock in
+disguise) and the `sample` operator (re-rolls on every execution, unlike `take`).
 
 ## The pieces
 

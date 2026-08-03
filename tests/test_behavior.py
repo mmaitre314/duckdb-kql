@@ -30,7 +30,7 @@ CORPUS = Path(os.environ.get("DUCKDB_KQL_CORPUS", "tests/cases/docs/docs-corpus.
 pytestmark = pytest.mark.skipif(not CORPUS.is_file(), reason=f"no corpus at {CORPUS}")
 
 #: Cases that translate AND match ground truth. May only go UP.
-BASELINE_PASSING = 25
+BASELINE_PASSING = 26
 
 #: Cases we translate but knowingly get wrong, with the reason. This is an
 #: **admission of a bug**, not a waiver: each entry is a real KQL↔DuckDB gap
@@ -38,15 +38,7 @@ BASELINE_PASSING = 25
 #:
 #: Entries are checked for staleness — a case listed here that starts passing
 #: fails the build, so the list cannot rot into a silent allowlist.
-KNOWN_DIVERGENCES: dict[str, str] = {
-    "todatetime-function-01": (
-        "R1/R8 date-format gap: KQL parses '12-02-2022', DuckDB's TRY_CAST "
-        "returns NULL. Which field order KQL uses is unresolved — the frozen "
-        "expectation only proves both sides agree — so guessing a strptime "
-        "format here would trade a null for a possibly-wrong date. Needs an "
-        "oracle round-trip (docs/test-plan.md §5.2) before it can be mapped."
-    ),
-}
+KNOWN_DIVERGENCES: dict[str, str] = {}
 
 
 @functools.lru_cache(maxsize=1)

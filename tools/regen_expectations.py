@@ -28,6 +28,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
+from duckdb_kql.comparison import (  # noqa: E402
+    ComparisonOptions,
+    compare,
+    is_nondeterministic,
+)
 from duckdb_kql.oracle import DEFAULT_ENDPOINT, EmulatorError, KustoEmulator  # noqa: E402
 
 DEFAULT_CORPUS = Path("tests/cases/docs/docs-corpus.json")
@@ -41,12 +46,21 @@ def regen(
     only_missing: bool = False,
     include_fixture_cases: bool = False,
     image_digest: str | None = None,
+    check: bool = False,
 ) -> dict:
+    """Freeze expectations from the emulator, or (``check=True``) verify them.
+
+    In check mode nothing is written: each case is re-run and compared against
+    what is already frozen, so a changed emulator image or a changed harvest
+    shows up as drift instead of quietly rewriting the ground truth our whole
+    test suite is judged against.
+    """
     doc = json.loads(corpus_path.read_text(encoding="utf-8"))
     cases = doc["cases"]
 
-    stats = {"attempted": 0, "frozen": 0, "rejected": 0, "skipped": 0}
+    stats = {"attempted": 0, "frozen": 0, "rejected": 0, "skipped": 0, "drifted": 0}
     rejections: list[dict] = []
+    drifts: list[dict] = []
 
     for case in cases:
         if not case.get("inline_input") and not include_fixture_cases:
@@ -58,6 +72,18 @@ def regen(
         if limit is not None and stats["attempted"] >= limit:
             break
 
+        if check:
+            if case.get("expected") is None:
+                # Nothing frozen to drift from.
+                stats["skipped"] += 1
+                continue
+            if is_nondeterministic(case["kql"]):
+                # rand()/now() cases return different values every run. Diffing
+                # them reports drift on every single nightly, which is how a
+                # drift lane becomes noise everyone learns to ignore.
+                stats["skipped"] += 1
+                continue
+
         stats["attempted"] += 1
         try:
             result = kusto.query(case["kql"])
@@ -67,17 +93,38 @@ def regen(
             # feature, or needs data we did not mount. Record and move on.
             stats["rejected"] += 1
             rejections.append({"id": case["id"], "error": str(e)[:300]})
+            if check:
+                # A case that used to freeze and now errors IS drift.
+                stats["drifted"] += 1
+                drifts.append({"id": case["id"], "was": "frozen", "now": f"rejected: {e}"[:200]})
+                continue
             case["expected"] = None
             case["oracle"] = None
             case["oracle_note"] = "emulator rejected this query"
             continue
 
-        case["expected"] = result.to_dict()
+        fresh = result.to_dict()
+        if check:
+            # Use the same comparison the acceptance suite uses, not `!=`. Row
+            # order is meaningless without a terminal sort (R10) and floats need
+            # tolerance, so a byte-comparison flags differences that are not
+            # drift at all.
+            verdict = compare(case["expected"], fresh, ComparisonOptions.for_query(case["kql"]))
+            if not verdict.equal:
+                stats["drifted"] += 1
+                drifts.append({"id": case["id"], "was": case["expected"], "now": fresh,
+                               "why": str(verdict)[:200]})
+            continue
+
+        case["expected"] = fresh
         case["oracle"] = "kusto-emulator"
         if image_digest:
             case["oracle_image"] = image_digest
         case.pop("oracle_note", None)
         stats["frozen"] += 1
+
+    if check:
+        return {"stats": stats, "rejections": rejections, "drifts": drifts}
 
     doc.setdefault("oracle", {})
     doc["oracle"]["source"] = "kusto-emulator"
@@ -85,7 +132,7 @@ def regen(
         doc["oracle"]["image"] = image_digest
 
     corpus_path.write_text(json.dumps(doc, indent=1), encoding="utf-8")
-    return {"stats": stats, "rejections": rejections}
+    return {"stats": stats, "rejections": rejections, "drifts": drifts}
 
 
 def main() -> int:
@@ -101,6 +148,12 @@ def main() -> int:
     )
     ap.add_argument("--image-digest", default=None, help="record the pinned image digest")
     ap.add_argument("--wait", type=float, default=300.0)
+    ap.add_argument(
+        "--check",
+        action="store_true",
+        help="verify frozen expectations against the emulator without writing "
+        "(exit 3 on drift) — the nightly CI lane",
+    )
     args = ap.parse_args()
 
     if not args.corpus.is_file():
@@ -125,8 +178,29 @@ def main() -> int:
         only_missing=args.only_missing,
         include_fixture_cases=args.include_fixture_cases,
         image_digest=args.image_digest,
+        check=args.check,
     )
     s = r["stats"]
+
+    if args.check:
+        print(f"checked {s['attempted']} frozen expectation(s)")
+        print(f"  drifted  {s['drifted']}")
+        print(f"  skipped  {s['skipped']} (nothing frozen, or needs fixture)")
+        if r["drifts"]:
+            print("\nDRIFT — the emulator no longer produces the frozen result:")
+            for x in r["drifts"][:20]:
+                print(f"  {x['id']}")
+                print(f"    frozen: {str(x['was'])[:160]}")
+                print(f"    now:    {str(x['now'])[:160]}")
+            print(
+                "\nGround truth changed. Do NOT just re-freeze: work out whether the "
+                "emulator image moved, the harvest changed, or ADX behaviour actually "
+                "differs, and record the finding in docs/test-plan.md §6."
+            )
+            return 3
+        print("\nno drift — frozen expectations still match the emulator")
+        return 0
+
     print(f"attempted {s['attempted']}")
     print(f"  frozen    {s['frozen']}")
     print(f"  rejected  {s['rejected']}")

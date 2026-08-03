@@ -260,14 +260,24 @@ KQL↔DuckDB semantic gaps** and should grow as we find more.
 - timespan literals (`1d`,`90m`,`100ms`,`1tick`) → `INTERVAL`; arithmetic and
   formatting round-trips.
 - `todatetime`/`totimespan` parsing of bad input → **null, not error**.
-- **CONFIRMED (open)** — `todatetime` accepts date formats DuckDB's `TRY_CAST`
-  rejects. `print todatetime('12-02-2022') == datetime('12-02-2022')` is `true`
-  in ADX and `null` on DuckDB (corpus case `todatetime-function-01`, tracked in
-  `tests/test_behavior.py::KNOWN_DIVERGENCES`). The frozen expectation proves
-  only that both sides agree, not *which* date ADX produced, so the field order
-  (`MM-DD` vs `DD-MM`) must be settled with an oracle round-trip before a
-  `try_strptime` format list is written — a guess here swaps a visible null for
-  an invisible wrong date.
+- **RESOLVED via oracle (2026-08-03)** — `todatetime` accepts date formats
+  DuckDB's `TRY_CAST` rejects, and the field order is **`MM-DD-YYYY`**:
+  `'12-02-2022'` → `2022-12-02`, while `'13-01-2022'` → `null`, which is what
+  rules out `DD-MM`. Also accepted: `MM/DD/YYYY`, `MM.DD.YYYY`, `2 Dec 2022`,
+  `Dec 2, 2022`, RFC-1123, and `YYYYMMDD`. Mapped via `try_strptime` fallback in
+  `translate/functions.py`; 27/27 formats verified against the emulator. Pinned
+  by `tests/test_datetime_traps.py`.
+- **RESOLVED via oracle (2026-08-03) — the dangerous one.** `todatetime` with an
+  explicit UTC offset **converts** to UTC; DuckDB's plain `TIMESTAMP` cast
+  *accepts the same string* and silently keeps the local wall time.
+  `'2022-12-02T13:45:56+02:00'` is `11:45:56` in ADX and was `13:45:56` for us —
+  a wrong answer with no error, found only because the oracle was consulted on a
+  format nothing in the corpus exercised. Fixed by casting via `TIMESTAMPTZ`.
+- **Session `TimeZone` is part of the contract (R8).** DuckDB reads it when
+  casting an offset-less datetime string, so identical SQL yields different
+  answers on a non-UTC machine. Neither candidate formulation was found to be
+  session-independent, so `duckdb_kql.sql()` forces `SET TimeZone='UTC'` and
+  `to_sql()` documents the requirement for callers running the SQL themselves.
 
 **Numbers & null propagation**
 - Integer vs real division; `%` sign behavior; overflow (`long` 64-bit).

@@ -49,6 +49,38 @@ def _f(name, kind, template, arities=(), rules=(), note=""):
     return FunctionSpec(name, kind, template, arities, rules, note)
 
 
+# KQL accepts a wider set of date formats than DuckDB's TIMESTAMP cast, and it
+# resolves UTC offsets instead of discarding them. Both gaps were measured
+# against the emulator (see docs/test-plan.md §6), not guessed:
+#
+#   '12-02-2022'                -> 2022-12-02  (MM-DD-YYYY; '13-01-2022' is null,
+#                                               which is what proves the order)
+#   '2022-12-02T13:45:56+02:00' -> 11:45:56    (converted to UTC, NOT truncated)
+#
+# The offset case is the dangerous one: a plain TIMESTAMP cast parses it happily
+# and silently keeps the local wall time, so the query returns a wrong hour with
+# no error. Casting via TIMESTAMPTZ resolves it.
+#
+# ORDER MATTERS. The TIMESTAMPTZ cast must come first -- it is the only branch
+# that honours an offset -- and try_strptime only sees what it rejects.
+#
+# This branch reads the session TimeZone for offset-less input, so the emitted
+# SQL is correct only under `SET TimeZone='UTC'` (R8). duckdb_kql.sql() sets it;
+# to_sql() documents it for callers running the SQL themselves.
+_DATETIME_FORMATS = (
+    "%m-%d-%Y", "%m/%d/%Y", "%m.%d.%Y",
+    "%m-%d-%Y %H:%M:%S", "%m/%d/%Y %H:%M:%S",
+    "%-d %b %Y", "%b %-d, %Y",
+    "%a, %d %b %Y %H:%M:%S GMT",
+    "%Y%m%d",
+)
+_FORMAT_LIST = "[" + ", ".join(f"'{f}'" for f in _DATETIME_FORMATS) + "]"
+_TODATETIME = (
+    "COALESCE(TRY_CAST({0} AS TIMESTAMPTZ) AT TIME ZONE 'UTC', "
+    f"try_strptime({{0}}, {_FORMAT_LIST}))"
+)
+
+
 #: Wave 1 scalar and aggregate functions.
 SCALAR_FUNCTIONS: dict[str, FunctionSpec] = {
     s.name: s
@@ -85,7 +117,8 @@ SCALAR_FUNCTIONS: dict[str, FunctionSpec] = {
         _f("tostring", "template", "CAST({0} AS VARCHAR)", (1,), ("R1",)),
         _f("tobool", "template", "TRY_CAST({0} AS BOOLEAN)", (1,), ("R1",)),
         _f("toboolean", "template", "TRY_CAST({0} AS BOOLEAN)", (1,), ("R1",)),
-        _f("todatetime", "template", "TRY_CAST({0} AS TIMESTAMP)", (1,), ("R1", "R8")),
+        _f("todatetime", "template", _TODATETIME, (1,), ("R1", "R8"),
+           "wider format surface than TRY_CAST; resolves UTC offsets"),
         _f("totimespan", "template", "TRY_CAST({0} AS INTERVAL)", (1,), ("R1", "R8")),
         _f("toguid", "template", "TRY_CAST({0} AS UUID)", (1,), ("R1",)),
         # --- math -----------------------------------------------------------

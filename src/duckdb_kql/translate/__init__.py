@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from .. import ir
 from ..errors import KqlUnsupportedError
-from .functions import BINARY_OPERATORS, lookup
+from .functions import _TODATETIME, BINARY_OPERATORS, lookup
 
 __all__ = ["to_sql", "TranslationResult"]
 
@@ -72,7 +72,11 @@ def render_literal(lit: ir.Literal) -> str:
     if lit.kind in ("real", "decimal"):
         return f"CAST({lit.value} AS DOUBLE)"
     if lit.kind == "datetime":
-        return f"TIMESTAMP {quote_string(str(lit.value))}"
+        # A `datetime(...)` literal accepts everything todatetime() does, so it
+        # must go through the same conversion (R8). `TIMESTAMP '12-02-2022'` is
+        # both wrong and *loud* — DuckDB raises rather than returning the date
+        # KQL would. DuckDB constant-folds this, so there is no runtime cost.
+        return _TODATETIME.format(quote_string(str(lit.value)))
     if lit.kind == "timespan":
         return f"INTERVAL {quote_string(str(lit.value))}"
     if lit.kind == "guid":
