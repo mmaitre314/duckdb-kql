@@ -122,6 +122,9 @@ def render_expr(node: ir.Expr) -> str:
             )
         return spec.template.format(render_expr(node.left), render_expr(node.right))
 
+    if isinstance(node, ir.InList):
+        return render_in_list(node)
+
     if isinstance(node, ir.FunctionCall):
         if node.name.lower() == "bin":
             return render_bin(node)
@@ -243,6 +246,9 @@ def render_source(source: ir.Source) -> str:
             for i, e in enumerate(source.expressions)
         ]
         return "SELECT " + ", ".join(cols)
+
+    if isinstance(source, ir.RangeSource):
+        return render_range(source)
 
     if isinstance(source, ir.DataTable):
         return render_datatable(source)
@@ -555,8 +561,16 @@ def render_summarize(op: ir.Summarize, prev: str) -> str:
         # expression is what DuckDB will fold anyway.
         group.append(sql)
 
+    # Two aggregates can generate the same name (`summarize make_set(y),
+    # make_set(y)`). KQL suffixes the later one -- set_y, set_y1 -- with no
+    # separator; DuckDB's own de-duplication would produce set_y_1.
+    from ..schema import disambiguate
+
+    taken = [group_key_name(k, i) for i, k in enumerate(op.by)]
     for agg in op.aggregates:
-        select.append(f"{render_aggregate(agg)} AS {quote_ident(aggregate_name(agg))}")
+        name = disambiguate(aggregate_name(agg), taken)
+        taken.append(name)
+        select.append(f"{render_aggregate(agg)} AS {quote_ident(name)}")
 
     sql = f"SELECT {', '.join(select)} FROM {prev}"
     if group:
@@ -645,3 +659,45 @@ def _renamed(left_cols: list[str], right_cols: list[str]) -> list[str]:
     from ..schema import join_output_columns
 
     return join_output_columns(left_cols, right_cols, "inner")[len(left_cols):]
+
+
+def render_in_list(node: ir.InList) -> str:
+    """``x in (a, b, ...)`` and its ``!in`` / ``in~`` variants.
+
+    The ``~`` suffix is case-INsensitive (R2), matching `=~` rather than `==`.
+    Lowering both sides keeps the comparison symmetric — comparing a lowered
+    column against un-lowered literals would silently miss matches.
+    """
+    value = render_expr(node.value)
+
+    if node.subquery is not None:
+        inner = str(to_sql(node.subquery))
+        if node.case_insensitive:
+            # Lower BOTH sides, so the subquery must be wrapped rather than
+            # inlined: comparing a lowered value against un-lowered rows would
+            # silently miss matches.
+            value = f"lower({value})"
+            inner = f"SELECT lower(CAST(COLUMNS(*) AS VARCHAR)) FROM ({inner})"
+        sql = f"({value} IN ({inner}))"
+        return f"(NOT {sql})" if node.negated else sql
+
+    items = [render_expr(i) for i in node.items]
+    if node.case_insensitive:
+        value = f"lower({value})"
+        items = [f"lower({i})" for i in items]
+    sql = f"({value} IN ({', '.join(items)}))"
+    return f"(NOT {sql})" if node.negated else sql
+
+
+def render_range(source: ir.RangeSource) -> str:
+    """``range name from start to stop step step``.
+
+    Both endpoints are **inclusive**, which is what ``generate_series`` gives
+    (``range`` in DuckDB excludes the stop, so the near-identical name is a
+    trap). A backwards range yields no rows in both engines.
+    """
+    return (
+        f"SELECT UNNEST(generate_series("
+        f"{render_expr(source.start)}, {render_expr(source.stop)}, "
+        f"{render_expr(source.step)})) AS {quote_ident(source.name)}"
+    )

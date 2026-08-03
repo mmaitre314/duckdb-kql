@@ -17,9 +17,9 @@ from dataclasses import dataclass, field
 __all__ = [
     "Node", "Expr", "Operator", "Query",
     # expressions
-    "Literal", "ColumnRef", "BinaryOp", "UnaryOp", "FunctionCall", "NamedExpr",
+    "Literal", "ColumnRef", "BinaryOp", "UnaryOp", "FunctionCall", "NamedExpr", "InList",
     # sources
-    "TableRef", "DataTable", "PrintSource",
+    "TableRef", "DataTable", "PrintSource", "RangeSource",
     # operators
     "Summarize", "Join", "JoinKey",
     "Where", "Project", "Extend", "Take", "Sort", "SortKey", "Count", "Distinct",
@@ -202,6 +202,34 @@ class Count(Operator):
 @dataclass(frozen=True)
 class Distinct(Operator):
     columns: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class RangeSource(Source):
+    """``range name from start to stop step step`` — a generated column.
+
+    Both endpoints are **inclusive**, and the result is empty when the range
+    runs backwards.
+    """
+
+    name: str
+    start: Expr
+    stop: Expr
+    step: Expr
+
+
+@dataclass(frozen=True)
+class InList(Expr):
+    """``x in (a, b, ...)`` and its negated / case-insensitive variants."""
+
+    value: Expr
+    items: tuple[Expr, ...]
+    negated: bool = False
+    case_insensitive: bool = False
+    #: A tabular right-hand side: ``x in (SomeTable | project col)``. When set,
+    #: ``items`` is empty and membership is tested against the query's first
+    #: column.
+    subquery: Query | None = None
 
 
 @dataclass(frozen=True)

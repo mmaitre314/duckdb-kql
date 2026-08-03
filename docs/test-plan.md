@@ -388,6 +388,25 @@ KQL↔DuckDB semantic gaps** and should grow as we find more.
 - `parse_json`/`todynamic`; array indexing; `bag_unpack`/`mv-expand` expansion
   order and null rows; nested access typing.
 
+**Sources, membership, and visualization — implemented, pinned by
+[`tests/test_range_in_render.py`](../tests/test_range_in_render.py)**
+- **`range` includes BOTH endpoints.** DuckDB has a function literally named
+  `range` that *excludes* the stop, so the obvious mapping is off by one row;
+  `generate_series` is the inclusive one. A backwards range is empty in both.
+- **`in~` / `!in~` are case-INsensitive** (they follow `=~`, not `==`). The
+  right-hand side may also be a whole tabular expression — `x in (T | project c)`
+  — which is what the vendored grammar patch (PATCH 001) exists to accept. Both
+  sides are lowered for the `~` forms; lowering only one silently misses matches.
+- **`render` is a no-op for results.** The emulator returns the primary result
+  table unchanged and puts the chart hint in a separate metadata table, so
+  dropping the operator is correct rather than a shortcut — asserted by
+  comparing against the same query without it.
+- **Duplicate `summarize` output names take a KQL suffix**: two `make_set(y)`
+  produce `set_y` and `set_y1`. DuckDB's own de-duplication would give `set_y_1`.
+- **`sort … | take N` fixes the key values, not which rows carry them.** Rows
+  tied at the cut-off are the engine's choice, so only the sort-key sequence is
+  comparable.
+
 **Row-shaping operators**
 - `take`/`limit` and bare `sample` are **nondeterministic order** — assert as sets.
 - `top N by X` = sort+take with **nondeterministic tie-breaking**.

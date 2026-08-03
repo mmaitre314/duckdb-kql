@@ -16,7 +16,9 @@ from __future__ import annotations
 from . import ir
 from .errors import KqlSchemaError
 
-__all__ = ["Schema", "output_columns", "needs_schema", "join_output_columns"]
+__all__ = [
+    "Schema", "output_columns", "needs_schema", "join_output_columns", "disambiguate",
+]
 
 #: Table name -> ordered column names.
 Schema = dict
@@ -58,6 +60,8 @@ def _source_columns(source: ir.Source, schema: Schema | None) -> list[str]:
         return _table_columns(source.name, schema)
     if isinstance(source, ir.DataTable):
         return [name for name, _ in source.columns]
+    if isinstance(source, ir.RangeSource):
+        return [source.name]
     if isinstance(source, ir.PrintSource):
         from .translate import print_column_name
 
@@ -84,8 +88,10 @@ def _operator_columns(
     if isinstance(op, ir.Distinct):
         return list(op.columns)
     if isinstance(op, ir.Summarize):
-        keys = [group_key_name(k, i) for i, k in enumerate(op.by)]
-        return keys + [aggregate_name(a) for a in op.aggregates]
+        out = [group_key_name(k, i) for i, k in enumerate(op.by)]
+        for agg in op.aggregates:
+            out.append(disambiguate(aggregate_name(agg), out))
+        return out
     if isinstance(op, ir.Join):
         left, right = cols, output_columns(op.right, schema)
         return join_output_columns(left, right, op.kind)
@@ -113,12 +119,12 @@ def join_output_columns(left: list[str], right: list[str], kind: str) -> list[st
     taken = list(left)
     out = list(left)
     for name in right:
-        out.append(_disambiguate(name, taken))
+        out.append(disambiguate(name, taken))
         taken.append(out[-1])
     return out
 
 
-def _disambiguate(name: str, taken: list[str]) -> str:
+def disambiguate(name: str, taken: list[str]) -> str:
     if name not in taken:
         return name
     n = 1

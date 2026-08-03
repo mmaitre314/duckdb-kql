@@ -29,7 +29,7 @@ from typing import Any
 __all__ = [
     "compare", "ComparisonResult", "ComparisonOptions",
     "is_order_significant", "is_nondeterministic", "is_arbitrary_selection",
-    "sort_key_names",
+    "sort_key_names", "is_truncated_after_sort",
 ]
 
 # KQL type name -> canonical bucket. DuckDB names map to the same buckets so
@@ -145,6 +145,19 @@ _SORT_KEYS_RE = re.compile(
 )
 
 
+def is_truncated_after_sort(kql: str) -> bool:
+    """True for ``… | sort by X | take/limit N``.
+
+    Such a query promises that the N rows carry the N smallest/largest X — but
+    **which** rows among those tied at the cut-off is the engine's choice. So the
+    sort-key sequence is comparable and the rest of the row is not.
+    """
+    m = list(_ARBITRARY_SELECTION_RE.finditer(kql))
+    if not m or not is_order_significant(kql):
+        return False
+    return bool(_TERMINAL_ORDERING_RE.search(kql[: m[-1].start()]))
+
+
 def sort_key_names(kql: str) -> list[str]:
     """Column names in the final ``sort by`` / ``order by`` clause.
 
@@ -206,6 +219,9 @@ class ComparisonOptions:
     #: Compare list values as multisets. `make_set` produces a SET, whose
     #: element order carries no meaning in either engine.
     unordered_lists: bool = False
+    #: Compare only the sort-key columns. For `sort | take N`, where which rows
+    #: tie at the cut-off is the engine's choice.
+    sort_keys_only: bool = False
 
     @classmethod
     def for_query(cls, kql: str, **overrides: Any) -> ComparisonOptions:
@@ -219,6 +235,7 @@ class ComparisonOptions:
             # rare, and preferable to failing every make_set case on a
             # difference that means nothing.
             unordered_lists="make_set(" in kql.lower(),
+            sort_keys_only=is_truncated_after_sort(kql),
         )
         if uses_approximate_function(kql):
             # An HLL estimate can legitimately differ by a few percent.
@@ -588,6 +605,10 @@ def compare(
                         break
             if diffs:
                 return ComparisonResult(False, diffs)
+            if opts.sort_keys_only:
+                # `sort | take N` fixes which key VALUES come back, not which
+                # rows carry them when several tie at the cut-off.
+                return ComparisonResult(True)
             # Ordering holds; now the rows themselves, order-insensitively.
             return _compare_unordered(exp_rows, act_rows, opts, diffs)
 

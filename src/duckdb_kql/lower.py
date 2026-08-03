@@ -129,6 +129,9 @@ def _lower_expr(node: Any) -> ir.Expr:
     ):
         return _lower_binary(node)
 
+    if kind == "ListEqualityExpression":
+        return _lower_in_list(node)
+
     if kind == "ParenthesizedExpression":
         inner = _rule_children(node)
         if inner:
@@ -338,6 +341,17 @@ def _lower_source(node: Any) -> ir.Source:
     if kind == "IdentifierName":
         return ir.TableRef(node.getText())
 
+    if kind == "RangeExpression":
+        kids = _rule_children(node)
+        if len(kids) != 4:
+            raise _unsupported(node, "range")
+        return ir.RangeSource(
+            kids[0].getText(),
+            _lower_expr(kids[1]),
+            _lower_expr(kids[2]),
+            _lower_expr(kids[3]),
+        )
+
     if kind == "DataTableExpression":
         cols, values = [], []
         for decl in _find_all(node, "RowSchemaColumnDeclaration"):
@@ -395,6 +409,12 @@ def _lower_operator(node: Any) -> ir.Operator:
         if kids:  # `count as Name`
             return ir.Count(kids[-1].getText())
         return ir.Count()
+
+    if kind == "RenderOperator":
+        # `render` is a *visualization* directive. The emulator returns the
+        # primary result table unchanged and puts the chart hint in a separate
+        # metadata table, so dropping it is correct, not a shortcut.
+        return None
 
     if kind == "JoinOperator":
         return _lower_join(node, kids)
@@ -497,7 +517,7 @@ def _lower_join_right(node: Any) -> ir.Query:
 
     if _cls(inner) == "PipeExpression":
         parts = _rule_children(inner)
-        return ir.Query(_lower_source(parts[0]), [_lower_operator(p) for p in parts[1:]])
+        return ir.Query(_lower_source(parts[0]), _lower_operators(parts[1:]))
     return ir.Query(_lower_source(inner))
 
 
@@ -603,13 +623,60 @@ def lower(kql: str) -> ir.Query:
         query = ir.Query(_lower_source(pipe))
     else:
         parts = _rule_children(pipe)
-        query = ir.Query(
-            _lower_source(parts[0]), [_lower_operator(p) for p in parts[1:]]
-        )
+        query = ir.Query(_lower_source(parts[0]), _lower_operators(parts[1:]))
 
     query = _substitute_query(query, scalars)
+    query = _resolve_in_subqueries(query, {name for name, _ in tabulars})
     query.lets.extend(tabulars)
     return query
+
+
+def _resolve_in_subqueries(query: ir.Query, tabular_names: set) -> ir.Query:
+    """Rewrite ``x in (T)`` where T is a tabular ``let`` into a subquery.
+
+    At lowering time a bare `T` is indistinguishable from a column reference;
+    only once the `let` bindings are known can it be resolved. Left as a
+    ColumnRef it would compare against a column that does not exist.
+    """
+    if not tabular_names:
+        return query
+
+    def fix(node):
+        if isinstance(node, ir.InList):
+            if (
+                node.subquery is None
+                and len(node.items) == 1
+                and isinstance(node.items[0], ir.ColumnRef)
+                and node.items[0].name in tabular_names
+            ):
+                return dataclasses.replace(
+                    node,
+                    items=(),
+                    subquery=ir.Query(ir.TableRef(node.items[0].name)),
+                )
+            return node
+        if isinstance(node, ir.BinaryOp):
+            return dataclasses.replace(node, left=fix(node.left), right=fix(node.right))
+        if isinstance(node, ir.UnaryOp):
+            return dataclasses.replace(node, operand=fix(node.operand))
+        if isinstance(node, ir.FunctionCall):
+            return dataclasses.replace(node, args=tuple(fix(a) for a in node.args))
+        return node
+
+    ops = []
+    for op in query.operators:
+        if isinstance(op, ir.Where):
+            ops.append(dataclasses.replace(op, predicate=fix(op.predicate)))
+        elif isinstance(op, (ir.Project, ir.Extend)):
+            ops.append(dataclasses.replace(
+                op,
+                expressions=tuple(
+                    dataclasses.replace(e, expr=fix(e.expr)) for e in op.expressions
+                ),
+            ))
+        else:
+            ops.append(op)
+    return ir.Query(query.source, ops, list(query.lets))
 
 
 def _find_all(node: Any, class_name: str) -> list[Any]:
@@ -656,8 +723,22 @@ def _lower_query_node(node: Any) -> ir.Query:
     node = _collapse(node)
     if _cls(node) == "PipeExpression":
         parts = _rule_children(node)
-        return ir.Query(_lower_source(parts[0]), [_lower_operator(p) for p in parts[1:]])
+        return ir.Query(_lower_source(parts[0]), _lower_operators(parts[1:]))
     return ir.Query(_lower_source(node))
+
+
+def _lower_operators(nodes: list) -> list:
+    """Lower a run of piped operators, dropping the ones that are no-ops.
+
+    `render` lowers to None: it is a visualization directive that leaves the
+    result table untouched.
+    """
+    out = []
+    for node in nodes:
+        op = _lower_operator(node)
+        if op is not None:
+            out.append(op)
+    return out
 
 
 def _substitute(node: Any, scalars: dict) -> Any:
@@ -766,3 +847,51 @@ def _lower_lets(tree: Any) -> tuple[dict, list]:
             scalars[name] = _substitute(_lower_expr(value), scalars)
 
     return scalars, tabulars
+
+
+#: `in` family, KQL spelling -> (negated, case_insensitive).
+_IN_OPERATORS = {
+    "in": (False, False),
+    "!in": (True, False),
+    "in~": (False, True),
+    "!in~": (True, True),
+}
+
+
+def _lower_in_list(node: Any) -> ir.Expr:
+    """Lower ``x in (a, b, ...)`` and its ``!in`` / ``in~`` variants.
+
+    The operator is a bare token between the value and the parenthesised list,
+    and the list items arrive as separate rule children.
+    """
+    op = None
+    for child in _children(node):
+        if not type(child).__name__.endswith("Context"):
+            text = child.getText().strip().lower()
+            if text in _IN_OPERATORS:
+                op = text
+                break
+    if op is None:
+        raise _unsupported(node, "in")
+
+    rules = _rule_children(node)
+    if len(rules) < 2:
+        raise _unsupported(node, "in")
+
+    value = _lower_expr(rules[0])
+    negated, case_insensitive = _IN_OPERATORS[op]
+
+    items = []
+    for r in rules[1:]:
+        try:
+            items.append(_lower_expr(r))
+        except KqlUnsupportedError:
+            # The right-hand side may be a whole tabular expression rather than
+            # a value list -- `x in (T | project col)`. That is what the vendored
+            # grammar patch (grammar/UPSTREAM.md, PATCH 001) exists to accept.
+            if len(rules) != 2:
+                raise
+            return ir.InList(
+                value, (), negated, case_insensitive, _lower_query_node(r)
+            )
+    return ir.InList(value, tuple(items), negated, case_insensitive)
