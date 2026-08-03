@@ -29,6 +29,7 @@ from typing import Any
 __all__ = [
     "compare", "ComparisonResult", "ComparisonOptions",
     "is_order_significant", "is_nondeterministic", "is_arbitrary_selection",
+    "sort_key_names",
 ]
 
 # KQL type name -> canonical bucket. DuckDB names map to the same buckets so
@@ -139,6 +140,32 @@ def is_arbitrary_selection(kql: str) -> bool:
     )
 
 
+_SORT_KEYS_RE = re.compile(
+    r"\|\s*(?:sort|order)\s+by\s+(.*?)(?=\||$)", re.IGNORECASE | re.DOTALL
+)
+
+
+def sort_key_names(kql: str) -> list[str]:
+    """Column names in the final ``sort by`` / ``order by`` clause.
+
+    KQL guarantees rows come back ordered by these keys — and nothing more.
+    Rows sharing a key value may appear in any order, because neither engine
+    promises a stable sort. Knowing the keys lets the comparison assert the part
+    that is promised without asserting the part that is not.
+    """
+    matches = list(_SORT_KEYS_RE.finditer(kql))
+    if not matches:
+        return []
+    names = []
+    for part in matches[-1].group(1).split(","):
+        token = part.strip().split()
+        if token:
+            name = token[0].strip("[]`\"'")
+            if name.isidentifier():
+                names.append(name)
+    return names
+
+
 def uses_approximate_function(kql: str) -> bool:
     lowered = kql.lower()
     return any(f"{fn}(" in lowered for fn in APPROXIMATE_FUNCTIONS)
@@ -172,6 +199,13 @@ class ComparisonOptions:
     #: Compare row count and columns but not row values. For results whose row
     #: *selection* is the engine's choice (`take` without a sort).
     shape_only: bool = False
+    #: Columns the query sorted by. When ordered comparison is on, only these
+    #: are checked positionally; rows tied on them compare as a multiset,
+    #: because KQL does not promise a stable sort.
+    sort_keys: tuple[str, ...] = ()
+    #: Compare list values as multisets. `make_set` produces a SET, whose
+    #: element order carries no meaning in either engine.
+    unordered_lists: bool = False
 
     @classmethod
     def for_query(cls, kql: str, **overrides: Any) -> ComparisonOptions:
@@ -179,6 +213,12 @@ class ComparisonOptions:
         opts = cls(
             ordered=is_order_significant(kql),
             shape_only=is_arbitrary_selection(kql),
+            sort_keys=tuple(sort_key_names(kql)),
+            # make_list order IS meaningful, so this is scoped to make_set. A
+            # query using both loses order-checking on its make_list column —
+            # rare, and preferable to failing every make_set case on a
+            # difference that means nothing.
+            unordered_lists="make_set(" in kql.lower(),
         )
         if uses_approximate_function(kql):
             # An HLL estimate can legitimately differ by a few percent.
@@ -228,15 +268,29 @@ def _values_equal(a: Any, b: Any, opts: ComparisonOptions, in_dynamic: bool = Fa
     # *string* from DuckDB, so one side must be decoded before they can be
     # compared at all. Comparing the raw forms reports every dynamic value as a
     # difference.
-    if _is_structured(a) or _is_structured(b):
+    # Either side may be structured, or *both* may be JSON text: the unordered
+    # fast path canonicalises lists to JSON strings before hashing, so the
+    # leftover pairing sees string-vs-string and would otherwise skip decoding
+    # entirely — which made every make_set row fail on element order alone.
+    if _is_structured(a) or _is_structured(b) or (_looks_json(a) and _looks_json(b)):
         pa, pb = _as_structured(a), _as_structured(b)
         if pa is not None and pb is not None:
             a, b, in_dynamic = pa, pb, True
 
     if isinstance(a, (list, tuple)) and isinstance(b, (list, tuple)):
-        return len(a) == len(b) and all(
-            _values_equal(x, y, opts, in_dynamic) for x, y in zip(a, b)
-        )
+        if len(a) != len(b):
+            return False
+        if opts.unordered_lists:
+            remaining = list(b)
+            for x in a:
+                for i, y in enumerate(remaining):
+                    if _values_equal(x, y, opts, in_dynamic):
+                        remaining.pop(i)
+                        break
+                else:
+                    return False
+            return True
+        return all(_values_equal(x, y, opts, in_dynamic) for x, y in zip(a, b))
     if isinstance(a, dict) and isinstance(b, dict):
         # Recursive, not ==, because leaves need the same tolerance and temporal
         # normalization as top-level cells: ADX canonicalises a datetime *inside*
@@ -267,6 +321,10 @@ def _values_equal(a: Any, b: Any, opts: ComparisonOptions, in_dynamic: bool = Fa
 
 def _is_structured(v: Any) -> bool:
     return isinstance(v, (dict, list, tuple))
+
+
+def _looks_json(v: Any) -> bool:
+    return isinstance(v, str) and v.strip()[:1] in ("{", "[")
 
 
 def _as_structured(v: Any) -> Any | None:
@@ -497,6 +555,27 @@ def compare(
         return ComparisonResult(not diffs, diffs)
 
     if opts.ordered:
+        # KQL's sort is not stable, so rows tied on the sort key may come back
+        # in any order. Asserting their relative positions asserts something
+        # neither engine promises — and with a low-cardinality key (`order by
+        # dcount(...)`, where dozens of groups tie) that is most of the result.
+        # Check the promised part positionally, the rest as a set.
+        key_idx = [i for i, c in enumerate(exp_cols) if c in opts.sort_keys]
+        if key_idx and len(exp_rows) == len(act_rows):
+            for i, (er, ar) in enumerate(zip(exp_rows, act_rows)):
+                if not all(_values_equal(er[j], ar[j], opts) for j in key_idx):
+                    diffs.append(
+                        f"row {i}: sort keys differ "
+                        f"{[er[j] for j in key_idx]!r} != {[ar[j] for j in key_idx]!r}"
+                    )
+                    if len(diffs) > 8:
+                        diffs.append("... (further differences suppressed)")
+                        break
+            if diffs:
+                return ComparisonResult(False, diffs)
+            # Ordering holds; now the rows themselves, order-insensitively.
+            return _compare_unordered(exp_rows, act_rows, opts, diffs)
+
         for i, (er, ar) in enumerate(zip(exp_rows, act_rows)):
             if not all(_values_equal(x, y, opts) for x, y in zip(er, ar)):
                 diffs.append(f"row {i}: {er!r} != {ar!r}")
@@ -542,4 +621,43 @@ def compare(
         if len(diffs) > 8:
             diffs = diffs[:8] + ["... (further differences suppressed)"]
 
+    return ComparisonResult(not diffs, diffs)
+
+
+def _compare_unordered(
+    exp_rows: list, act_rows: list, opts: ComparisonOptions, diffs: list
+) -> ComparisonResult:
+    """Compare two row sets as multisets, tolerance-aware."""
+    from collections import Counter
+
+    try:
+        exp_c = Counter(_row_key(r) for r in exp_rows)
+        act_c = Counter(_row_key(r) for r in act_rows)
+    except TypeError:  # pragma: no cover - unhashable payload
+        diffs.append("rows are not hashable; use ordered comparison")
+        return ComparisonResult(False, diffs)
+
+    missing = list((exp_c - act_c).elements())
+    unexpected = list((act_c - exp_c).elements())
+
+    if missing and unexpected:
+        leftover: list[tuple] = []
+        remaining = list(unexpected)
+        for key in missing:
+            for i, other in enumerate(remaining):
+                if len(key) == len(other) and all(
+                    _values_equal(x, y, opts) for x, y in zip(key, other)
+                ):
+                    remaining.pop(i)
+                    break
+            else:
+                leftover.append(key)
+        missing, unexpected = leftover, remaining
+
+    for key in missing:
+        diffs.append(f"missing row {list(key)!r}")
+    for key in unexpected:
+        diffs.append(f"unexpected row {list(key)!r}")
+    if len(diffs) > 8:
+        diffs = diffs[:8] + ["... (further differences suppressed)"]
     return ComparisonResult(not diffs, diffs)

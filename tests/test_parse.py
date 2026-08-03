@@ -113,9 +113,11 @@ def test_translation_refuses_constructs_outside_the_wave() -> None:
     from "your query is wrong", and a silent wrong answer is impossible.
     """
     for kql in (
-        "T | summarize count() by a",  # operator not in Wave 1
+        "T | join (S) on a",  # operator not yet implemented
+        "T | mv-expand a",  # operator not yet implemented
         "let x = 5; T | where a > x",  # let bindings must not be dropped
         "T | where a == totimespan_unmapped(1)",  # unmapped function
+        "T | summarize unmapped_agg(a)",  # unmapped aggregate
     ):
         with pytest.raises(KqlUnsupportedError):
             duckdb_kql.to_sql(kql)

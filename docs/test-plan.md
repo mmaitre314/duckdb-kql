@@ -262,7 +262,40 @@ KQL↔DuckDB semantic gaps** and should grow as we find more.
 - `union` column unification (differing schemas → superset columns, nulls filled);
   `kind=inner|outer`; `withsource=`.
 
-**Aggregation (`summarize`)**
+**Aggregation (`summarize`) — measured, implemented, pinned by
+[`tests/test_summarize.py`](../tests/test_summarize.py)**
+- **KQL returns a neutral value where SQL returns NULL.** This is not just an
+  empty-input edge case — it hits *any group whose values are all null*:
+
+  | | KQL | DuckDB |
+  |---|---|---|
+  | `sum` / `sumif` | `0` | `NULL` |
+  | `avg` | **`NaN`** | `NULL` |
+  | `stdev` / `variance` | `0` | `NULL` |
+  | `make_list` / `make_set` | `[]` | `NULL`, or a list *of* nulls |
+  | `min` / `max` | `null` | `NULL` (agree) |
+  | `count` / `dcount` | `0` | `0` (agree) |
+
+- **`make_list`/`make_set` skip nulls;** DuckDB's `list()` keeps them.
+- **`dcount` is documented as approximate but is exact at corpus
+  cardinalities.** `approx_count_distinct` was ~13% low (32 vs 37), which also
+  reorders `top N by dcount`. We emit `count(DISTINCT …)`: it matches the oracle
+  and is reproducible.
+- **`percentile` is nearest-rank, not interpolated.** `quantile_disc` matched
+  all 52 groups exactly; `quantile_cont` was off by up to **39%** — a gap the 5%
+  approximate-function tolerance would have hidden on smaller inputs.
+- **R12 auto-naming** is not guessable and is user-visible: `count()`→`count_`,
+  `countif(p)`→`countif_`, `sum(x)`→`sum_x`, `sum(x+z)`→`sum_`,
+  `make_list(x)`→`list_x`, `make_set(y)`→`set_y`, `take_any(x)`→`x`,
+  `percentile(x,50)`→`percentile_x_50`. Grouping keys are emitted **first**, and
+  a key that is a function keeps the inner column's name (`bin(t,1d)`→`t`).
+- **`bin()` bins from the Unix epoch.** DuckDB's `time_bucket` origin is
+  2000-01-03, so using it shifts every bucket boundary (R8). Binning a
+  *timespan* yields a timespan, not a 1970 date.
+- **KQL has no null string distinct from empty**: `isnull('')` is false,
+  `isempty('')` is true, and `string(null)` round-trips as `''`.
+
+**Aggregation (`summarize`) — remaining**
 - `count()` (all rows) vs `count(Expr)` (**ignores nulls**) vs `countif()`.
 - `dcount`/`dcountif` are **approximate** (HLL) — never assert exact equality.
 - `percentile`/`percentiles` use a specific estimation algorithm — approximate,

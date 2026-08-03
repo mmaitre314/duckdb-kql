@@ -11,7 +11,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-__all__ = ["FunctionSpec", "SCALAR_FUNCTIONS", "lookup", "BINARY_OPERATORS", "BinarySpec"]
+__all__ = [
+    "FunctionSpec", "SCALAR_FUNCTIONS", "lookup", "BINARY_OPERATORS", "BinarySpec",
+    "AggregateSpec", "AGGREGATE_FUNCTIONS", "lookup_aggregate",
+]
 
 
 @dataclass(frozen=True)
@@ -246,3 +249,120 @@ BINARY_OPERATORS: dict[str, BinarySpec] = {
 def lookup(name: str) -> FunctionSpec | None:
     """Find a scalar/aggregate mapping by KQL name (case-insensitive)."""
     return SCALAR_FUNCTIONS.get(name.lower())
+
+
+# ---------------------------------------------------------------------------
+# Aggregates (summarize)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class AggregateSpec:
+    """One KQL aggregate's DuckDB mapping and its output-name rule (R12).
+
+    ``name_prefix`` drives KQL's auto-naming: ``sum(x)`` becomes ``sum_x``,
+    ``make_list(x)`` becomes ``list_x`` (the ``make_`` is dropped), and an
+    argument that is not a bare column contributes nothing — ``sum(x+z)`` is
+    ``sum_``. All of it measured against the emulator, not inferred.
+    """
+
+    name: str
+    template: str
+    arities: tuple[int, ...] = ()
+    #: Prefix for the generated column name; defaults to ``name``.
+    name_prefix: str | None = None
+    #: Ignore the argument when building the name (`countif(x>1)` -> `countif_`).
+    name_ignores_args: bool = False
+    #: Emit the argument's own name (`take_any(x)` -> `x`).
+    name_is_argument: bool = False
+    rules: tuple[str, ...] = ()
+    note: str = ""
+
+    @property
+    def prefix(self) -> str:
+        return self.name_prefix if self.name_prefix is not None else self.name
+
+    def render(self, args: list[str]) -> str:
+        if self.arities and len(args) not in self.arities:
+            raise ValueError(
+                f"{self.name}() takes {self.arities} argument(s), got {len(args)}"
+            )
+        return self.template.format(*args)
+
+
+def _a(name, template, arities=(), **kw):
+    return AggregateSpec(name, template, arities, **kw)
+
+
+# KQL returns a neutral value where SQL returns NULL for an aggregate with no
+# non-null input, and this shows up constantly: any group whose values are all
+# null, and any empty input. Every one of these was measured on the emulator:
+#
+#            KQL (empty or all-null)   DuckDB
+#   sum                0                NULL
+#   sumif              0                NULL
+#   avg                NaN              NULL
+#   stdev / variance   0                NULL
+#   make_list/set      []               NULL, or a list OF nulls
+#   min / max          null             NULL      (agree)
+#   count / dcount     0                0         (agree)
+#
+# Left unmapped, each is a wrong answer that arrives without an error.
+# A bare `[]` is type-polymorphic in COALESCE — DuckDB unifies it with the
+# aggregate's element type. Naming a concrete type here (VARCHAR[]) made every
+# non-string make_list fail to bind.
+_EMPTY_LIST = "[]"
+
+AGGREGATE_FUNCTIONS: dict[str, AggregateSpec] = {
+    s.name: s
+    for s in [
+        _a("count", "count(*)", (0,), name_ignores_args=True, rules=("R4", "R12")),
+        _a("countif", "count(*) FILTER (WHERE {0})", (1,),
+           name_ignores_args=True, rules=("R4", "R12")),
+        # KQL sums to 0, not null, when nothing survives.
+        _a("sum", "coalesce(sum({0}), 0)", (1,), rules=("R4",)),
+        _a("sumif", "coalesce(sum({0}) FILTER (WHERE {1}), 0)", (2,), rules=("R4",)),
+        # ...but averages to NaN. Not a typo — the emulator says so.
+        _a("avg", "coalesce(avg({0}), CAST('NaN' AS DOUBLE))", (1,), rules=("R4",)),
+        _a("avgif", "coalesce(avg({0}) FILTER (WHERE {1}), CAST('NaN' AS DOUBLE))",
+           (2,), rules=("R4",)),
+        _a("min", "min({0})", (1,), rules=("R4",)),
+        _a("max", "max({0})", (1,), rules=("R4",)),
+        _a("stdev", "coalesce(stddev_samp({0}), 0.0)", (1,), rules=("R4",)),
+        _a("stdevif", "coalesce(stddev_samp({0}) FILTER (WHERE {1}), 0.0)", (2,)),
+        _a("variance", "coalesce(var_samp({0}), 0.0)", (1,), rules=("R4",)),
+        _a("varianceif", "coalesce(var_samp({0}) FILTER (WHERE {1}), 0.0)", (2,)),
+        # dcount is APPROXIMATE in KQL (R11), so an approximate DuckDB aggregate
+        # looks like the honest match — but measured against the emulator it is
+        # not. At the cardinalities in the corpus KQL's HLL returns the exact
+        # value while approx_count_distinct is ~13% low (37 vs 32), which is far
+        # outside any sane tolerance and, worse, reorders `top N by dcount`.
+        # Exact counting matches the oracle AND is reproducible; the residual
+        # risk is the reverse divergence at cardinalities high enough for KQL's
+        # estimate to drift, which the drift lane would surface.
+        _a("dcount", "count(DISTINCT {0})", (1, 2), rules=("R11",),
+           note="exact: KQL's estimate is exact at corpus cardinalities"),
+        _a("dcountif", "count(DISTINCT {0}) FILTER (WHERE {1})", (2, 3),
+           rules=("R11",)),
+        # make_list/make_set SKIP nulls; plain list() keeps them, so an
+        # all-null group would come back as [null, null] instead of [].
+        _a("make_list", f"coalesce(list({{0}}) FILTER (WHERE {{0}} IS NOT NULL), {_EMPTY_LIST})",
+           (1, 2), name_prefix="list", rules=("R4",)),
+        _a("make_set",
+           f"coalesce(list(DISTINCT {{0}}) FILTER (WHERE {{0}} IS NOT NULL), {_EMPTY_LIST})",
+           (1, 2), name_prefix="set", rules=("R4",)),
+        _a("any", "any_value({0})", (1,)),
+        _a("take_any", "any_value({0})", (1,), name_is_argument=True),
+        # quantile_DISC, not quantile_cont: KQL uses nearest-rank, not linear
+        # interpolation. Measured per-state on the fixture, disc matched all 52
+        # groups exactly while cont was off by up to 39% — a gap the 5%
+        # approximate-function tolerance would have hidden on smaller inputs.
+        # At large N KQL switches to an estimate, and there the tolerance
+        # legitimately covers the remaining ~0.07%.
+        _a("percentile", "quantile_disc({0}, {1} / 100.0)", (2,), rules=("R11",)),
+    ]
+}
+
+
+def lookup_aggregate(name: str) -> AggregateSpec | None:
+    return AGGREGATE_FUNCTIONS.get(name.lower())

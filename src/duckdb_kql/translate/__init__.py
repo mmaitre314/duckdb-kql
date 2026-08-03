@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from .. import ir
 from ..errors import KqlUnsupportedError
-from .functions import _TODATETIME, BINARY_OPERATORS, lookup
+from .functions import _TODATETIME, BINARY_OPERATORS, lookup, lookup_aggregate
 
 __all__ = ["to_sql", "TranslationResult"]
 
@@ -114,6 +114,8 @@ def render_expr(node: ir.Expr) -> str:
         return spec.template.format(render_expr(node.left), render_expr(node.right))
 
     if isinstance(node, ir.FunctionCall):
+        if node.name.lower() == "bin":
+            return render_bin(node)
         spec = lookup(node.name)
         if spec is None:
             raise KqlUnsupportedError(
@@ -127,6 +129,51 @@ def render_expr(node: ir.Expr) -> str:
             raise KqlUnsupportedError(f"function:{node.name}", hint=str(e)) from None
 
     raise KqlUnsupportedError(f"expression:{type(node).__name__}")
+
+
+def render_bin(node: ir.FunctionCall) -> str:
+    """``bin(value, roundTo)`` — round *down* to a multiple of *roundTo*.
+
+    Two different computations share one KQL name, and which applies is decided
+    by the *type* of ``roundTo``, so it is resolved here rather than by a
+    template. A timespan means datetime binning.
+
+    KQL bins datetimes from the **Unix epoch**. DuckDB's ``time_bucket`` uses
+    2000-01-03 as its default origin, so using it would shift every bucket
+    boundary — a wrong answer that still looks like a plausible timestamp (R8).
+    Doing the arithmetic on epoch seconds avoids the origin question entirely.
+    """
+    if len(node.args) != 2:
+        raise KqlUnsupportedError("bin", hint="expects (value, roundTo)")
+    value, round_to = node.args
+    v, r = render_expr(value), render_expr(round_to)
+
+    if not (isinstance(round_to, ir.Literal) and round_to.kind == "timespan"):
+        return f"(floor({v} / {r}) * {r})"
+
+    # A timespan bin size means the value is temporal — but binning a *timespan*
+    # yields a timespan, while binning a datetime yields a datetime. The
+    # emulator confirms: bin(14d + 3h, 1d) is 14.00:00:00, not a date in 1970.
+    floored = f"floor(epoch({v}) / epoch({r})) * epoch({r})"
+    if _is_timespan_expr(value):
+        return f"to_seconds(CAST({floored} AS BIGINT))"
+    return f"to_timestamp({floored}) AT TIME ZONE 'UTC'"
+
+
+def _is_timespan_expr(node: ir.Expr) -> bool:
+    """Whether an expression is statically known to be a timespan.
+
+    Only literals and arithmetic over them can be decided without a schema;
+    a bare column is assumed to be a datetime, which is the overwhelmingly
+    common case for ``bin``.
+    """
+    if isinstance(node, ir.Literal):
+        return node.kind == "timespan"
+    if isinstance(node, ir.BinaryOp) and node.op in ("+", "-"):
+        return _is_timespan_expr(node.left) and _is_timespan_expr(node.right)
+    if isinstance(node, ir.UnaryOp):
+        return _is_timespan_expr(node.operand)
+    return False
 
 
 def output_name(named: ir.NamedExpr, position: int) -> str:
@@ -247,6 +294,9 @@ def render_operator(op: ir.Operator, prev: str) -> str:
         cols = ", ".join(quote_ident(c) for c in op.columns)
         return f"SELECT DISTINCT {cols} FROM {prev}"
 
+    if isinstance(op, ir.Summarize):
+        return render_summarize(op, prev)
+
     if isinstance(op, ir.Sort):
         return f"SELECT * FROM {prev} ORDER BY {render_sort_keys(op.keys)}"
 
@@ -285,3 +335,123 @@ def to_sql(query: ir.Query) -> TranslationResult:
 
     ctes = ",\n     ".join(f"_s{i} AS ({sql})" for i, sql in enumerate(stages))
     return TranslationResult(f"WITH {ctes}\nSELECT * FROM _s{len(stages) - 1}")
+
+
+# ---------------------------------------------------------------------------
+# summarize (R12)
+# ---------------------------------------------------------------------------
+
+
+def _argument_name(expr: ir.Expr) -> str | None:
+    """The column name an expression contributes to an auto-generated name.
+
+    A bare column gives its own name; a single-argument function of a column
+    gives the *inner* column's name (``bin(t,1d)`` keys are named ``t``,
+    ``tostring(x)`` keys are named ``x``). Anything else contributes nothing.
+    """
+    if isinstance(expr, ir.ColumnRef):
+        return expr.name
+    if isinstance(expr, ir.FunctionCall) and expr.args:
+        return _argument_name(expr.args[0])
+    return None
+
+
+def aggregate_name(named: ir.NamedExpr) -> str:
+    """KQL's auto-generated name for one summarize aggregate (R12).
+
+    Every rule here was read off the emulator, because they are not guessable:
+
+        count()             -> count_          (no argument in the name)
+        countif(x > 1)      -> countif_        (predicate contributes nothing)
+        sum(x)              -> sum_x
+        sum(x + z)          -> sum_            (not a bare column)
+        make_list(x)        -> list_x          ('make_' is dropped)
+        make_set(y)         -> set_y
+        percentile(x, 50)   -> percentile_x_50
+        take_any(x)         -> x               (keeps the column's own name)
+
+    Output names are user-visible, so a near-miss here is a wrong answer.
+    """
+    if named.name:
+        return named.name
+
+    expr = named.expr
+    if not isinstance(expr, ir.FunctionCall):
+        return _argument_name(expr) or "Column1"
+
+    spec = lookup_aggregate(expr.name)
+    if spec is None:
+        return _argument_name(expr) or "Column1"
+
+    if spec.name_is_argument:
+        return _argument_name(expr.args[0]) if expr.args else spec.prefix
+
+    if spec.name_ignores_args or not expr.args:
+        return f"{spec.prefix}_"
+
+    arg = _argument_name(expr.args[0]) or ""
+    name = f"{spec.prefix}_{arg}"
+
+    # percentile carries the percentile itself: percentile_x_50.
+    if spec.name == "percentile" and len(expr.args) > 1:
+        p = expr.args[1]
+        if isinstance(p, ir.Literal):
+            suffix = int(p.value) if float(p.value).is_integer() else p.value
+            name = f"{name}_{suffix}"
+    return name
+
+
+def group_key_name(named: ir.NamedExpr, position: int) -> str:
+    """Name for one ``by`` key. Positional fallback is 1-based (``Column1``)."""
+    if named.name:
+        return named.name
+    return _argument_name(named.expr) or f"Column{position + 1}"
+
+
+def render_aggregate(named: ir.NamedExpr) -> str:
+    expr = named.expr
+    if not isinstance(expr, ir.FunctionCall):
+        # `summarize x` is not valid KQL; refuse rather than emit a bare column
+        # that DuckDB would reject with a confusing group-by error.
+        raise KqlUnsupportedError(
+            "summarize", hint="each aggregate must be an aggregate function call"
+        )
+    spec = lookup_aggregate(expr.name)
+    if spec is None:
+        raise KqlUnsupportedError(
+            f"aggregate:{expr.name}",
+            hint="no DuckDB mapping in this wave; see translate/functions.py",
+        )
+    args = [render_expr(a) for a in expr.args]
+    try:
+        return spec.render(args)
+    except ValueError as e:
+        raise KqlUnsupportedError(f"aggregate:{expr.name}", hint=str(e)) from None
+
+
+def render_summarize(op: ir.Summarize, prev: str) -> str:
+    """Render ``summarize`` as GROUP BY.
+
+    Grouping keys are emitted **first**, which is the order KQL returns them in
+    regardless of where they appear in the query text (R12).
+    """
+    if not op.aggregates and not op.by:
+        raise KqlUnsupportedError("summarize", hint="nothing to aggregate")
+
+    select: list[str] = []
+    group: list[str] = []
+    for i, key in enumerate(op.by):
+        sql = render_expr(key.expr)
+        select.append(f"{sql} AS {quote_ident(group_key_name(key, i))}")
+        # Group by the expression itself rather than by output position: an
+        # alias is not visible to GROUP BY in every context, and repeating the
+        # expression is what DuckDB will fold anyway.
+        group.append(sql)
+
+    for agg in op.aggregates:
+        select.append(f"{render_aggregate(agg)} AS {quote_ident(aggregate_name(agg))}")
+
+    sql = f"SELECT {', '.join(select)} FROM {prev}"
+    if group:
+        sql += f" GROUP BY {', '.join(group)}"
+    return sql

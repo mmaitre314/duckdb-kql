@@ -102,13 +102,18 @@ def _lower_expr(node: Any) -> ir.Expr:
     if kind == "DateTimeLiteralExpression":
         return _typed_literal(node, "datetime", str)
 
-    if kind == "TimespanLiteralExpression":
+    if kind == "TimeSpanLiteralExpression":
         return _typed_literal(node, "timespan", str)
 
     if kind == "GuidLiteralExpression":
         return _typed_literal(node, "guid", str)
 
-    if kind in ("LiteralExpression", "NumericLiteralExpression", "NumberLikeLiteralExpression"):
+    if kind in (
+        "LiteralExpression", "NumericLiteralExpression", "NumberLikeLiteralExpression",
+        # Sign/unsigned wrappers carry the real literal as their only child.
+        "SignedLiteralExpression", "UnsignedLiteralExpression",
+        "SignedLongLiteralExpression", "SignedRealLiteralExpression",
+    ):
         inner = _rule_children(node)
         if inner:
             return _lower_expr(inner[0])
@@ -389,6 +394,17 @@ def _lower_operator(node: Any) -> ir.Operator:
         if kids:  # `count as Name`
             return ir.Count(kids[-1].getText())
         return ir.Count()
+
+    if kind == "SummarizeOperator":
+        aggregates, by = [], []
+        for k in kids:
+            if _cls(k) == "SummarizeOperatorByClause":
+                by.extend(_lower_named(c) for c in _rule_children(k))
+            elif _cls(k) == "SummarizeOperatorParameters":
+                raise _unsupported(k, "summarize hint")
+            else:
+                aggregates.append(_lower_named(k))
+        return ir.Summarize(tuple(aggregates), tuple(by))
 
     if kind == "SortOperator":
         return ir.Sort(tuple(_lower_sort_key(k) for k in kids))

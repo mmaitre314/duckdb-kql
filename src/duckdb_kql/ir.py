@@ -21,6 +21,7 @@ __all__ = [
     # sources
     "TableRef", "DataTable", "PrintSource",
     # operators
+    "Summarize",
     "Where", "Project", "Extend", "Take", "Sort", "SortKey", "Count", "Distinct",
 ]
 
@@ -201,6 +202,18 @@ class Count(Operator):
 @dataclass(frozen=True)
 class Distinct(Operator):
     columns: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class Summarize(Operator):
+    """``summarize agg, ... by key, ...``.
+
+    Grouping keys come **first** in KQL's output, before the aggregates,
+    regardless of where they appear in the query text (R12).
+    """
+
+    aggregates: tuple[NamedExpr, ...]
+    by: tuple[NamedExpr, ...] = ()
 
 
 # ---------------------------------------------------------------------------
