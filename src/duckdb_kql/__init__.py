@@ -1,22 +1,42 @@
 """duckdb-kql — run Kusto KQL queries on DuckDB, from Python.
 
 **Status: pre-alpha.** Translation is being built wave by wave
-(``docs/implementation-plan.md``). Wave 1 covers ``where`` / ``project`` /
-``extend`` / ``take`` / ``sort`` / ``count`` / ``distinct`` over ``print``,
-``datatable``, and table sources. Anything outside it raises
+(``docs/implementation-plan.md``). Anything outside the covered surface raises
 ``KqlUnsupportedError`` — deliberately, rather than returning something
 plausible and wrong.
 
-Working today::
+The API comes in three layers, each adding one dependency. Import only the layer
+you need and you pay only for that layer::
+
+    Layer 0  duckdb_kql            KQL text in, DuckDB SQL out.  antlr4 only.
+    Layer 1  duckdb_kql.engine     Run it.                        + duckdb
+    Layer 2  duckdb_kql.kusto      KustoClient drop-in.           + pandas
+
+Layer 0 — translate and inspect, no database anywhere::
 
     >>> import duckdb_kql
-    >>> result = duckdb_kql.parse('Logs | where Level == "Error" | take 10')
-    >>> result.ok
-    True
     >>> duckdb_kql.to_sql("print x = 1 + 1")
     'SELECT (CAST(1 AS BIGINT) + CAST(1 AS BIGINT)) AS "x"'
+    >>> duckdb_kql.parse('Logs | where Level == "Error" | take 10').ok
+    True
     >>> duckdb_kql.validate("Logs | wherex")     # doctest: +ELLIPSIS
     [...]
+
+Layer 1 — execute against a DuckDB connection::
+
+    import duckdb, duckdb_kql
+    con = duckdb_kql.connect()               # or duckdb.connect(), TimeZone=UTC
+    con.sql("CREATE TABLE Logs AS SELECT 'Error' AS Level")
+    duckdb_kql.sql(con, "Logs | where Level == 'Error'").fetchall()
+
+Layer 2 — the ``azure-kusto-data`` shape, for code already written against it::
+
+    from duckdb_kql.kusto import KustoClient, ClientRequestProperties
+    from duckdb_kql.kusto.helpers import dataframe_from_result_table
+
+    client = KustoClient("mydata.duckdb")
+    response = client.execute("db", "Logs | take 10")
+    df = dataframe_from_result_table(response.primary_results[0])
 """
 
 from __future__ import annotations
@@ -31,88 +51,114 @@ from .errors import (
     KqlUnsupportedError,
     SourceSpan,
 )
+from .params import ParameterDeclaration
 from .parser import ParseResult, parse, validate
 
 __version__ = "0.0.1.dev0"
 
 __all__ = [
-    # working today
+    # Layer 0 — KQL text, no database
     "parse",
     "validate",
+    "to_sql",
+    "query_parameters",
     "ParseResult",
+    "ParameterDeclaration",
     "Diagnostic",
     "SourceSpan",
-    # errors
+    # errors (Layer 0)
     "KqlError",
     "KqlSyntaxError",
     "KqlUnsupportedError",
     "KqlSchemaError",
-    # planned execution API (see below)
-    "to_sql",
+    # Layer 1 — requires duckdb
+    "connect",
     "sql",
+    "execute",
     "df",
     "arrow",
     "__version__",
 ]
 
-def to_sql(kql: str, schema: Any | None = None) -> str:
-    """Translate *kql* to DuckDB SQL. Requires no connection.
+#: Layer 1 names, re-exported here for convenience but defined in ``engine``.
+#: Resolved on first access so that importing this package never imports duckdb.
+_LAYER1 = frozenset({"connect", "sql", "execute", "df", "arrow"})
+
+
+def __getattr__(name: str) -> Any:
+    if name in _LAYER1:
+        from . import engine
+
+        return getattr(engine, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__() -> list[str]:
+    return sorted(__all__)
+
+
+# ---------------------------------------------------------------------------
+# Layer 0
+# ---------------------------------------------------------------------------
+
+
+def to_sql(
+    kql: str,
+    schema: Any | None = None,
+    parameters: dict[str, Any] | None = None,
+) -> Any:
+    """Translate *kql* to DuckDB SQL. Requires no connection and no database.
+
+    Returns a ``str`` subclass that also carries ``.parameters`` — the values
+    for the placeholders a ``declare query_parameters`` query renders. Pass
+    those to DuckDB alongside the SQL; :func:`duckdb_kql.sql` does it for you.
+
+    Args:
+        kql: the query text.
+        schema: table name -> column names. Only ``join`` consults it.
+        parameters: values for the query's declared parameters, by KQL name.
+            They are bound as values, never spliced into the SQL, so a value may
+            contain any text at all without changing what the query does.
 
     .. important::
        KQL datetimes are UTC (``docs/TRANSLATION.md`` R8), and DuckDB reads the
        **session** ``TimeZone`` when casting a string that carries no offset. Run
        the returned SQL on a connection with ``SET TimeZone='UTC'`` or datetime
-       values will be silently shifted. :func:`sql` does this for you; the
-       requirement only falls to callers who execute the SQL themselves.
+       values will be silently shifted. :func:`duckdb_kql.sql` and
+       :func:`duckdb_kql.connect` do this for you; the requirement only falls to
+       callers who execute the SQL themselves.
 
     Raises:
         KqlSyntaxError: the query does not parse.
         KqlUnsupportedError: it parses but uses a construct outside this wave.
+        KqlSchemaError: a supplied value does not match its declared type, or
+            names a parameter the query does not declare.
+
+    Translating without supplying every declared value is allowed — the SQL is
+    worth reading on its own. The names still missing are listed in
+    ``.unbound``, and executing is what turns them into an error.
     """
     from .lower import lower
+    from .params import bind
     from .translate import to_sql as _emit
 
-    return str(_emit(lower(kql), schema))
+    query = lower(kql)
+    result = _emit(query, schema)
+    if query.parameters or parameters:
+        return result.with_parameters(*bind(query.parameters, parameters))
+    return result
 
 
-def sql(con: Any, kql: str) -> Any:
-    """Execute *kql* against a DuckDB connection, returning a relation.
+def query_parameters(kql: str) -> list[ParameterDeclaration]:
+    """The parameters *kql* declares, in declaration order.
 
-    Sets ``TimeZone='UTC'`` on *con* first — see :func:`to_sql`. This changes
-    connection state deliberately: leaving it to the caller means a machine in a
-    non-UTC zone silently returns wrong datetimes.
+    Lets a caller discover what a query expects before deciding what to supply::
 
-    The connection also supplies the schema that ``join`` needs, so joins work
-    here without the caller passing one.
+        >>> [(p.name, p.type) for p in query_parameters(
+        ...     "declare query_parameters(state:string);"
+        ...     " StormEvents | where State == state")]
+        [('state', 'string')]
     """
-    con.execute("SET TimeZone='UTC'")
-    return con.sql(to_sql(kql, schema=_connection_schema(con)))
+    from .lower import query_parameters as _declared
 
-
-def _connection_schema(con: Any) -> dict[str, list[str]]:
-    """Read table -> column names from a DuckDB connection.
-
-    Only ``join`` consults this, but it is cheap enough to gather unconditionally
-    and keeps the public API free of a schema argument.
-    """
-    try:
-        rows = con.execute(
-            "SELECT table_name, column_name FROM information_schema.columns "
-            "ORDER BY table_name, ordinal_position"
-        ).fetchall()
-    except Exception:  # noqa: BLE001 - a schema-less connection is not an error
-        return {}
-    schema: dict[str, list[str]] = {}
-    for table, column in rows:
-        schema.setdefault(table, []).append(column)
-    return schema
-
-
-def df(con: Any, kql: str) -> Any:
-    """Execute *kql* and return a pandas DataFrame."""
-    return sql(con, kql).df()
-
-
-def arrow(con: Any, kql: str) -> Any:
-    """Execute *kql* and return a pyarrow Table."""
-    return sql(con, kql).arrow()
+    return _declared(kql)

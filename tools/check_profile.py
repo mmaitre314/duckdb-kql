@@ -27,6 +27,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import duckdb_kql  # noqa: E402
+from duckdb_kql import engine  # noqa: E402
 from duckdb_kql.errors import KqlError  # noqa: E402
 
 DEFAULT_PROFILE = Path("tests/profiles/azure-monitor.json")
@@ -46,7 +47,7 @@ def _connection():
 def probe(con, kql: str) -> tuple[bool, str]:
     """Run one probe. Returns ``(supported, reason)``."""
     try:
-        sql = duckdb_kql.to_sql(kql, schema=duckdb_kql._connection_schema(con))
+        sql = duckdb_kql.to_sql(kql, schema=engine.schema(con))
     except KqlError as e:
         return False, f"{type(e).__name__}: {e}"
     except Exception as e:  # noqa: BLE001

@@ -34,9 +34,29 @@ TYPE_MAP = {
 
 
 class TranslationResult(str):
-    """The generated SQL, plus the UDFs it needs (none yet in Wave 1)."""
+    """The generated SQL, plus what has to travel alongside it.
+
+    It *is* the SQL string, so anything expecting one keeps working, but it also
+    carries ``parameters`` — the values for the ``$slot`` placeholders a
+    ``declare query_parameters`` query renders. Those are not optional extras:
+    running the SQL without them fails, which is the point. The values were
+    never text in the first place, so there is nothing to escape.
+    """
 
     udfs: frozenset[str] = frozenset()
+    parameters: dict = {}  # noqa: RUF012 - immutable-by-convention class default
+    #: Declared parameters left without a value or a default. The SQL is still
+    #: valid text, but it cannot run until these are supplied.
+    unbound: tuple[str, ...] = ()
+
+    def with_parameters(
+        self, parameters: dict, unbound: tuple[str, ...] = ()
+    ) -> TranslationResult:
+        result = TranslationResult(str(self))
+        result.udfs = self.udfs
+        result.parameters = parameters
+        result.unbound = unbound
+        return result
 
 
 # ---------------------------------------------------------------------------
@@ -56,6 +76,17 @@ def quote_ident(name: str) -> str:
 
 def quote_string(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
+
+
+def render_parameter(param: ir.Parameter) -> str:
+    """A declared parameter, as a DuckDB placeholder with its declared type.
+
+    The cast is not decoration. Without it DuckDB has to infer a placeholder's
+    type from context, and in positions like ``SELECT $p`` there is no context
+    to infer from; stating the declared type keeps a parameter behaving exactly
+    like the literal it stands in for.
+    """
+    return f"CAST(${param.slot} AS {TYPE_MAP[param.kind]})"
 
 
 def render_literal(lit: ir.Literal) -> str:
@@ -94,6 +125,9 @@ def render_literal(lit: ir.Literal) -> str:
 def render_expr(node: ir.Expr) -> str:
     if isinstance(node, ir.Literal):
         return render_literal(node)
+
+    if isinstance(node, ir.Parameter):
+        return render_parameter(node)
 
     if isinstance(node, ir.ColumnRef):
         return quote_ident(node.name)
@@ -215,7 +249,7 @@ def _is_timespan_expr(node: ir.Expr) -> bool:
     a bare column is assumed to be a datetime, which is the overwhelmingly
     common case for ``bin``.
     """
-    if isinstance(node, ir.Literal):
+    if isinstance(node, (ir.Literal, ir.Parameter)):
         return node.kind == "timespan"
     if isinstance(node, ir.FunctionCall):
         return node.name.lower() in _TIMESPAN_RETURNING
@@ -755,7 +789,7 @@ def _is_dynamic_expr(node: ir.Expr) -> bool:
 
 
 def _is_dynamic(node: ir.Expr) -> bool:
-    if isinstance(node, ir.Literal):
+    if isinstance(node, (ir.Literal, ir.Parameter)):
         return node.kind == "dynamic"
     if isinstance(node, ir.FunctionCall):
         return node.name.lower() in ("parse_json", "todynamic", "pack_array")
@@ -908,7 +942,7 @@ _DATETIME_RETURNING = frozenset(
 
 
 def _is_datetime_expr(node: ir.Expr) -> bool:
-    if isinstance(node, ir.Literal):
+    if isinstance(node, (ir.Literal, ir.Parameter)):
         return node.kind == "datetime"
     if isinstance(node, ir.FunctionCall):
         return node.name.lower() in _DATETIME_RETURNING
@@ -916,7 +950,7 @@ def _is_datetime_expr(node: ir.Expr) -> bool:
 
 
 def _is_bool_expr(node: ir.Expr) -> bool:
-    if isinstance(node, ir.Literal):
+    if isinstance(node, (ir.Literal, ir.Parameter)):
         return node.kind == "bool"
     if isinstance(node, ir.BinaryOp):
         return node.op in (

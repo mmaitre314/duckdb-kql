@@ -20,7 +20,7 @@ from pathlib import Path
 import pytest
 
 import duckdb_kql
-from duckdb_kql import fixtures
+from duckdb_kql import engine, fixtures
 from duckdb_kql.comparison import ComparisonOptions, compare, is_nondeterministic
 from duckdb_kql.errors import KqlError
 
@@ -31,7 +31,7 @@ CORPUS = Path(os.environ.get("DUCKDB_KQL_CORPUS", "tests/cases/docs/docs-corpus.
 pytestmark = pytest.mark.skipif(not CORPUS.is_file(), reason=f"no corpus at {CORPUS}")
 
 #: Cases that translate AND match ground truth. May only go UP.
-BASELINE_PASSING = 244
+BASELINE_PASSING = 245
 
 #: Cases we translate but knowingly get wrong, with the reason. This is an
 #: **admission of a bug**, not a waiver: each entry is a real KQL↔DuckDB gap
@@ -69,7 +69,7 @@ def _connection():
 
 @functools.lru_cache(maxsize=1)
 def _schema() -> dict:
-    return duckdb_kql._connection_schema(_connection())
+    return engine.schema(_connection())
 
 
 @functools.lru_cache(maxsize=1)
@@ -100,7 +100,10 @@ def _run(case: dict) -> tuple[str, str]:
         return "crash", f"{type(e).__name__}: {e}"
 
     try:
-        rel = _connection().sql(sql)
+        # A `declare query_parameters` query renders placeholders; their values
+        # travel beside the SQL rather than inside it (see duckdb_kql.params).
+        params = getattr(sql, "parameters", None)
+        rel = _connection().sql(str(sql), params=params) if params else _connection().sql(str(sql))
         actual = {
             "columns": list(rel.columns),
             "rows": [list(r) for r in rel.fetchall()],

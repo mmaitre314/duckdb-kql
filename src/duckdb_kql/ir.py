@@ -18,7 +18,7 @@ __all__ = [
     "Node", "Expr", "Operator", "Query",
     # expressions
     "Literal", "ColumnRef", "BinaryOp", "UnaryOp", "FunctionCall", "NamedExpr",
-    "InList", "PathAccess", "PathStep",
+    "InList", "PathAccess", "PathStep", "Parameter",
     # sources
     "TableRef", "DataTable", "PrintSource", "RangeSource",
     # operators
@@ -66,6 +66,26 @@ class ColumnRef(Expr):
     """A reference to a column by name. Case-sensitive (R7)."""
 
     name: str
+
+
+@dataclass(frozen=True)
+class Parameter(Expr):
+    """A value supplied by the caller, never spliced into the query text.
+
+    ``declare query_parameters(user:string)`` binds a *value*, not a fragment of
+    KQL. Rendering it as a literal would put caller-controlled text into the
+    generated SQL and make the escaping rules the only thing standing between a
+    caller and injection. Instead it renders as a DuckDB prepared-statement
+    placeholder (``$slot``) and the value travels out of band, so no amount of
+    quoting in the value can change the shape of the statement.
+
+    ``slot`` is generated, never the caller's name: the SQL text then contains no
+    caller-controlled bytes at all.
+    """
+
+    name: str
+    kind: str
+    slot: str
 
 
 @dataclass(frozen=True)
@@ -329,6 +349,9 @@ class Query(Node):
     operators: list[Operator] = field(default_factory=list)
     #: ``let`` bindings, in declaration order.
     lets: list[tuple[str, Query | Expr]] = field(default_factory=list)
+    #: ``declare query_parameters`` declarations, in declaration order. Values
+    #: are supplied at execution time, not here.
+    parameters: list = field(default_factory=list)
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
         ops = " | ".join(type(o).__name__ for o in self.operators)

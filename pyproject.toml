@@ -19,17 +19,24 @@ classifiers = [
     "Topic :: Database",
 ]
 
-# The ANTLR runtime version must match the tool version used by
+# Layer 0 — turning KQL text into DuckDB SQL — needs only the parser runtime.
+# Everything else is an extra, so a caller who only translates does not install
+# a database. The ANTLR runtime version must match the tool version used by
 # tools/regen_parser.sh — see grammar/UPSTREAM.md.
 dependencies = [
     "antlr4-python3-runtime==4.13.2",
-    "duckdb>=0.10",
 ]
 
 [project.optional-dependencies]
+# Layer 1 — running the translated SQL.
+duckdb = ["duckdb>=0.10"]
+# Layer 2 — the azure-kusto-data-shaped client. dataframe_from_result_table is
+# the reason pandas is here; the client itself works without it.
+kusto = ["duckdb-kql[duckdb]", "pandas"]
 pandas = ["pandas"]
 arrow = ["pyarrow"]
-dev = ["pytest>=7", "ruff"]
+all = ["duckdb-kql[duckdb,pandas,arrow]"]
+dev = ["duckdb-kql[all]", "pytest>=7", "ruff"]
 
 [project.urls]
 Homepage = "https://github.com/mmaitre314/duckdb-kql"

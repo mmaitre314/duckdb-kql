@@ -16,10 +16,11 @@ from typing import Any
 
 from . import ir
 from ._antlr.KqlParser import KqlParser
-from .errors import KqlUnsupportedError, SourceSpan
+from .errors import KqlSchemaError, KqlUnsupportedError, SourceSpan
+from .params import ParameterDeclaration, normalize_type
 from .parser import parse
 
-__all__ = ["lower"]
+__all__ = ["lower", "query_parameters"]
 
 # KQL binary operator spellings preserved verbatim into the IR (see ir.BinaryOp).
 _BINARY_TEXT_OPS = {
@@ -635,6 +636,15 @@ def _lower_sort_key(node: Any) -> ir.SortKey:
 # ---------------------------------------------------------------------------
 
 
+def query_parameters(kql: str) -> list[ParameterDeclaration]:
+    """The parameters *kql* declares, in declaration order.
+
+    Cheaper than a full translation and useful on its own: a caller can ask what
+    a query expects before deciding what to supply.
+    """
+    return _lower_query_parameters(parse(kql).tree)
+
+
 def lower(kql: str) -> ir.Query:
     """Parse *kql* and lower it to IR.
 
@@ -651,7 +661,6 @@ def lower(kql: str) -> ir.Query:
         ("SetStatement", "set"),
         ("AliasDatabaseStatement", "alias database"),
         ("DeclarePatternStatement", "declare pattern"),
-        ("DeclareQueryParametersStatement", "declare query_parameters"),
         ("RestrictAccessStatement", "restrict"),
     ):
         if _find_all(tree, stmt_kind):
@@ -667,7 +676,11 @@ def lower(kql: str) -> ir.Query:
             "multi-statement", hint="only a single query statement is supported"
         )
 
-    scalars, tabulars = _lower_lets(tree)
+    declarations = _lower_query_parameters(tree)
+    # A parameter is in scope for the whole query, `let` bindings included, so it
+    # seeds the same substitution pass those use.
+    seed = {d.name: ir.Parameter(d.name, d.type, d.slot) for d in declarations}
+    scalars, tabulars = _lower_lets(tree, seed)
 
     pipe = _collapse(statements[0])
     if _cls(pipe) != "PipeExpression":
@@ -680,6 +693,7 @@ def lower(kql: str) -> ir.Query:
     query = _substitute_query(query, scalars)
     query = _resolve_in_subqueries(query, {name for name, _ in tabulars})
     query.lets.extend(tabulars)
+    query.parameters.extend(declarations)
     return query
 
 
@@ -743,6 +757,78 @@ def _find_all(node: Any, class_name: str) -> list[Any]:
 
 # Re-exported for callers that want the raw parser type.
 _ = KqlParser
+
+
+# ---------------------------------------------------------------------------
+# declare query_parameters
+# ---------------------------------------------------------------------------
+
+
+def _lower_query_parameters(tree: Any) -> list[ParameterDeclaration]:
+    """Collect ``declare query_parameters(...)`` declarations, in order.
+
+    Slots are positional (``kqlp0``, ``kqlp1``, …) rather than derived from the
+    declared name. A KQL identifier can be an escaped name holding arbitrary
+    text; generating the slot keeps every byte of the emitted SQL ours.
+    """
+    declarations: list[ParameterDeclaration] = []
+    seen: set[str] = set()
+
+    for statement in _find_all(tree, "DeclareQueryParametersStatement"):
+        for node in _find_all(statement, "DeclareQueryParametersStatementParameter"):
+            kids = _rule_children(node)
+            if len(kids) < 2:
+                raise _unsupported(node, "query_parameters declaration")
+
+            name = _parameter_name(kids[0])
+            if name in seen:
+                raise KqlSchemaError(name, hint="declared as a query parameter twice")
+            seen.add(name)
+
+            kind = normalize_type(kids[1].getText())
+            default = None
+            for extra in kids[2:]:
+                if _cls(extra) == "ScalarParameterDefault":
+                    default = _parameter_default(extra, kind)
+
+            declarations.append(
+                ParameterDeclaration(
+                    name=name,
+                    type=kind,
+                    slot=f"kqlp{len(declarations)}",
+                    default=default,
+                )
+            )
+
+    return declarations
+
+
+def _parameter_name(node: Any) -> str:
+    """The declared name, with any ``['...']`` escaping removed."""
+    text = node.getText()
+    if text.startswith("['") and text.endswith("']"):
+        return text[2:-2]
+    if text.startswith('["') and text.endswith('"]'):
+        return text[2:-2]
+    return text
+
+
+def _parameter_default(node: Any, kind: str) -> Any:
+    """Evaluate a declaration's ``= <literal>`` default to a Python value.
+
+    Only literals are accepted. A default that could *compute* would need the
+    full expression machinery at bind time, and a parameter default is not worth
+    that: declare it required instead.
+    """
+    from .params import coerce
+
+    literals = _find_all(node, "LiteralExpression")
+    if not literals:
+        raise _unsupported(node, "query_parameters default")
+    expr = _lower_expr(_collapse(literals[0]))
+    if not isinstance(expr, ir.Literal):
+        raise _unsupported(node, "query_parameters default")
+    return coerce(expr.value, kind, "<default>")
 
 
 # ---------------------------------------------------------------------------
@@ -880,13 +966,14 @@ def _substitute_operator(op: ir.Operator, scalars: dict) -> ir.Operator:
     return op
 
 
-def _lower_lets(tree: Any) -> tuple[dict, list]:
+def _lower_lets(tree: Any, seed: dict | None = None) -> tuple[dict, list]:
     """Collect ``let`` bindings in declaration order.
 
     Returns ``(scalars, tabulars)``. Later bindings may reference earlier ones,
-    so scalars are substituted as they are collected.
+    so scalars are substituted as they are collected. *seed* pre-populates the
+    scalar scope — query parameters live there, since a ``let`` may read one.
     """
-    scalars: dict = {}
+    scalars: dict = dict(seed or {})
     tabulars: list = []
 
     for statement in _find_all(tree, "LetStatement"):
