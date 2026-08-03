@@ -36,7 +36,13 @@ kusto = ["duckdb-kql[duckdb]", "pandas"]
 pandas = ["pandas"]
 arrow = ["pyarrow"]
 all = ["duckdb-kql[duckdb,pandas,arrow]"]
-dev = ["duckdb-kql[all]", "pytest>=7", "ruff"]
+dev = [
+    "duckdb-kql[all]",
+    "pytest>=7",
+    "ruff",
+    # tests/test_docs.py reads pyproject.toml; tomllib arrived in 3.11.
+    "tomli; python_version < '3.11'",
+]
 
 [project.urls]
 Homepage = "https://github.com/mmaitre314/duckdb-kql"

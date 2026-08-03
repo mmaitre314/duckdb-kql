@@ -44,6 +44,50 @@ jobs:
       - name: Test
         run: python -m pytest -q
 
+  # Layer 0 is documented as translating KQL with nothing but the ANTLR runtime
+  # installed. The test suite cannot check that — it runs with everything
+  # present — so the claim is verified the only way it can be: by installing the
+  # package alone and using it with duckdb genuinely absent.
+  layer-0-installs-without-duckdb:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install the package with no extras
+        run: python -m pip install .
+
+      - name: Fail if anything but the ANTLR runtime came along
+        run: |
+          python - <<'PY'
+          import importlib.util, sys
+
+          for forbidden in ("duckdb", "pandas", "pyarrow"):
+              if importlib.util.find_spec(forbidden) is not None:
+                  sys.exit(f"::error::a bare install pulled in {forbidden}")
+
+          import duckdb_kql
+          sql = duckdb_kql.to_sql('Logs | where Level == "Error" | take 10')
+          assert "SELECT" in sql, sql
+          assert duckdb_kql.parse("print 1").ok
+          assert duckdb_kql.validate("print 1") == []
+
+          # ... and that the layer above still fails with a usable message.
+          try:
+              duckdb_kql.connect()
+          except ImportError as exc:
+              assert "duckdb-kql[duckdb]" in str(exc), exc
+          else:
+              sys.exit("::error::connect() worked without duckdb installed")
+
+          print("Layer 0 works on antlr4 alone")
+          PY
+
   # The generated parser is committed (see grammar/UPSTREAM.md) so that installs
   # need no Java. That only stays honest if the checked-in code still matches
   # the grammar it claims to come from.
