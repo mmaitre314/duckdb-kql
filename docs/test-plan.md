@@ -334,7 +334,24 @@ KQL↔DuckDB semantic gaps** and should grow as we find more.
 - `substring` with negative/out-of-range indices; `strcat` null handling;
   `split` empty-segment behavior; `strlen` counts characters not bytes.
 
+**Statements — `let` implemented, pinned by [`tests/test_let.py`](../tests/test_let.py)**
+- `let` was the largest single blocker in the corpus (250 frozen cases) and is
+  dangerous to get wrong: it is **not** a `QueryStatement`, so an implementation
+  that counts query statements sees one statement, translates it, and silently
+  **drops the binding** — a query that runs and returns the wrong rows.
+- Scalar bindings are substituted into the IR (a `let` is a query-scope binding,
+  not a column); tabular bindings become named CTEs, so a reference in the body
+  needs no rewriting. `materialize()` is a caching hint for a distributed engine
+  and unwraps.
+- User-defined functions (`let f = (a:int) { … }`) still refuse.
+
 **Datetime / timespan**
+- **CONFIRMED — KQL timespan strings carry a day part** (`[-][d.]hh:mm:ss`) that
+  DuckDB's `INTERVAL` cast rejects, so `totimespan('4.00:00:00')` was silently
+  null. Also `totimespan(4d)` receives an INTERVAL, not a string.
+- **CONFIRMED — dividing two timespans yields a number.** `dayofweek()` returns
+  a *timespan*, not an integer, so `dow / 1d` means "how many days". DuckDB has
+  no interval division, so this failed to bind rather than misleading.
 - `datetime` is UTC; `bin()`/`floor` semantics vs DuckDB `time_bucket`/`date_trunc`
   origin; week/month binning edge cases.
 - `ago()`, `now()` determinism within a query.

@@ -31,7 +31,7 @@ CORPUS = Path(os.environ.get("DUCKDB_KQL_CORPUS", "tests/cases/docs/docs-corpus.
 pytestmark = pytest.mark.skipif(not CORPUS.is_file(), reason=f"no corpus at {CORPUS}")
 
 #: Cases that translate AND match ground truth. May only go UP.
-BASELINE_PASSING = 90
+BASELINE_PASSING = 121
 
 #: Cases we translate but knowingly get wrong, with the reason. This is an
 #: **admission of a bug**, not a waiver: each entry is a real KQL↔DuckDB gap
@@ -60,6 +60,11 @@ def _connection():
 
 
 @functools.lru_cache(maxsize=1)
+def _schema() -> dict:
+    return duckdb_kql._connection_schema(_connection())
+
+
+@functools.lru_cache(maxsize=1)
 def _frozen_cases() -> tuple[dict, ...]:
     data = json.loads(CORPUS.read_text(encoding="utf-8"))["cases"]
     return tuple(c for c in data if c.get("expected") is not None)
@@ -76,7 +81,9 @@ def _run(case: dict) -> tuple[str, str]:
         return "nondeterministic", ""
 
     try:
-        sql = duckdb_kql.to_sql(case["kql"])
+        # `join` needs base-table columns to reproduce KQL's column renaming;
+        # without the schema every join case would report as unsupported.
+        sql = duckdb_kql.to_sql(case["kql"], schema=_schema())
     except KqlError as e:
         return "unsupported", type(e).__name__
     except Exception as e:  # noqa: BLE001

@@ -106,6 +106,15 @@ def render_expr(node: ir.Expr) -> str:
         raise KqlUnsupportedError(f"unary:{node.op}")
 
     if isinstance(node, ir.BinaryOp):
+        if node.op == "/" and (
+            _is_timespan_expr(node.left) or _is_timespan_expr(node.right)
+        ):
+            # Dividing two timespans yields a NUMBER in KQL (`dow / 1d` is "how
+            # many days"). DuckDB has no interval division at all, so this would
+            # otherwise fail to bind rather than silently mislead.
+            return (
+                f"(epoch({render_expr(node.left)}) / epoch({render_expr(node.right)}))"
+            )
         spec = BINARY_OPERATORS.get(node.op)
         if spec is None:
             raise KqlUnsupportedError(
@@ -116,6 +125,12 @@ def render_expr(node: ir.Expr) -> str:
     if isinstance(node, ir.FunctionCall):
         if node.name.lower() == "bin":
             return render_bin(node)
+        if node.name.lower() in ("totimespan", "timespan") and len(node.args) == 1:
+            # `totimespan(4d)` hands us an INTERVAL, not a string — the string
+            # parser would fail to bind. Converting an already-converted value
+            # is a no-op in KQL too.
+            if _is_timespan_expr(node.args[0]):
+                return render_expr(node.args[0])
         spec = lookup(node.name)
         if spec is None:
             raise KqlUnsupportedError(
@@ -169,11 +184,22 @@ def _is_timespan_expr(node: ir.Expr) -> bool:
     """
     if isinstance(node, ir.Literal):
         return node.kind == "timespan"
+    if isinstance(node, ir.FunctionCall):
+        return node.name.lower() in _TIMESPAN_RETURNING
     if isinstance(node, ir.BinaryOp) and node.op in ("+", "-"):
         return _is_timespan_expr(node.left) and _is_timespan_expr(node.right)
+    if isinstance(node, ir.BinaryOp) and node.op == "*":
+        # `5 * 1h` is a timespan; a scalar factor does not change that.
+        return _is_timespan_expr(node.left) or _is_timespan_expr(node.right)
     if isinstance(node, ir.UnaryOp):
         return _is_timespan_expr(node.operand)
     return False
+
+
+#: Functions whose result is a timespan, so arithmetic on them is timespan
+#: arithmetic. `dayofweek` is the surprising one — it returns a *timespan*
+#: (days since Sunday), not an integer.
+_TIMESPAN_RETURNING = frozenset({"totimespan", "timespan", "dayofweek", "to_timespan"})
 
 
 def print_column_name(named: ir.NamedExpr, position: int) -> str:
@@ -346,6 +372,15 @@ def to_sql(query: ir.Query, schema: dict | None = None) -> TranslationResult:
     """
     from ..schema import output_columns
 
+    # A tabular `let` becomes a named CTE, so `TableRef(name)` in the body needs
+    # no rewriting — it already refers to the CTE.
+    schema = _schema_with_lets(query, schema)
+    let_ctes = [
+        f"{quote_ident(name)} AS ({to_sql(bound, schema)})"
+        for name, bound in query.lets
+        if isinstance(bound, ir.Query)
+    ]
+
     stages = [render_source(query.source)]
     cols: list[str] | None = None
 
@@ -369,11 +404,32 @@ def to_sql(query: ir.Query, schema: dict | None = None) -> TranslationResult:
 
                 cols = _operator_columns(op, cols, schema)
 
-    if len(stages) == 1:
+    if len(stages) == 1 and not let_ctes:
         return TranslationResult(stages[0])
 
-    ctes = ",\n     ".join(f"_s{i} AS ({sql})" for i, sql in enumerate(stages))
-    return TranslationResult(f"WITH {ctes}\nSELECT * FROM _s{len(stages) - 1}")
+    ctes = let_ctes + [f"_s{i} AS ({sql})" for i, sql in enumerate(stages)]
+    body = f"SELECT * FROM _s{len(stages) - 1}"
+    return TranslationResult("WITH " + ",\n     ".join(ctes) + f"\n{body}")
+
+
+def _schema_with_lets(query: ir.Query, schema: dict | None) -> dict | None:
+    """Extend *schema* with the columns each tabular ``let`` produces.
+
+    Without this a join whose side is a `let`-bound table cannot resolve its
+    columns, even though they are fully determined by the binding.
+    """
+    if not query.lets:
+        return schema
+    from ..schema import output_columns
+
+    extended = dict(schema or {})
+    for name, bound in query.lets:
+        if isinstance(bound, ir.Query):
+            try:
+                extended[name] = output_columns(bound, extended)
+            except Exception:  # noqa: BLE001 - resolve lazily; join reports it
+                pass
+    return extended
 
 
 def _source_cols(query: ir.Query, schema: dict | None) -> list[str]:

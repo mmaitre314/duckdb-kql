@@ -115,7 +115,7 @@ def test_translation_refuses_constructs_outside_the_wave() -> None:
     for kql in (
         "T | mv-expand a",  # operator not yet implemented
         "T | evaluate bag_unpack(a)",  # operator not yet implemented
-        "let x = 5; T | where a > x",  # let bindings must not be dropped
+        "let f = (a:int) { a + 1 }; print f(1)",  # user-defined functions
         "T | where a == totimespan_unmapped(1)",  # unmapped function
         "T | summarize unmapped_agg(a)",  # unmapped aggregate
     ):

@@ -83,6 +83,17 @@ _TODATETIME = (
     f"try_strptime({{0}}, {_FORMAT_LIST}))"
 )
 
+# A KQL timespan string is `[-][d.]hh:mm:ss[.fffffff]`. DuckDB's INTERVAL cast
+# handles `hh:mm:ss` but returns NULL for the leading day part, so `4.00:00:00`
+# silently became null. Split the days off and add them back.
+_TOTIMESPAN = (
+    "CASE WHEN regexp_matches({0}, '^-?[0-9]+\\.[0-9]{{1,2}}:') THEN "
+    "(CASE WHEN starts_with({0}, '-') THEN -1 ELSE 1 END) * "
+    "(to_days(CAST(regexp_extract(ltrim({0}, '-'), '^([0-9]+)\\.', 1) AS INTEGER)) "
+    "+ CAST(regexp_replace(ltrim({0}, '-'), '^[0-9]+\\.', '') AS INTERVAL)) "
+    "ELSE TRY_CAST({0} AS INTERVAL) END"
+)
+
 
 #: Wave 1 scalar and aggregate functions.
 SCALAR_FUNCTIONS: dict[str, FunctionSpec] = {
@@ -125,7 +136,9 @@ SCALAR_FUNCTIONS: dict[str, FunctionSpec] = {
         _f("toboolean", "template", "TRY_CAST({0} AS BOOLEAN)", (1,), ("R1",)),
         _f("todatetime", "template", _TODATETIME, (1,), ("R1", "R8"),
            "wider format surface than TRY_CAST; resolves UTC offsets"),
-        _f("totimespan", "template", "TRY_CAST({0} AS INTERVAL)", (1,), ("R1", "R8")),
+        _f("totimespan", "template", _TOTIMESPAN, (1,), ("R1", "R8"),
+           "KQL timespans carry a d. prefix that DuckDB's INTERVAL cast rejects"),
+        _f("timespan", "template", _TOTIMESPAN, (1,), ("R1", "R8"), "alias of totimespan"),
         _f("toguid", "template", "TRY_CAST({0} AS UUID)", (1,), ("R1",)),
         # --- math -----------------------------------------------------------
         _f("abs", "native", "abs({0})", (1,)),

@@ -11,6 +11,7 @@ table keeps the supported surface readable and greppable.
 
 from __future__ import annotations
 
+import dataclasses
 from typing import Any
 
 from . import ir
@@ -571,11 +572,10 @@ def lower(kql: str) -> ir.Query:
     """
     tree = parse(kql).tree
 
-    # `let` bindings are NOT QueryStatements, so counting query statements alone
-    # would silently DROP them -- `let x = 5; T | where a > x` would translate as
-    # though the binding never existed. Refuse loudly instead.
+    # These are NOT QueryStatements, so counting query statements alone would
+    # silently DROP them. Refuse loudly instead. (`let` used to be in this list
+    # for exactly that reason; it is now implemented below.)
     for stmt_kind, label in (
-        ("LetStatement", "let"),
         ("SetStatement", "set"),
         ("AliasDatabaseStatement", "alias database"),
         ("DeclarePatternStatement", "declare pattern"),
@@ -595,15 +595,21 @@ def lower(kql: str) -> ir.Query:
             "multi-statement", hint="only a single query statement is supported"
         )
 
+    scalars, tabulars = _lower_lets(tree)
+
     pipe = _collapse(statements[0])
     if _cls(pipe) != "PipeExpression":
         # A source with no pipeline at all, e.g. `print 1` or `datatable(...)[]`.
-        return ir.Query(_lower_source(pipe))
+        query = ir.Query(_lower_source(pipe))
+    else:
+        parts = _rule_children(pipe)
+        query = ir.Query(
+            _lower_source(parts[0]), [_lower_operator(p) for p in parts[1:]]
+        )
 
-    parts = _rule_children(pipe)
-    source = _lower_source(parts[0])
-    operators = [_lower_operator(p) for p in parts[1:]]
-    return ir.Query(source, operators)
+    query = _substitute_query(query, scalars)
+    query.lets.extend(tabulars)
+    return query
 
 
 def _find_all(node: Any, class_name: str) -> list[Any]:
@@ -618,3 +624,145 @@ def _find_all(node: Any, class_name: str) -> list[Any]:
 
 # Re-exported for callers that want the raw parser type.
 _ = KqlParser
+
+
+# ---------------------------------------------------------------------------
+# let bindings
+# ---------------------------------------------------------------------------
+
+#: Node kinds that make a `let` value tabular rather than scalar.
+_TABULAR_VALUE = {
+    "PipeExpression", "DataTableExpression", "RangeExpression", "PrintOperator",
+}
+
+
+def _is_tabular_value(node: Any, scalars: dict) -> bool:
+    """Whether a ``let`` binds a table or a scalar.
+
+    A pipeline or an inline table is unambiguous. A bare identifier is an alias
+    for another table — unless it names a scalar `let` already in scope, in
+    which case it is that scalar.
+    """
+    kind = _cls(node)
+    if kind in _TABULAR_VALUE:
+        return True
+    if kind == "IdentifierName":
+        return node.getText() not in scalars
+    return False
+
+
+def _lower_query_node(node: Any) -> ir.Query:
+    """Lower a tabular expression node into a Query."""
+    node = _collapse(node)
+    if _cls(node) == "PipeExpression":
+        parts = _rule_children(node)
+        return ir.Query(_lower_source(parts[0]), [_lower_operator(p) for p in parts[1:]])
+    return ir.Query(_lower_source(node))
+
+
+def _substitute(node: Any, scalars: dict) -> Any:
+    """Replace scalar ``let`` references inside an expression.
+
+    A `let` is a query-scope binding, not a column, so this runs as a pass over
+    the IR rather than being threaded through every lowering function.
+    """
+    if isinstance(node, ir.ColumnRef):
+        return scalars.get(node.name, node)
+    if isinstance(node, ir.BinaryOp):
+        return dataclasses.replace(
+            node,
+            left=_substitute(node.left, scalars),
+            right=_substitute(node.right, scalars),
+        )
+    if isinstance(node, ir.UnaryOp):
+        return dataclasses.replace(node, operand=_substitute(node.operand, scalars))
+    if isinstance(node, ir.FunctionCall):
+        return dataclasses.replace(
+            node, args=tuple(_substitute(a, scalars) for a in node.args)
+        )
+    if isinstance(node, ir.NamedExpr):
+        return dataclasses.replace(node, expr=_substitute(node.expr, scalars))
+    if isinstance(node, ir.SortKey):
+        return dataclasses.replace(node, expr=_substitute(node.expr, scalars))
+    return node
+
+
+def _substitute_query(query: ir.Query, scalars: dict) -> ir.Query:
+    if not scalars:
+        return query
+    source = query.source
+    if isinstance(source, ir.DataTable):
+        source = dataclasses.replace(
+            source, values=tuple(_substitute(v, scalars) for v in source.values)
+        )
+    elif isinstance(source, ir.PrintSource):
+        source = dataclasses.replace(
+            source,
+            expressions=tuple(_substitute(e, scalars) for e in source.expressions),
+        )
+    return ir.Query(
+        source,
+        [_substitute_operator(op, scalars) for op in query.operators],
+        list(query.lets),
+    )
+
+
+def _substitute_operator(op: ir.Operator, scalars: dict) -> ir.Operator:
+    if isinstance(op, ir.Where):
+        return dataclasses.replace(op, predicate=_substitute(op.predicate, scalars))
+    if isinstance(op, (ir.Project, ir.Extend)):
+        return dataclasses.replace(
+            op, expressions=tuple(_substitute(e, scalars) for e in op.expressions)
+        )
+    if isinstance(op, ir.Sort):
+        return dataclasses.replace(
+            op, keys=tuple(_substitute(k, scalars) for k in op.keys)
+        )
+    if isinstance(op, ir.Summarize):
+        return dataclasses.replace(
+            op,
+            aggregates=tuple(_substitute(a, scalars) for a in op.aggregates),
+            by=tuple(_substitute(k, scalars) for k in op.by),
+        )
+    if isinstance(op, ir.Join):
+        return dataclasses.replace(op, right=_substitute_query(op.right, scalars))
+    return op
+
+
+def _lower_lets(tree: Any) -> tuple[dict, list]:
+    """Collect ``let`` bindings in declaration order.
+
+    Returns ``(scalars, tabulars)``. Later bindings may reference earlier ones,
+    so scalars are substituted as they are collected.
+    """
+    scalars: dict = {}
+    tabulars: list = []
+
+    for statement in _find_all(tree, "LetStatement"):
+        decls = _rule_children(statement)
+        if not decls:
+            continue
+        decl = decls[0]
+        kind = _cls(decl)
+
+        if kind == "LetFunctionDeclaration":
+            raise _unsupported(decl, "let function")
+
+        kids = _rule_children(decl)
+        if len(kids) < 2:
+            raise _unsupported(decl, "let")
+        name = kids[0].getText()
+        value = _collapse(kids[-1])
+
+        if kind == "LetMaterializeDeclaration":
+            # `materialize()` is a caching hint for a distributed engine; it
+            # cannot change the result, so unwrapping it is correct.
+            tabulars.append((name, _substitute_query(_lower_query_node(value), scalars)))
+            continue
+
+        if _is_tabular_value(value, scalars):
+            tabulars.append((name, _substitute_query(_lower_query_node(value), scalars)))
+        else:
+            scalars[name] = _substitute(_lower_expr(value), scalars)
+
+    return scalars, tabulars
