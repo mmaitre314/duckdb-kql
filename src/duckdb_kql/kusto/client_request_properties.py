@@ -227,7 +227,7 @@ class ClientRequestProperties:
             {"Options": self._options, "Parameters": self._parameters}, default=str
         )
 
-    def get_tracing_attributes(self) -> dict:
+    def get_tracing_attributes(self) -> dict[str, str]:
         return {self._CLIENT_REQUEST_ID: str(self.client_request_id)}
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid

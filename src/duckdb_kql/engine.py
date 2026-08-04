@@ -18,25 +18,49 @@ Importing ``duckdb_kql`` does not import ``duckdb``. Importing *this* module
 does not either — only :func:`connect` needs it, so a caller who already has a
 connection can use every other function with ``duckdb`` absent from the
 resolver's view.
+
+The DuckDB types below are imported **only for type checkers**. Combined with
+``from __future__ import annotations`` that costs nothing at runtime — the
+annotations are never evaluated — while giving callers real types rather than
+``Any``. Typing an optional dependency does not make it a required one.
 """
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-__all__ = ["connect", "sql", "execute", "df", "arrow", "schema"]
+if TYPE_CHECKING:
+    import pandas as pd
+    import pyarrow as pa
+    from duckdb import DuckDBPyConnection, DuckDBPyRelation
+
+    from .translate import TranslationResult
+
+#: Values a caller may supply for a query's declared parameters. Deliberately
+#: ``Any``: what is acceptable depends on the *declared KQL type*, which is
+#: checked at bind time (``duckdb_kql.params.coerce``) rather than by the
+#: signature. See the table in docs/api.md.
+Parameters = dict[str, Any]
+
+#: Table name -> column names, as :func:`schema` returns it.
+Schema = dict[str, list[str]]
+
+__all__ = ["connect", "sql", "execute", "df", "arrow", "schema", "Parameters", "Schema"]
 
 
-def connect(database: str = ":memory:", **kwargs: Any) -> Any:
+def connect(database: str = ":memory:", **kwargs: Any) -> DuckDBPyConnection:
     """Open a DuckDB connection configured for KQL semantics.
 
     Equivalent to ``duckdb.connect(...)`` followed by ``SET TimeZone='UTC'``.
     Use it instead of ``duckdb.connect`` unless you are setting the zone
     yourself: on a machine in a non-UTC zone the difference is wrong answers,
     not errors.
+
+    ``**kwargs`` is forwarded to ``duckdb.connect`` and is genuinely ``Any`` —
+    DuckDB's own configuration surface is a string-keyed dict of mixed types.
     """
     duckdb = _require_duckdb()
-    con = duckdb.connect(database, **kwargs)
+    con: DuckDBPyConnection = duckdb.connect(database, **kwargs)
     con.execute("SET TimeZone='UTC'")
     return con
 
@@ -54,10 +78,10 @@ def _require_duckdb() -> Any:
 
 
 def sql(
-    con: Any,
+    con: DuckDBPyConnection,
     kql: str,
-    parameters: dict[str, Any] | None = None,
-) -> Any:
+    parameters: Parameters | None = None,
+) -> DuckDBPyRelation:
     """Execute *kql* against a DuckDB connection, returning a relation.
 
     Sets ``TimeZone='UTC'`` on *con* first. This changes connection state
@@ -82,7 +106,11 @@ def sql(
     return con.sql(translated, params=bound) if bound else con.sql(translated)
 
 
-def execute(con: Any, kql: str, parameters: dict[str, Any] | None = None) -> Any:
+def execute(
+    con: DuckDBPyConnection,
+    kql: str,
+    parameters: Parameters | None = None,
+) -> DuckDBPyConnection:
     """Execute *kql* and return the connection, mirroring ``con.execute``.
 
     Use this for its side effect or its cursor; use :func:`sql` when you want a
@@ -93,37 +121,44 @@ def execute(con: Any, kql: str, parameters: dict[str, Any] | None = None) -> Any
 
 
 def _prepare(
-    con: Any, kql: str, parameters: dict[str, Any] | None
-) -> tuple[str, dict[str, Any]]:
+    con: DuckDBPyConnection, kql: str, parameters: Parameters | None
+) -> tuple[str, Parameters]:
     """Translate *kql* and get *con* into the state the SQL assumes."""
     from . import to_sql
     from .errors import KqlSchemaError
 
     con.execute("SET TimeZone='UTC'")
-    translated = to_sql(kql, schema=schema(con), parameters=parameters)
+    translated: TranslationResult = to_sql(kql, schema=schema(con), parameters=parameters)
 
-    unbound = getattr(translated, "unbound", ())
-    if unbound:
+    if translated.unbound:
         # DuckDB would raise too, but naming a generated slot rather than the
         # parameter the caller declared.
         raise KqlSchemaError(
-            ", ".join(unbound),
+            ", ".join(translated.unbound),
             hint="declared query parameter with no value and no default",
         )
-    return str(translated), getattr(translated, "parameters", {})
+    return str(translated), translated.parameters
 
 
-def df(con: Any, kql: str, parameters: dict[str, Any] | None = None) -> Any:
+def df(
+    con: DuckDBPyConnection,
+    kql: str,
+    parameters: Parameters | None = None,
+) -> pd.DataFrame:
     """Execute *kql* and return a pandas DataFrame."""
     return sql(con, kql, parameters).df()
 
 
-def arrow(con: Any, kql: str, parameters: dict[str, Any] | None = None) -> Any:
+def arrow(
+    con: DuckDBPyConnection,
+    kql: str,
+    parameters: Parameters | None = None,
+) -> pa.Table:
     """Execute *kql* and return a pyarrow Table."""
     return sql(con, kql, parameters).arrow()
 
 
-def schema(con: Any) -> dict[str, list[str]]:
+def schema(con: DuckDBPyConnection) -> Schema:
     """Read table -> column names from a DuckDB connection.
 
     Only ``join`` consults this, but it is cheap enough to gather
@@ -136,7 +171,7 @@ def schema(con: Any) -> dict[str, list[str]]:
         ).fetchall()
     except Exception:  # noqa: BLE001 - a schema-less connection is not an error
         return {}
-    out: dict[str, list[str]] = {}
+    out: Schema = {}
     for table, column in rows:
         out.setdefault(table, []).append(column)
     return out

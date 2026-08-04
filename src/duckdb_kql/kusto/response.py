@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 
-from ._models import KustoResultTable, WellKnownDataSet
+from ._models import JsonTable, KustoResultTable, WellKnownDataSet
 
 __all__ = ["KustoResponseDataSet"]
 
@@ -23,13 +23,13 @@ class KustoResponseDataSet:
     _error_column = "Level"
     _crid_column = "ClientRequestId"
 
-    def __init__(self, json_response: list):
+    def __init__(self, json_response: list[JsonTable]) -> None:
         self.tables = [KustoResultTable(t) for t in json_response]
         self.tables_count = len(self.tables)
         self.tables_names = [t.table_name for t in self.tables]
 
     @property
-    def primary_results(self) -> list:
+    def primary_results(self) -> list[KustoResultTable]:
         """The query's own output tables.
 
         A single-table response is returned whole, matching the SDK: a response
@@ -49,7 +49,7 @@ class KustoResponseDataSet:
         """
         return 0
 
-    def get_exceptions(self) -> list:
+    def get_exceptions(self) -> list[str]:
         return []
 
     def __iter__(self) -> Iterator[KustoResultTable]:

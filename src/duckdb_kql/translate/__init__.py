@@ -10,11 +10,19 @@ Every rule marked ``Rn`` below is a semantic invariant from ``TRANSLATION.md``
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, Any
+
 from .. import ir
 from ..errors import KqlUnsupportedError
 from .functions import _TODATETIME, BINARY_OPERATORS, lookup, lookup_aggregate
 
+if TYPE_CHECKING:
+    from ..schema import Schema
+
 __all__ = ["to_sql", "TranslationResult"]
+
+#: Placeholder slot -> the value bound to it. See duckdb_kql.params.
+Parameters = dict[str, Any]
 
 #: KQL type name -> DuckDB type (docs/TRANSLATION.md §2).
 TYPE_MAP = {
@@ -44,13 +52,13 @@ class TranslationResult(str):
     """
 
     udfs: frozenset[str] = frozenset()
-    parameters: dict = {}  # noqa: RUF012 - immutable-by-convention class default
+    parameters: Parameters = {}  # noqa: RUF012 - immutable-by-convention default
     #: Declared parameters left without a value or a default. The SQL is still
     #: valid text, but it cannot run until these are supplied.
     unbound: tuple[str, ...] = ()
 
     def with_parameters(
-        self, parameters: dict, unbound: tuple[str, ...] = ()
+        self, parameters: Parameters, unbound: tuple[str, ...] = ()
     ) -> TranslationResult:
         result = TranslationResult(str(self))
         result.udfs = self.udfs
@@ -198,15 +206,15 @@ def render_expr(node: ir.Expr) -> str:
             # is a no-op in KQL too.
             if _is_timespan_expr(node.args[0]):
                 return render_expr(node.args[0])
-        spec = lookup(node.name)
-        if spec is None:
+        fn_spec = lookup(node.name)
+        if fn_spec is None:
             raise KqlUnsupportedError(
                 f"function:{node.name}",
                 hint="no DuckDB mapping in this wave; see translate/functions.py",
             )
         args = [render_expr(a) for a in node.args]
         try:
-            return spec.render(args)
+            return fn_spec.render(args)
         except ValueError as e:
             raise KqlUnsupportedError(f"function:{node.name}", hint=str(e)) from None
 
@@ -342,7 +350,7 @@ def render_datatable(dt: ir.DataTable) -> str:
     if not dt.values:
         # An empty datatable still has a schema; SELECT ... WHERE FALSE keeps it.
         cols = ", ".join(
-            f"CAST(NULL AS {t}) AS {n}" for n, t in zip(names, types)
+            f"CAST(NULL AS {t}) AS {n}" for n, t in zip(names, types, strict=True)
         )
         return f"SELECT {cols} WHERE FALSE"
 
@@ -350,7 +358,7 @@ def render_datatable(dt: ir.DataTable) -> str:
     for start in range(0, len(dt.values), arity):
         cells = [
             f"CAST({render_expr(v)} AS {t})"
-            for v, t in zip(dt.values[start : start + arity], types)
+            for v, t in zip(dt.values[start : start + arity], types, strict=True)
         ]
         rows.append("(" + ", ".join(cells) + ")")
 
@@ -385,7 +393,7 @@ def render_operator(op: ir.Operator, prev: str) -> str:
         excluded = ", ".join(quote_string(n) for n in names)
         added = ", ".join(
             f"{render_expr(e.expr)} AS {quote_ident(n)}"
-            for e, n in zip(op.expressions, names)
+            for e, n in zip(op.expressions, names, strict=True)
         )
         return f"SELECT COLUMNS(x -> x NOT IN ({excluded})), {added} FROM {prev}"
 
@@ -397,8 +405,8 @@ def render_operator(op: ir.Operator, prev: str) -> str:
         return f"SELECT count(*) AS {quote_ident(op.name)} FROM {prev}"
 
     if isinstance(op, ir.Distinct):
-        cols = ", ".join(quote_ident(c) for c in op.columns)
-        return f"SELECT DISTINCT {cols} FROM {prev}"
+        distinct_cols = ", ".join(quote_ident(c) for c in op.columns)
+        return f"SELECT DISTINCT {distinct_cols} FROM {prev}"
 
     if isinstance(op, ir.ProjectAway):
         excluded = ", ".join(quote_ident(c) for c in op.columns)
@@ -450,7 +458,7 @@ def render_sort_keys(keys: tuple[ir.SortKey, ...]) -> str:
 # ---------------------------------------------------------------------------
 
 
-def to_sql(query: ir.Query, schema: dict | None = None) -> TranslationResult:
+def to_sql(query: ir.Query, schema: Schema | None = None) -> TranslationResult:
     """Render an IR query as DuckDB SQL (a CTE chain).
 
     *schema* maps table name to column names. It is only consulted for queries
@@ -499,7 +507,7 @@ def to_sql(query: ir.Query, schema: dict | None = None) -> TranslationResult:
     return TranslationResult("WITH " + ",\n     ".join(ctes) + f"\n{body}")
 
 
-def _schema_with_lets(query: ir.Query, schema: dict | None) -> dict | None:
+def _schema_with_lets(query: ir.Query, schema: Schema | None) -> Schema | None:
     """Extend *schema* with the columns each tabular ``let`` produces.
 
     Without this a join whose side is a `let`-bound table cannot resolve its
@@ -519,7 +527,7 @@ def _schema_with_lets(query: ir.Query, schema: dict | None) -> dict | None:
     return extended
 
 
-def _source_cols(query: ir.Query, schema: dict | None) -> list[str]:
+def _source_cols(query: ir.Query, schema: Schema | None) -> list[str]:
     """Columns produced by the query up to (not including) its first join."""
     from ..schema import _operator_columns, _source_columns
 
@@ -578,7 +586,9 @@ def aggregate_name(named: ir.NamedExpr) -> str:
         return _argument_name(expr) or "Column1"
 
     if spec.name_is_argument:
-        return _argument_name(expr.args[0]) if expr.args else spec.prefix
+        if not expr.args:
+            return spec.prefix
+        return _argument_name(expr.args[0]) or spec.prefix
 
     if spec.name_ignores_args or not expr.args:
         return f"{spec.prefix}_"
@@ -589,7 +599,7 @@ def aggregate_name(named: ir.NamedExpr) -> str:
     # percentile carries the percentile itself: percentile_x_50.
     if spec.name == "percentile" and len(expr.args) > 1:
         p = expr.args[1]
-        if isinstance(p, ir.Literal):
+        if isinstance(p, ir.Literal) and isinstance(p.value, (int, float)):
             suffix = int(p.value) if float(p.value).is_integer() else p.value
             name = f"{name}_{suffix}"
     return name
@@ -727,7 +737,7 @@ def render_join(
         [f"_l.{quote_ident(c)} AS {quote_ident(c)}" for c in left_cols]
         + [
             f"_r.{quote_ident(src)} AS {quote_ident(out)}"
-            for src, out in zip(right_cols, _renamed(left_cols, right_cols))
+            for src, out in zip(right_cols, _renamed(left_cols, right_cols), strict=True)
         ]
     )
     return (
@@ -829,15 +839,9 @@ def render_path(node: ir.PathAccess) -> str:
     base = render_expr(node.base)
 
     # A fully static path can be one json_extract call.
-    if all(s.name is not None or _static_index(s.index) is not None for s in node.steps):
-        path = "$"
-        for step in node.steps:
-            if step.name is not None:
-                path += f".{_json_path_key(step.name)}"
-            else:
-                i = _static_index(step.index)
-                path += f"[{'#' + str(i) if i < 0 else i}]"
-        return f"json_extract({base}, {quote_string(path)})"
+    static = _static_path(node.steps)
+    if static is not None:
+        return f"json_extract({base}, {quote_string(static)})"
 
     # A runtime index has to build its own path fragment.
     sql = base
@@ -845,6 +849,7 @@ def render_path(node: ir.PathAccess) -> str:
         if step.name is not None:
             sql = f"json_extract({sql}, {quote_string('$.' + _json_path_key(step.name))})"
         else:
+            assert step.index is not None  # noqa: S101 - a step is a name or an index
             idx = render_expr(step.index)
             frag = (
                 f"'$[' || CASE WHEN {idx} < 0 THEN '#' || CAST({idx} AS VARCHAR) "
@@ -852,6 +857,26 @@ def render_path(node: ir.PathAccess) -> str:
             )
             sql = f"json_extract({sql}, {frag})"
     return sql
+
+
+def _static_path(steps: tuple[ir.PathStep, ...]) -> str | None:
+    """The whole path as one JSON-path string, or ``None`` if any step is dynamic.
+
+    Returning ``None`` rather than testing the steps twice keeps the "every step
+    is static" condition in one place — the place that relies on it.
+    """
+    path = "$"
+    for step in steps:
+        if step.name is not None:
+            path += f".{_json_path_key(step.name)}"
+            continue
+        index = _static_index(step.index)
+        if index is None:
+            return None
+        # KQL indexes from the end with a negative index; DuckDB spells that
+        # `$[#-1]`, and a bare `$[-1]` silently returns null instead.
+        path += f"[{'#' + str(index) if index < 0 else index}]"
+    return path
 
 
 def _static_index(expr: ir.Expr | None) -> int | None:

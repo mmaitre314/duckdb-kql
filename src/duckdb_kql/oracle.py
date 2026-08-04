@@ -43,7 +43,7 @@ class QueryResult:
     def shape(self) -> tuple[int, int]:
         return len(self.rows), len(self.columns)
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         """The frozen-expectation form stored in case files."""
         return {
             "columns": self.columns,
@@ -66,7 +66,7 @@ class KustoEmulator:
     endpoint: str = DEFAULT_ENDPOINT
     database: str = DEFAULT_DATABASE
     timeout: float = 60.0
-    _headers: dict = field(
+    _headers: dict[str, str] = field(
         default_factory=lambda: {
             "Content-Type": "application/json; charset=utf-8",
             "Accept": "application/json",
@@ -76,7 +76,9 @@ class KustoEmulator:
 
     # -- transport ---------------------------------------------------------
 
-    def _post(self, path: str, payload: dict, timeout: float | None = None) -> dict:
+    def _post(
+        self, path: str, payload: dict[str, Any], timeout: float | None = None
+    ) -> dict[str, Any]:
         req = urllib.request.Request(
             f"{self.endpoint}{path}",
             data=json.dumps(payload).encode("utf-8"),
@@ -85,7 +87,8 @@ class KustoEmulator:
         )
         try:
             with urllib.request.urlopen(req, timeout=timeout or self.timeout) as resp:
-                return json.loads(resp.read().decode("utf-8"))
+                parsed: dict[str, Any] = json.loads(resp.read().decode("utf-8"))
+                return parsed
         except urllib.error.HTTPError as e:
             detail = e.read().decode("utf-8", errors="replace")[:800]
             raise EmulatorError(f"HTTP {e.code} from {path}: {detail}") from e
@@ -149,7 +152,7 @@ class KustoEmulator:
     # -- response parsing --------------------------------------------------
 
     @staticmethod
-    def _primary_table(raw: dict) -> QueryResult:
+    def _primary_table(raw: dict[str, Any]) -> QueryResult:
         """Extract the primary result from a v1 response envelope.
 
         The v1 shape is ``{"Tables": [{"TableName", "Columns", "Rows"}, ...]}``.

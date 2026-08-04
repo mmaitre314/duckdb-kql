@@ -21,7 +21,7 @@ __all__ = [
 ]
 
 #: Table name -> ordered column names.
-Schema = dict
+Schema = dict[str, list[str]]
 
 
 def needs_schema(query: ir.Query) -> bool:

@@ -5,6 +5,7 @@
 [![PyPI](https://img.shields.io/pypi/v/duckdb-kql.svg)](https://pypi.org/project/duckdb-kql/)
 [![Python versions](https://img.shields.io/pypi/pyversions/duckdb-kql.svg)](https://pypi.org/project/duckdb-kql/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/mmaitre314/duckdb-kql/blob/main/LICENSE)
+[![Typed](https://img.shields.io/badge/types-py.typed-blue.svg)](https://github.com/mmaitre314/duckdb-kql/blob/main/docs/api.md#typing)
 
 Run [Kusto KQL](https://learn.microsoft.com/kusto/query/) queries on
 [DuckDB](https://duckdb.org), from Python. Pure Python, no server, no JVM.
@@ -39,6 +40,11 @@ pip install 'duckdb-kql[duckdb]'    # ... and run it               (+ duckdb)
 pip install 'duckdb-kql[kusto]'     # ... via the Kusto SDK API    (+ pandas)
 pip install 'duckdb-kql[all]'       # everything
 ```
+
+Python 3.10 or newer. Fully typed — the package ships `py.typed`, so your type
+checker sees real types across all three layers ([details][typing]).
+
+[typing]: https://github.com/mmaitre314/duckdb-kql/blob/main/docs/api.md#typing
 
 ## Three layers
 

@@ -27,7 +27,7 @@ import datetime as dt
 import re
 import threading
 import uuid
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 
 from ..errors import KqlError
 from ._models import WellKnownDataSet, kusto_type, to_wire
@@ -35,7 +35,15 @@ from .client_request_properties import ClientRequestProperties
 from .exceptions import KustoClosedError, KustoServiceError, KustoUnsupportedError
 from .response import KustoResponseDataSet
 
+if TYPE_CHECKING:
+    from types import TracebackType
+
+    from duckdb import DuckDBPyConnection
+
 __all__ = ["KustoClient", "KustoConnectionStringBuilder"]
+
+#: One row of a result, as this module assembles it before conversion.
+Row = tuple[Any, ...]
 
 #: A data source we refuse to open. Accepting one and quietly reading a local
 #: file instead would answer a question about the cluster with data from
@@ -127,14 +135,19 @@ def _reject_remote(data_source: str) -> None:
         )
 
 
-def _ignoring_credentials(name: str):
+def _ignoring_credentials(name: str) -> classmethod[Any, Any, Any]:
     """Build a ``with_*_authentication`` constructor that drops its credentials.
 
     Generated rather than written out because the bodies would be identical, and
     identical bodies invite one of them drifting into actually using an argument.
     """
 
-    def constructor(cls, connection_string: str, *args: Any, **kwargs: Any):
+    def constructor(
+        cls: type[KustoConnectionStringBuilder],
+        connection_string: str,
+        *args: Any,
+        **kwargs: Any,
+    ) -> KustoConnectionStringBuilder:
         kcsb = cls(connection_string)
         if args or kwargs:
             kcsb.ignored_credentials[name] = "(discarded — nothing to authenticate to)"
@@ -192,17 +205,20 @@ class KustoClient:
 
     def __init__(
         self,
-        kcsb: KustoConnectionStringBuilder | str | Any,
+        kcsb: KustoConnectionStringBuilder | str | DuckDBPyConnection,
         database: str | None = None,
-    ):
+    ) -> None:
         self._is_closed = False
         self._lock = threading.Lock()
         self._owns_connection = True
         self.default_database = database
+        self._connection: DuckDBPyConnection
 
         if hasattr(kcsb, "execute") and hasattr(kcsb, "sql"):
-            # A duckdb connection: use it, do not adopt it.
-            self._connection = kcsb
+            # A duckdb connection: use it, do not adopt it. Recognised by shape
+            # rather than by isinstance so that a wrapper or a mock works too,
+            # which is why the checker needs the cast.
+            self._connection = cast("DuckDBPyConnection", kcsb)
             self._owns_connection = False
             self._data_source = "<connection>"
             self._connection.execute("SET TimeZone='UTC'")
@@ -230,7 +246,12 @@ class KustoClient:
     def __enter__(self) -> KustoClient:
         return self
 
-    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> None:
         self.close()
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
@@ -274,16 +295,15 @@ class KustoClient:
         except KqlError as exc:
             raise _semantic_error(exc) from exc
 
-        unbound = getattr(translated, "unbound", ())
-        if unbound:
-            error = KustoServiceError(
-                f"no value for declared query parameter(s) {', '.join(unbound)} — "
-                "supply one with ClientRequestProperties.set_parameter"
+        if translated.unbound:
+            raise KustoServiceError(
+                "no value for declared query parameter(s) "
+                f"{', '.join(translated.unbound)} — supply one with "
+                "ClientRequestProperties.set_parameter",
+                semantic=True,
             )
-            error._semantic = True
-            raise error
 
-        bound = getattr(translated, "parameters", {})
+        bound = translated.parameters
         with self._deadline(properties):
             try:
                 with self._lock:
@@ -316,6 +336,10 @@ class KustoClient:
         self._check_open()
         con = self._select_database(database)
         command = " ".join(query.strip().lower().split())
+
+        columns: list[str]
+        types: list[str]
+        rows: list[Row]
 
         if command == ".show version":
             columns = ["BuildVersion", "BuildTime", "ServiceType", "ProductVersion"]
@@ -401,7 +425,7 @@ class KustoClient:
         # naming the one database there is.
         return self._connection
 
-    def _deadline(self, properties: ClientRequestProperties | None):
+    def _deadline(self, properties: ClientRequestProperties | None) -> _Deadline:
         """Enforce ``servertimeout`` by interrupting the query.
 
         DuckDB's ``interrupt()`` cancels the running statement and leaves the
@@ -421,9 +445,9 @@ class KustoClient:
     def _response(
         self,
         query: str,
-        columns: list,
-        types: list,
-        rows: list,
+        columns: list[str],
+        types: list[str],
+        rows: list[Row],
         properties: ClientRequestProperties | None,
     ) -> KustoResponseDataSet:
         """Assemble the three tables a Kusto query response carries."""
@@ -435,10 +459,11 @@ class KustoClient:
             "TableKind": WellKnownDataSet.PrimaryResult.value,
             "Columns": [
                 {"ColumnName": name, "ColumnType": kind}
-                for name, kind in zip(columns, types)
+                for name, kind in zip(columns, types, strict=True)
             ],
             "Rows": [
-                [to_wire(value, kind) for value, kind in zip(row, types)] for row in rows
+                [to_wire(value, kind) for value, kind in zip(row, types, strict=True)]
+                for row in rows
             ],
         }
         query_properties = {
@@ -531,14 +556,18 @@ class _Deadline:
         except Exception:  # noqa: BLE001 - nothing useful to do from a timer thread
             pass
 
-    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> bool:
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> None:
         if self._timer is not None:
             self._timer.cancel()
         if self._fired and exc_type is not None:
             raise KustoServiceError(
                 f"query timed out after {self._seconds}s (servertimeout)"
             ) from exc_val
-        return False
 
 
 def _semantic_error(exc: KqlError) -> KustoServiceError:
@@ -548,6 +577,4 @@ def _semantic_error(exc: KqlError) -> KustoServiceError:
     unknown column — is a statement about the query rather than about running
     it, which is the distinction the SDK's flag draws.
     """
-    error = KustoServiceError(str(exc))
-    error._semantic = True
-    return error
+    return KustoServiceError(str(exc), semantic=True)

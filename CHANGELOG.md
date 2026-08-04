@@ -42,15 +42,26 @@ promise: a construct either translates correctly or raises.
 - Coverage tracking against
   [Azure Monitor's published KQL subset](docs/azure-monitor-profile.md):
   114 / 119 probes.
+- **Full type annotations, and `py.typed`.** A caller's type checker now sees
+  real types across all three layers — `DuckDBPyConnection`, `DuckDBPyRelation`,
+  `pandas.DataFrame`, `TranslationResult` — and catches misuse that previously
+  passed silently. `duckdb` and `pandas` are typed through `TYPE_CHECKING`-only
+  imports, so annotations arrive without their imports. `tests/test_typing.py`
+  runs a checker over a sample consumer and asserts the revealed types are real:
+  `mypy src/` passing says nothing about what a caller sees.
 
 ### Changed
 
+- **Python 3.10 is now the minimum** (was 3.9).
 - **`duckdb` is no longer a hard dependency.** It was declared as one but never
   imported by any module in `src/`. It is now the `duckdb` extra; install
   `duckdb-kql[duckdb]` to execute, or `duckdb-kql[all]` for everything.
 - `duckdb_kql.sql` / `df` / `arrow` moved to `duckdb_kql.engine`. They remain
   importable from the top level, resolved lazily.
 - `_connection_schema()` is now the public `duckdb_kql.engine.schema()`.
+- `KustoServiceError` takes `semantic=` at construction; it was patched on
+  afterwards, so a typo in the attribute name would have made every error look
+  like an execution failure.
 
 ### Notes
 

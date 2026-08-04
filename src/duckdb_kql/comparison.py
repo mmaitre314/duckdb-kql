@@ -26,6 +26,13 @@ import uuid as _uuid
 from dataclasses import dataclass, field
 from typing import Any
 
+#: A result set as the corpus and DuckDB both spell it: column names plus rows.
+ResultSet = dict[str, Any]
+
+#: A row reduced to a comparable, hashable key — see :func:`_scalar_key` for what
+#: "comparable" means here (tolerance, temporal normalization, dynamic ordering).
+RowKey = tuple[Any, ...]
+
 __all__ = [
     "compare", "ComparisonResult", "ComparisonOptions",
     "is_order_significant", "is_nondeterministic", "is_arbitrary_selection",
@@ -316,7 +323,7 @@ def _values_equal(a: Any, b: Any, opts: ComparisonOptions, in_dynamic: bool = Fa
                 else:
                     return False
             return True
-        return all(_values_equal(x, y, opts, in_dynamic) for x, y in zip(a, b))
+        return all(_values_equal(x, y, opts, in_dynamic) for x, y in zip(a, b, strict=True))
     if isinstance(a, dict) and isinstance(b, dict):
         # Recursive, not ==, because leaves need the same tolerance and temporal
         # normalization as top-level cells: ADX canonicalises a datetime *inside*
@@ -342,7 +349,8 @@ def _values_equal(a: Any, b: Any, opts: ComparisonOptions, in_dynamic: bool = Fa
         if da is not None and db is not None:
             return da == db
 
-    return _scalar_key(a) == _scalar_key(b)
+    equal: bool = _scalar_key(a) == _scalar_key(b)
+    return equal
 
 
 #: How the emulator spells the values JSON cannot represent.
@@ -540,13 +548,13 @@ def _canonical_dynamic(v: Any) -> str:
     return _json.dumps(norm(v), sort_keys=True, default=str)
 
 
-def _row_key(row: list[Any]) -> tuple:
+def _row_key(row: list[Any]) -> RowKey:
     return tuple(_scalar_key(v) for v in row)
 
 
 def compare(
-    expected: dict | None,
-    actual: dict | None,
+    expected: ResultSet | None,
+    actual: ResultSet | None,
     opts: ComparisonOptions | None = None,
 ) -> ComparisonResult:
     """Compare two result tables under KQL-appropriate semantics.
@@ -628,7 +636,7 @@ def compare(
         # Check the promised part positionally, the rest as a set.
         key_idx = [i for i, c in enumerate(exp_cols) if c in opts.sort_keys]
         if key_idx and len(exp_rows) == len(act_rows):
-            for i, (er, ar) in enumerate(zip(exp_rows, act_rows)):
+            for i, (er, ar) in enumerate(zip(exp_rows, act_rows, strict=True)):
                 if not all(_values_equal(er[j], ar[j], opts) for j in key_idx):
                     diffs.append(
                         f"row {i}: sort keys differ "
@@ -646,8 +654,8 @@ def compare(
             # Ordering holds; now the rows themselves, order-insensitively.
             return _compare_unordered(exp_rows, act_rows, opts, diffs)
 
-        for i, (er, ar) in enumerate(zip(exp_rows, act_rows)):
-            if not all(_values_equal(x, y, opts) for x, y in zip(er, ar)):
+        for i, (er, ar) in enumerate(zip(exp_rows, act_rows, strict=True)):
+            if not all(_values_equal(x, y, opts) for x, y in zip(er, ar, strict=True)):
                 diffs.append(f"row {i}: {er!r} != {ar!r}")
                 if len(diffs) > 8:
                     diffs.append("... (further differences suppressed)")
@@ -671,12 +679,12 @@ def compare(
         unexpected = list((act_c - exp_c).elements())
 
         if missing and unexpected:
-            leftover_expected: list[tuple] = []
+            leftover_expected: list[RowKey] = []
             remaining = list(unexpected)
             for key in missing:
                 for i, other in enumerate(remaining):
                     if len(key) == len(other) and all(
-                        _values_equal(x, y, opts) for x, y in zip(key, other)
+                        _values_equal(x, y, opts) for x, y in zip(key, other, strict=True)
                     ):
                         remaining.pop(i)
                         break
@@ -695,7 +703,10 @@ def compare(
 
 
 def _compare_unordered(
-    exp_rows: list, act_rows: list, opts: ComparisonOptions, diffs: list
+    exp_rows: list[list[Any]],
+    act_rows: list[list[Any]],
+    opts: ComparisonOptions,
+    diffs: list[str],
 ) -> ComparisonResult:
     """Compare two row sets as multisets, tolerance-aware."""
     from collections import Counter
@@ -711,12 +722,12 @@ def _compare_unordered(
     unexpected = list((act_c - exp_c).elements())
 
     if missing and unexpected:
-        leftover: list[tuple] = []
+        leftover: list[RowKey] = []
         remaining = list(unexpected)
         for key in missing:
             for i, other in enumerate(remaining):
                 if len(key) == len(other) and all(
-                    _values_equal(x, y, opts) for x, y in zip(key, other)
+                    _values_equal(x, y, opts) for x, y in zip(key, other, strict=True)
                 ):
                     remaining.pop(i)
                     break

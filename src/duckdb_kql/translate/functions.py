@@ -10,6 +10,7 @@ Placeholders are ``{0}``, ``{1}``, … for arguments.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 __all__ = [
     "FunctionSpec", "SCALAR_FUNCTIONS", "lookup", "BINARY_OPERATORS", "BinarySpec",
@@ -48,7 +49,15 @@ class FunctionSpec:
         return self.template.format(*args)
 
 
-def _f(name, kind, template, arities=(), rules=(), note=""):
+def _f(
+    name: str,
+    kind: str,
+    template: str,
+    arities: tuple[int, ...] = (),
+    rules: tuple[str, ...] = (),
+    note: str = "",
+) -> FunctionSpec:
+    """Shorthand for one registry row — the table below is 100+ calls to it."""
     return FunctionSpec(name, kind, template, arities, rules, note)
 
 
@@ -425,7 +434,13 @@ class AggregateSpec:
         return self.template.format(*args)
 
 
-def _a(name, template, arities=(), **kw):
+def _a(
+    name: str,
+    template: str,
+    arities: tuple[int, ...] = (),
+    **kw: Any,
+) -> AggregateSpec:
+    """Shorthand for one aggregate row. ``**kw`` carries the R12 naming flags."""
     return AggregateSpec(name, template, arities, **kw)
 
 

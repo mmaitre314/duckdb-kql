@@ -22,7 +22,7 @@ import json
 import math
 import re
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator, Sequence
 from decimal import Decimal
 from enum import Enum
 from typing import Any
@@ -32,9 +32,23 @@ __all__ = [
     "KustoResultColumn",
     "KustoResultRow",
     "KustoResultTable",
+    "JsonColumn",
+    "JsonTable",
     "kusto_type",
     "to_wire",
 ]
+
+#: One column of Kusto's JSON response shape: ``{"ColumnName": …, "ColumnType": …}``.
+JsonColumn = dict[str, Any]
+
+#: One table of it — ``TableName``, ``TableKind``, ``Columns``, ``Rows``. The
+#: values are heterogeneous by construction (a table name is a string, ``Rows``
+#: is a list of lists of anything), so ``Any`` here is the honest type rather
+#: than a placeholder.
+JsonTable = dict[str, Any]
+
+#: A row as it arrives on the wire — see the module docstring on ``raw_rows``.
+WireRow = list[Any]
 
 
 class WellKnownDataSet(str, Enum):
@@ -215,95 +229,8 @@ def _timespan(value: dt.timedelta) -> str:
     return sign + text
 
 
-# ---------------------------------------------------------------------------
-# The SDK-shaped objects
-# ---------------------------------------------------------------------------
-
-
-class KustoResultColumn:
-    def __init__(self, json_column: dict, ordinal: int):
-        self.column_name = json_column["ColumnName"]
-        self.column_type = json_column.get("ColumnType") or json_column["DataType"]
-        self.ordinal = ordinal
-
-    def __repr__(self) -> str:  # pragma: no cover - debugging aid
-        return (
-            "KustoResultColumn("
-            + json.dumps({"ColumnName": self.column_name, "ColumnType": self.column_type})
-            + f",{self.ordinal})"
-        )
-
-
-class KustoResultRow:
-    """Iterator over a result row, addressable by index or by column name."""
-
-    #: Wire form -> Python, matching the SDK's own conversion table. Note that
-    #: `dynamic` is absent from it there too: JSON arrives parsed.
-    conversion_funcs = {
-        "datetime": lambda v: _parse_datetime(v),
-        "timespan": lambda v: _parse_timespan(v),
-        "decimal": Decimal,
-    }
-
-    def __init__(self, columns: list, row: list):
-        self._value_by_name: dict = {}
-        self._value_by_index: list = []
-
-        for i, value in enumerate(row):
-            column = columns[i]
-            try:
-                column_type = column.column_type.lower()
-            except AttributeError:
-                self._value_by_index.append(value)
-                self._value_by_name[columns[i]] = value
-                continue
-            typed = self.get_typed_value(column_type, value)
-            self._value_by_index.append(typed)
-            self._value_by_name[column.column_name] = typed
-
-    @staticmethod
-    def get_typed_value(column_type: str, value: Any) -> Any:
-        if value is None or column_type not in KustoResultRow.conversion_funcs:
-            return value
-        return KustoResultRow.conversion_funcs[column_type](value)
-
-    @property
-    def columns_count(self) -> int:
-        return len(self._value_by_name)
-
-    def __iter__(self) -> Iterator[Any]:
-        for i in range(self.columns_count):
-            yield self[i]
-
-    def __getitem__(self, key: str | int) -> Any:
-        if isinstance(key, int):
-            return self._value_by_index[key]
-        return self._value_by_name[key]
-
-    def __len__(self) -> int:
-        return self.columns_count
-
-    def to_dict(self) -> dict:
-        return self._value_by_name
-
-    def to_list(self) -> list:
-        return self._value_by_index
-
-    def __str__(self) -> str:
-        return "['{}']".format("', '".join(str(v) for v in self._value_by_index))
-
-    def __repr__(self) -> str:  # pragma: no cover - debugging aid
-        values = ", ".join(repr(v) for v in self._value_by_name.values())
-        return "KustoResultRow(['{}'], [{}])".format(
-            "', '".join(self._value_by_name), values
-        )
-
-    def __eq__(self, other: Any) -> bool:
-        if len(self) != len(other):
-            return False
-        return all(value == other[i] for i, value in enumerate(self))
-
-
+# The wire -> Python direction, used by KustoResultRow's conversion table.
+# Defined above the class because that table is built at class-creation time.
 def _parse_datetime(value: Any) -> Any:
     if isinstance(value, dt.datetime):
         return value
@@ -328,20 +255,117 @@ def _parse_timespan(value: Any) -> Any:
     return value if parsed is None else parsed
 
 
+# ---------------------------------------------------------------------------
+# The SDK-shaped objects
+# ---------------------------------------------------------------------------
+
+
+class KustoResultColumn:
+    def __init__(self, json_column: JsonColumn, ordinal: int) -> None:
+        self.column_name = json_column["ColumnName"]
+        self.column_type = json_column.get("ColumnType") or json_column["DataType"]
+        self.ordinal = ordinal
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return (
+            "KustoResultColumn("
+            + json.dumps({"ColumnName": self.column_name, "ColumnType": self.column_type})
+            + f",{self.ordinal})"
+        )
+
+
+class KustoResultRow:
+    """Iterator over a result row, addressable by index or by column name."""
+
+    #: Wire form -> Python, matching the SDK's own conversion table. Note that
+    #: `dynamic` is absent from it there too: JSON arrives parsed.
+    conversion_funcs: dict[str, Callable[[Any], Any]] = {
+        "datetime": _parse_datetime,
+        "timespan": _parse_timespan,
+        "decimal": Decimal,
+    }
+
+    def __init__(
+        self, columns: Sequence[KustoResultColumn | str], row: WireRow
+    ) -> None:
+        self._value_by_name: dict[str, Any] = {}
+        self._value_by_index: list[Any] = []
+
+        for i, value in enumerate(row):
+            column = columns[i]
+            try:
+                # The SDK tolerates being handed bare column *names* rather than
+                # KustoResultColumn objects, and code that builds a row by hand
+                # relies on that. Such a column has no type, so its value is
+                # taken as-is.
+                column_type = column.column_type.lower()  # type: ignore[union-attr]
+            except AttributeError:
+                self._value_by_index.append(value)
+                self._value_by_name[str(column)] = value
+                continue
+            typed = self.get_typed_value(column_type, value)
+            self._value_by_index.append(typed)
+            self._value_by_name[column.column_name] = typed  # type: ignore[union-attr]
+
+    @staticmethod
+    def get_typed_value(column_type: str, value: Any) -> Any:
+        if value is None or column_type not in KustoResultRow.conversion_funcs:
+            return value
+        return KustoResultRow.conversion_funcs[column_type](value)
+
+    @property
+    def columns_count(self) -> int:
+        return len(self._value_by_name)
+
+    def __iter__(self) -> Iterator[Any]:
+        for i in range(self.columns_count):
+            yield self[i]
+
+    def __getitem__(self, key: str | int) -> Any:
+        if isinstance(key, int):
+            return self._value_by_index[key]
+        return self._value_by_name[key]
+
+    def __len__(self) -> int:
+        return self.columns_count
+
+    def to_dict(self) -> dict[str, Any]:
+        return self._value_by_name
+
+    def to_list(self) -> list[Any]:
+        return self._value_by_index
+
+    def __str__(self) -> str:
+        return "['{}']".format("', '".join(str(v) for v in self._value_by_index))
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        values = ", ".join(repr(v) for v in self._value_by_name.values())
+        return "KustoResultRow(['{}'], [{}])".format(
+            "', '".join(self._value_by_name), values
+        )
+
+    def __eq__(self, other: Any) -> bool:
+        if len(self) != len(other):
+            return False
+        return all(value == other[i] for i, value in enumerate(self))
+
+
 class KustoResultTable:
     """Iterator over a result table. Built from the SDK's JSON table shape."""
 
-    def __init__(self, json_table: dict):
-        self.table_name = json_table.get("TableName")
-        self.table_id = json_table.get("TableId")
+    def __init__(self, json_table: JsonTable) -> None:
+        self.table_name: str | None = json_table.get("TableName")
+        self.table_id: int | None = json_table.get("TableId")
         kind = json_table.get("TableKind")
-        self.table_kind = WellKnownDataSet[kind] if kind else None
-        self.raw_columns = json_table["Columns"]
+        self.table_kind: WellKnownDataSet | None = (
+            WellKnownDataSet[kind] if kind else None
+        )
+        self.raw_columns: list[JsonColumn] = json_table["Columns"]
         self.columns = [
             KustoResultColumn(c, i) for i, c in enumerate(json_table["Columns"])
         ]
-        self.raw_rows = json_table["Rows"]
-        self.kusto_result_rows: list | None = None
+        self.raw_rows: list[WireRow] = json_table["Rows"]
+        self.kusto_result_rows: list[KustoResultRow] | None = None
 
     def __bool__(self) -> bool:
         return any(self.columns)
@@ -357,14 +381,14 @@ class KustoResultTable:
         return len(self.raw_rows)
 
     @property
-    def rows(self) -> list:
+    def rows(self) -> list[KustoResultRow]:
         if not self.kusto_result_rows:
             self.kusto_result_rows = [
                 KustoResultRow(self.columns, row) for row in self.raw_rows
             ]
         return self.kusto_result_rows
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "name": self.table_name,
             "kind": self.table_kind,

@@ -260,3 +260,47 @@ KustoError                    duckdb_kql.kusto.exceptions — Layer 2
 
 Layer 2 wraps Layer 0 and 1 failures in `KustoServiceError`, so SDK-shaped code
 catching that keeps working.
+
+---
+
+## Typing
+
+The package ships `py.typed` ([PEP 561][pep561]), so your type checker uses
+these annotations. What you get:
+
+```python
+>>> reveal_type(duckdb_kql.connect())
+_duckdb.DuckDBPyConnection
+>>> reveal_type(duckdb_kql.sql(con, "T | count"))
+_duckdb.DuckDBPyRelation
+>>> reveal_type(duckdb_kql.df(con, "T | count"))
+pandas.core.frame.DataFrame
+>>> duckdb_kql.sql("not a connection", "T | count")
+error: Argument 1 has incompatible type "str"; expected "DuckDBPyConnection"
+```
+
+`duckdb` and `pandas` are *optional* dependencies, imported under
+`TYPE_CHECKING` only. Their types reach you without their imports reaching your
+runtime — `import duckdb_kql` still does not import `duckdb`.
+
+`tests/test_typing.py` runs a checker over a sample consumer and asserts the
+revealed types are real. That is a different question from `mypy src/` passing,
+which says nothing about what a caller sees: a function returning `Any` type
+checks perfectly from the inside while telling the caller nothing.
+
+### What is `Any`, and why
+
+Four things genuinely are, and they are declared that way rather than left to
+inference:
+
+| | Why |
+|---|---|
+| `ParseResult.tree` | The ANTLR runtime ships no type information. Naming a class here would resolve to `Any` anyway while implying otherwise. Work from `duckdb_kql.ir`, which is typed; `tree` is the escape hatch. |
+| Query parameter values | What is acceptable depends on the *declared KQL type*, checked at bind time. A signature cannot express "whatever this query said". |
+| `dynamic` column values | A JSON document is `Any` by construction. |
+| `arrow()`'s return | `pyarrow` ships neither `py.typed` nor stubs, so `pa.Table` is `Any` for everyone. A test asserts this so the claim gets revisited if pyarrow changes. |
+
+If you use pandas and want `df()` fully typed, add `pandas-stubs` — pandas
+itself ships no type information either.
+
+[pep561]: https://peps.python.org/pep-0561/

@@ -14,19 +14,15 @@ import and pass one of our responses to it.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from functools import lru_cache
-from typing import Any, Callable, Dict, Union  # noqa: UP035 - see Converter below
+from typing import Any
 
 __all__ = ["dataframe_from_result_table", "default_dict", "Converter"]
 
 #: Column name or Kusto type -> the pandas dtype to convert that column to,
 #: either as a dtype name or as ``(column_name, frame) -> Series``.
-#:
-#: Spelled with ``typing.Dict``/``Union`` rather than ``dict``/``|`` because this
-#: is a runtime assignment, not an annotation: the subscripts are evaluated
-#: immediately, and the modern spelling is a TypeError on the Python 3.9 this
-#: package still supports.
-Converter = Dict[str, Union[str, Callable[[str, Any], Any]]]  # noqa: UP006
+Converter = dict[str, str | Callable[[str, Any], Any]]
 
 
 @lru_cache(maxsize=1)

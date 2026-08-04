@@ -147,11 +147,9 @@ def test_documented_support_level_matches_the_code() -> None:
 
 
 def _pyproject() -> dict:
-    try:
-        import tomllib
-    except ImportError:  # Python 3.9/3.10
-        tomllib = pytest.importorskip("tomli")
-    return tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+    from conftest import read_pyproject  # noqa: PLC0415
+
+    return read_pyproject()
 
 
 def test_documented_extras_exist() -> None:

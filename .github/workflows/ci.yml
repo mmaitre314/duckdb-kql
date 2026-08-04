@@ -26,7 +26,7 @@ jobs:
       fail-fast: false
       matrix:
         # Floor and ceiling of the supported range (pyproject requires-python).
-        python-version: ["3.9", "3.13"]
+        python-version: ["3.10", "3.13"]
     steps:
       - uses: actions/checkout@v4
 
@@ -40,6 +40,12 @@ jobs:
 
       - name: Lint
         run: ruff check src tools tests
+
+      # The package ships py.typed, which is a promise that its annotations are
+      # worth trusting. tests/test_typing.py checks what a *caller* sees; this
+      # checks the inside.
+      - name: Type check
+        run: python -m mypy
 
       - name: Test
         run: python -m pytest -q

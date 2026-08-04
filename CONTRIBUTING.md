@@ -25,10 +25,11 @@ Before opening a pull request:
 
 ```bash
 ruff check src tests tools
+mypy
 pytest
 ```
 
-Both run in CI on every pull request.
+All three run in CI on every pull request.
 
 ## Adding a mapping
 
@@ -83,6 +84,7 @@ report waiting to be filed against someone else's report.
 | The documented request-option table matches `OPTION_SUPPORT` | Same reason, for the Kusto client. |
 | Layer 0 installs and works with `duckdb` absent | The layering claim is only true if it is tested. |
 | Links in the docs resolve | Including the absolute ones the README uses for PyPI. |
+| A consumer's type checker sees real types | The package ships `py.typed`, so `Any` in a public signature is a promise broken silently. `tests/test_typing.py` checks from the outside; `mypy` alone cannot. |
 | The committed parser matches `grammar/Kql.g4` | The generated parser is committed so installs need no Java. |
 
 ## The emulator
@@ -105,6 +107,11 @@ Match the surrounding code. Two habits worth copying:
   not.
 - **Tests are named after what would break.** `test_payload_never_reaches_the_sql_text`
   says what is being protected; `test_parameters` does not.
+- **`Any` is declared, not defaulted.** The package is fully typed and ships
+  `py.typed`. Where a value genuinely has no type — an ANTLR tree node, a
+  `dynamic` document — say `Any` and say why in a comment. An unannotated
+  function silently becomes `Any` for every caller, which is the same failure
+  mode as a wrong answer: it looks fine.
 
 ## Reporting a wrong answer
 

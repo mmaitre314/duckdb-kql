@@ -321,7 +321,7 @@ partial at this stage, wrong answers are not.
 - **Grammar provenance:** `Kql.g4`/`KqlTokens.g4` are Apache‑2.0 → keep upstream
   headers, add `NOTICE` and `grammar/UPSTREAM.md` (source commit + local patches).
   Project code stays MIT.
-- **CI:** matrix over supported Python (3.9+); run parse/translate/behavior tests;
+- **CI:** matrix over supported Python (3.10+); run parse/translate/behavior tests;
   a scheduled job that re‑runs the regen from pinned grammar to detect drift.
 
 ## 11. Deferred / open decisions

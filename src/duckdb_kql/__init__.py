@@ -41,7 +41,7 @@ Layer 2 — the ``azure-kusto-data`` shape, for code already written against it:
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .errors import (
     Diagnostic,
@@ -53,6 +53,16 @@ from .errors import (
 )
 from .params import ParameterDeclaration
 from .parser import ParseResult, parse, validate
+
+if TYPE_CHECKING:
+    # Layer 1 is resolved lazily at runtime (see ``__getattr__``), which leaves
+    # a type checker with nothing to go on — every re-export would be ``Any``,
+    # and a caller would be told their code is fine when it is not. Importing
+    # the real names here, for the checker only, keeps the laziness without
+    # paying for it in the signatures.
+    from .engine import Parameters, arrow, connect, df, execute, sql
+    from .schema import Schema
+    from .translate import TranslationResult
 
 __version__ = "0.0.1.dev0"
 
@@ -104,9 +114,9 @@ def __dir__() -> list[str]:
 
 def to_sql(
     kql: str,
-    schema: Any | None = None,
-    parameters: dict[str, Any] | None = None,
-) -> Any:
+    schema: Schema | None = None,
+    parameters: Parameters | None = None,
+) -> TranslationResult:
     """Translate *kql* to DuckDB SQL. Requires no connection and no database.
 
     Returns a ``str`` subclass that also carries ``.parameters`` — the values

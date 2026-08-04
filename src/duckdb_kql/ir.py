@@ -13,6 +13,16 @@ partial coverage must fail loudly (``docs/TRANSLATION.md`` principle 5).
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
+
+#: What a KQL literal can hold once lexed. ``dynamic``, ``datetime``,
+#: ``timespan`` and ``guid`` all arrive as their source text; ``null`` is None.
+LiteralValue = int | float | str | bool | None
+
+if TYPE_CHECKING:
+    # Type-checker only: `params` imports nothing from here, and keeping the
+    # runtime import out avoids making the IR depend on the binding layer.
+    from .params import ParameterDeclaration
 
 __all__ = [
     "Node", "Expr", "Operator", "Query",
@@ -48,9 +58,14 @@ class Literal(Expr):
     ``datetime``, ``timespan``, ``dynamic``, ``guid``, ``null``). Keeping the KQL
     type rather than a Python type is what lets the emitter choose the right
     DuckDB cast — see ``docs/TRANSLATION.md`` §3.
+
+    ``value`` is the *lexical* value, not a converted one: a datetime literal
+    holds the text KQL wrote, because the conversion depends on the same
+    format-guessing ``todatetime()`` does (R8). ``kind`` is what says how to
+    read it.
     """
 
-    value: object
+    value: LiteralValue
     kind: str
 
     def __post_init__(self) -> None:
@@ -351,7 +366,7 @@ class Query(Node):
     lets: list[tuple[str, Query | Expr]] = field(default_factory=list)
     #: ``declare query_parameters`` declarations, in declaration order. Values
     #: are supplied at execution time, not here.
-    parameters: list = field(default_factory=list)
+    parameters: list[ParameterDeclaration] = field(default_factory=list)
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
         ops = " | ".join(type(o).__name__ for o in self.operators)

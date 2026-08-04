@@ -12,6 +12,7 @@ table keeps the supported surface readable and greppable.
 from __future__ import annotations
 
 import dataclasses
+from collections.abc import Callable
 from typing import Any
 
 from . import ir
@@ -21,6 +22,11 @@ from .params import ParameterDeclaration, normalize_type
 from .parser import parse
 
 __all__ = ["lower", "query_parameters"]
+
+#: Query-scope scalar bindings — `let` values and query parameters — keyed by
+#: the KQL name they were declared under, substituted into the IR before
+#: translation.
+Scalars = dict[str, ir.Expr]
 
 # KQL binary operator spellings preserved verbatim into the IR (see ir.BinaryOp).
 _BINARY_TEXT_OPS = {
@@ -185,10 +191,13 @@ def _lower_expr(node: Any) -> ir.Expr:
 
 
 def _literal_text(node: Any) -> str:
-    return node.getText().strip()
+    text: str = node.getText().strip()
+    return text
 
 
-def _typed_literal(node: Any, kind: str, convert) -> ir.Literal:
+def _typed_literal(
+    node: Any, kind: str, convert: Callable[[str], ir.LiteralValue]
+) -> ir.Literal:
     """Lower a literal, unwrapping the ``type(value)`` form.
 
     KQL allows an explicitly-typed literal — ``long(5)``, ``datetime(2015-01-01)``
@@ -308,15 +317,15 @@ def _lower_binary(node: Any) -> ir.Expr:
         return result
 
     # Flat shape: operand (token operand)*
-    result = None
+    folded: ir.Expr | None = None
     pending_op: str | None = None
     for child in kids:
         if type(child).__name__.endswith("Context"):
             operand = _lower_expr(child)
-            if result is None:
-                result = operand
+            if folded is None:
+                folded = operand
             elif pending_op is not None:
-                result = ir.BinaryOp(pending_op, result, operand)
+                folded = ir.BinaryOp(pending_op, folded, operand)
                 pending_op = None
             else:
                 raise _unsupported(node, "binary-expression")
@@ -325,9 +334,9 @@ def _lower_binary(node: Any) -> ir.Expr:
             if pending_op not in _BINARY_TEXT_OPS:
                 raise _unsupported(node, f"operator:{pending_op}")
 
-    if result is None:
+    if folded is None:
         raise _unsupported(node, "binary-expression")
-    return result
+    return folded
 
 
 def _lower_function_call(node: Any) -> ir.Expr:
@@ -408,7 +417,7 @@ def _lower_source(node: Any) -> ir.Source:
         raise _unsupported(node, f"source:{kind}") from None
 
 
-def _lower_operator(node: Any) -> ir.Operator:
+def _lower_operator(node: Any) -> ir.Operator | None:
     # `pipedOperator` is `'|' afterPipeOperator`, so it has a token child
     # alongside the rule child and the generic collapse won't descend into it.
     while _cls(node) in ("PipedOperator", "AfterPipeOperator"):
@@ -473,7 +482,8 @@ def _lower_operator(node: Any) -> ir.Operator:
         return _lower_join(node, kids)
 
     if kind == "SummarizeOperator":
-        aggregates, by = [], []
+        aggregates: list[ir.NamedExpr] = []
+        by: list[ir.NamedExpr] = []
         for k in kids:
             if _cls(k) == "SummarizeOperatorByClause":
                 by.extend(_lower_named(c) for c in _rule_children(k))
@@ -487,15 +497,18 @@ def _lower_operator(node: Any) -> ir.Operator:
         return ir.Sort(tuple(_lower_sort_key(k) for k in kids))
 
     if kind == "DistinctOperator":
-        names: list[str] = []
+        distinct_on: list[str] = []
         for k in kids:
             if _cls(k) == "DistinctOperatorStarTarget":
                 raise _unsupported(node, "distinct *")
             # The column list arrives as a single wrapper node, so taking its
             # raw text yields one bogus column literally named "State,EventType".
             inner = _find_all(k, "IdentifierName") or _rule_children(k)
-            names.extend(c.getText() for c in inner) if inner else names.append(k.getText())
-        return ir.Distinct(tuple(names))
+            if inner:
+                distinct_on.extend(c.getText() for c in inner)
+            else:
+                distinct_on.append(k.getText())
+        return ir.Distinct(tuple(distinct_on))
 
     raise _unsupported(node, kind)
 
@@ -679,7 +692,9 @@ def lower(kql: str) -> ir.Query:
     declarations = _lower_query_parameters(tree)
     # A parameter is in scope for the whole query, `let` bindings included, so it
     # seeds the same substitution pass those use.
-    seed = {d.name: ir.Parameter(d.name, d.type, d.slot) for d in declarations}
+    seed: Scalars = {
+        d.name: ir.Parameter(d.name, d.type, d.slot) for d in declarations
+    }
     scalars, tabulars = _lower_lets(tree, seed)
 
     pipe = _collapse(statements[0])
@@ -697,7 +712,7 @@ def lower(kql: str) -> ir.Query:
     return query
 
 
-def _resolve_in_subqueries(query: ir.Query, tabular_names: set) -> ir.Query:
+def _resolve_in_subqueries(query: ir.Query, tabular_names: set[str]) -> ir.Query:
     """Rewrite ``x in (T)`` where T is a tabular ``let`` into a subquery.
 
     At lowering time a bare `T` is indistinguishable from a column reference;
@@ -707,7 +722,7 @@ def _resolve_in_subqueries(query: ir.Query, tabular_names: set) -> ir.Query:
     if not tabular_names:
         return query
 
-    def fix(node):
+    def fix(node: ir.Expr) -> ir.Expr:
         if isinstance(node, ir.InList):
             if (
                 node.subquery is None
@@ -729,7 +744,7 @@ def _resolve_in_subqueries(query: ir.Query, tabular_names: set) -> ir.Query:
             return dataclasses.replace(node, args=tuple(fix(a) for a in node.args))
         return node
 
-    ops = []
+    ops: list[ir.Operator] = []
     for op in query.operators:
         if isinstance(op, ir.Where):
             ops.append(dataclasses.replace(op, predicate=fix(op.predicate)))
@@ -805,7 +820,7 @@ def _lower_query_parameters(tree: Any) -> list[ParameterDeclaration]:
 
 def _parameter_name(node: Any) -> str:
     """The declared name, with any ``['...']`` escaping removed."""
-    text = node.getText()
+    text: str = node.getText()
     if text.startswith("['") and text.endswith("']"):
         return text[2:-2]
     if text.startswith('["') and text.endswith('"]'):
@@ -841,7 +856,7 @@ _TABULAR_VALUE = {
 }
 
 
-def _is_tabular_value(node: Any, scalars: dict) -> bool:
+def _is_tabular_value(node: Any, scalars: Scalars) -> bool:
     """Whether a ``let`` binds a table or a scalar.
 
     A pipeline or an inline table is unambiguous. A bare identifier is an alias
@@ -865,13 +880,13 @@ def _lower_query_node(node: Any) -> ir.Query:
     return ir.Query(_lower_source(node))
 
 
-def _lower_operators(nodes: list) -> list:
+def _lower_operators(nodes: list[Any]) -> list[ir.Operator]:
     """Lower a run of piped operators, dropping the ones that are no-ops.
 
     `render` lowers to None: it is a visualization directive that leaves the
     result table untouched.
     """
-    out = []
+    out: list[ir.Operator] = []
     for node in nodes:
         op = _lower_operator(node)
         if op is not None:
@@ -879,7 +894,7 @@ def _lower_operators(nodes: list) -> list:
     return out
 
 
-def _substitute(node: Any, scalars: dict) -> Any:
+def _substitute(node: Any, scalars: Scalars) -> Any:
     """Replace scalar ``let`` references inside an expression.
 
     A `let` is a query-scope binding, not a column, so this runs as a pass over
@@ -924,7 +939,7 @@ def _substitute(node: Any, scalars: dict) -> Any:
     return node
 
 
-def _substitute_query(query: ir.Query, scalars: dict) -> ir.Query:
+def _substitute_query(query: ir.Query, scalars: Scalars) -> ir.Query:
     if not scalars:
         return query
     source = query.source
@@ -944,7 +959,7 @@ def _substitute_query(query: ir.Query, scalars: dict) -> ir.Query:
     )
 
 
-def _substitute_operator(op: ir.Operator, scalars: dict) -> ir.Operator:
+def _substitute_operator(op: ir.Operator, scalars: Scalars) -> ir.Operator:
     if isinstance(op, ir.Where):
         return dataclasses.replace(op, predicate=_substitute(op.predicate, scalars))
     if isinstance(op, (ir.Project, ir.Extend)):
@@ -966,15 +981,17 @@ def _substitute_operator(op: ir.Operator, scalars: dict) -> ir.Operator:
     return op
 
 
-def _lower_lets(tree: Any, seed: dict | None = None) -> tuple[dict, list]:
+def _lower_lets(
+    tree: Any, seed: Scalars | None = None
+) -> tuple[Scalars, list[tuple[str, ir.Query]]]:
     """Collect ``let`` bindings in declaration order.
 
     Returns ``(scalars, tabulars)``. Later bindings may reference earlier ones,
     so scalars are substituted as they are collected. *seed* pre-populates the
     scalar scope — query parameters live there, since a ``let`` may read one.
     """
-    scalars: dict = dict(seed or {})
-    tabulars: list = []
+    scalars: Scalars = dict(seed or {})
+    tabulars: list[tuple[str, ir.Query]] = []
 
     for statement in _find_all(tree, "LetStatement"):
         decls = _rule_children(statement)

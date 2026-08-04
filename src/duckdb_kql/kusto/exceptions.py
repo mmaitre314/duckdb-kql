@@ -39,10 +39,17 @@ class KustoServiceError(KustoError):
         messages: object,
         http_response: object = None,
         kusto_response: object = None,
-    ):
+        *,
+        semantic: bool = False,
+    ) -> None:
         super().__init__(messages)
         self.http_response = http_response
         self.kusto_response = kusto_response
+        #: Set at construction rather than patched on afterwards. It was the
+        #: latter until a type checker pointed out that nothing declared it —
+        #: which meant a typo in the attribute name would have silently made
+        #: every error look like an execution failure.
+        self.semantic = semantic
 
     def get_raw_http_response(self) -> object:
         return self.http_response
@@ -54,12 +61,12 @@ class KustoServiceError(KustoError):
         failure came from translation (a construct we do not support, a column
         that does not exist) or from execution.
         """
-        return bool(getattr(self, "_semantic", False))
+        return self.semantic
 
     def has_partial_results(self) -> bool:
         return False
 
-    def get_partial_results(self) -> list:
+    def get_partial_results(self) -> list[object]:
         return []
 
 

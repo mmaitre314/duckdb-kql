@@ -24,7 +24,7 @@ pip install 'duckdb-kql[kusto]'     # Layer 2 — via the azure-kusto-data API
 pip install 'duckdb-kql[all]'       # everything, plus Arrow output
 ```
 
-Python 3.9 or newer.
+Python 3.10 or newer.
 
 ## Your first query
 
