@@ -83,6 +83,7 @@ report waiting to be filed against someone else's report.
 | `docs/kql-support.md` regenerates identically | The support table must not be able to say something the code does not do. |
 | The documented request-option table matches `OPTION_SUPPORT` | Same reason, for the Kusto client. |
 | Layer 0 installs and works with `duckdb` absent | The layering claim is only true if it is tested. |
+| The CLI does not import `duckdb` | Build-time translation is meant to run in a minimal CI image. |
 | Links in the docs resolve | Including the absolute ones the README uses for PyPI. |
 | A consumer's type checker sees real types | The package ships `py.typed`, so `Any` in a public signature is a promise broken silently. `tests/test_typing.py` checks from the outside; `mypy` alone cannot. |
 | The committed parser matches `grammar/Kql.g4` | The generated parser is committed so installs need no Java. |

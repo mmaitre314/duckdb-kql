@@ -17,6 +17,7 @@ from ..errors import KqlUnsupportedError
 from .functions import _TODATETIME, BINARY_OPERATORS, lookup, lookup_aggregate
 
 if TYPE_CHECKING:
+    from ..params import ParameterDeclaration
     from ..schema import Schema
 
 __all__ = ["to_sql", "TranslationResult"]
@@ -56,14 +57,23 @@ class TranslationResult(str):
     #: Declared parameters left without a value or a default. The SQL is still
     #: valid text, but it cannot run until these are supplied.
     unbound: tuple[str, ...] = ()
+    #: The query's ``declare query_parameters`` declarations, in order. Needed
+    #: by anything that has to explain a generated ``$slot`` back to a human —
+    #: the build-time CLI writes them into the SQL's header, because otherwise a
+    #: consumer is handed a placeholder with no way to know what belongs in it.
+    declarations: tuple[ParameterDeclaration, ...] = ()
 
     def with_parameters(
-        self, parameters: Parameters, unbound: tuple[str, ...] = ()
+        self,
+        parameters: Parameters,
+        unbound: tuple[str, ...] = (),
+        declarations: tuple[ParameterDeclaration, ...] = (),
     ) -> TranslationResult:
         result = TranslationResult(str(self))
         result.udfs = self.udfs
         result.parameters = parameters
         result.unbound = unbound
+        result.declarations = declarations
         return result
 
 

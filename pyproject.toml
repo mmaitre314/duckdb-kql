@@ -65,6 +65,11 @@ dev = [
     "types-PyYAML",
 ]
 
+# Translating at build time means the *output* has no dependency on this
+# package — see docs/cli.md.
+[project.scripts]
+duckdb-kql = "duckdb_kql.cli:main"
+
 [project.urls]
 Homepage = "https://github.com/mmaitre314/duckdb-kql"
 Documentation = "https://github.com/mmaitre314/duckdb-kql/blob/main/docs/getting-started.md"

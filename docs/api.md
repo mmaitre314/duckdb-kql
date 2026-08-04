@@ -7,6 +7,7 @@ anything from a higher one, and importing `duckdb_kql` never imports `duckdb`.
 - [Layer 1 — `duckdb_kql.engine`](#layer-1--duckdb_kqlengine)
 - [Layer 2 — `duckdb_kql.kusto`](#layer-2--duckdb_kqlkusto)
 - [Errors](#errors)
+- [Command line](#command-line)
 
 ---
 
@@ -260,6 +261,21 @@ KustoError                    duckdb_kql.kusto.exceptions — Layer 2
 
 Layer 2 wraps Layer 0 and 1 failures in `KustoServiceError`, so SDK-shaped code
 catching that keeps working.
+
+---
+
+## Command line
+
+`duckdb-kql` (also `python -m duckdb_kql`) is Layer 0 as a command: it
+translates `.kql` files to `.sql` so the output can be run without this package
+installed at all. `--check` makes a stale generated file fail CI.
+
+```bash
+duckdb-kql queries/ -o build/sql/ --check
+```
+
+Full reference, including the generated header and how to bind the placeholders
+a parameterized query produces: [Build-time translation](cli.md).
 
 ---
 

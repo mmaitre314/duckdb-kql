@@ -46,6 +46,17 @@ checker sees real types across all three layers ([details][typing]).
 
 [typing]: https://github.com/mmaitre314/duckdb-kql/blob/main/docs/api.md#typing
 
+## No-runtime-dependency option
+
+Translate at build time and the output has no dependency on this package at all
+— not even Python. Only your CI machine installs it.
+
+```bash
+duckdb-kql queries/ -o build/sql/ --check   # fails the build if a .sql is stale
+```
+
+See [Build-time translation](https://github.com/mmaitre314/duckdb-kql/blob/main/docs/cli.md).
+
 ## Three layers
 
 | Layer | Import | Needs | For |
@@ -155,6 +166,7 @@ approximation.
 |---|---|
 | [Getting started](https://github.com/mmaitre314/duckdb-kql/blob/main/docs/getting-started.md) | Install, first query, the three layers |
 | [**KQL support matrix**](https://github.com/mmaitre314/duckdb-kql/blob/main/docs/kql-support.md) | Every operator and function, supported or not, each with its gotchas |
+| [Build-time CLI](https://github.com/mmaitre314/duckdb-kql/blob/main/docs/cli.md) | Translating `.kql` to `.sql` in CI, to avoid a runtime dependency |
 | [API reference](https://github.com/mmaitre314/duckdb-kql/blob/main/docs/api.md) | Every public function and type |
 | [Kusto SDK compatibility](https://github.com/mmaitre314/duckdb-kql/blob/main/docs/kusto-client.md) | What Layer 2 implements, no-ops, and refuses |
 | [Azure Monitor profile](https://github.com/mmaitre314/duckdb-kql/blob/main/docs/azure-monitor-profile.md) | Coverage against a published KQL subset |

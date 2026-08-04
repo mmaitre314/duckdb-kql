@@ -42,6 +42,13 @@ promise: a construct either translates correctly or raises.
 - Coverage tracking against
   [Azure Monitor's published KQL subset](docs/azure-monitor-profile.md):
   114 / 119 probes.
+- **A `duckdb-kql` command** for translating `.kql` files to `.sql` at build
+  time, so the queries can run with no dependency on this package at all —
+  see [Build-time translation](docs/cli.md). `--check` fails a build when a
+  generated `.sql` is stale, the header carries the `SET TimeZone='UTC'`
+  requirement that nothing else would tell a consumer about, and a
+  parameterized query gets its `$slot` placeholders mapped back to their
+  declared names and types. Layer 0 only: it never imports `duckdb`.
 - **Full type annotations, and `py.typed`.** A caller's type checker now sees
   real types across all three layers — `DuckDBPyConnection`, `DuckDBPyRelation`,
   `pandas.DataFrame`, `TranslationResult` — and catches misuse that previously

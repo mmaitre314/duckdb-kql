@@ -9,6 +9,7 @@ server, and no Java.
 - [Query parameters](#query-parameters-and-user-input)
 - [Translating without running](#translating-without-running)
 - [Using the Kusto SDK interface](#using-the-kusto-sdk-interface)
+- [Build-time translation](cli.md)
 - [When something is not supported](#when-something-is-not-supported)
 - [Two things that will bite you](#two-things-that-will-bite-you)
 
@@ -161,6 +162,17 @@ if you call `to_sql()` directly, pass them:
 ```python
 duckdb_kql.to_sql(kql, schema={"Events": ["Host", "Level", "Timestamp"]})
 ```
+
+### Or translate at build time, and drop the dependency
+
+There is a command for exactly this. Translate your `.kql` files to `.sql` in
+CI, ship the SQL, and nothing at runtime needs this package:
+
+```bash
+duckdb-kql queries/ -o build/sql/ --check
+```
+
+See [Build-time translation](cli.md).
 
 ## Using the Kusto SDK interface
 

@@ -94,6 +94,22 @@ jobs:
           print("Layer 0 works on antlr4 alone")
           PY
 
+      # The build-time CLI exists so users can translate in a minimal image and
+      # ship SQL with no dependency on this package. That only holds if the
+      # command itself runs in one.
+      - name: The CLI works with duckdb absent
+        run: |
+          mkdir -p /tmp/q
+          printf 'StormEvents | where State == "TEXAS" | count\n' > /tmp/q/count.kql
+          duckdb-kql /tmp/q -o /tmp/sql/
+          grep -q "SET TimeZone='UTC'" /tmp/sql/count.sql
+          duckdb-kql /tmp/q -o /tmp/sql/ --check
+          printf '| take 5\n' >> /tmp/q/count.kql
+          if duckdb-kql /tmp/q -o /tmp/sql/ --check; then
+            echo "::error::--check passed on a stale file"; exit 1
+          fi
+          echo "CLI works on antlr4 alone, and --check catches drift"
+
   # The generated parser is committed (see grammar/UPSTREAM.md) so that installs
   # need no Java. That only stays honest if the checked-in code still matches
   # the grammar it claims to come from.

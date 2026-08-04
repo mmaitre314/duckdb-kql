@@ -155,7 +155,8 @@ def to_sql(
     query = lower(kql)
     result = _emit(query, schema)
     if query.parameters or parameters:
-        return result.with_parameters(*bind(query.parameters, parameters))
+        bound, unbound = bind(query.parameters, parameters)
+        return result.with_parameters(bound, unbound, tuple(query.parameters))
     return result
 
 
