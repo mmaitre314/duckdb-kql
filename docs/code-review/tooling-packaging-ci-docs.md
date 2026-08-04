@@ -70,8 +70,9 @@ These are the "easy to miss" gates; a review confirms the *code change* and the
 - [ ] **The committed parser matches `grammar/Kql.g4`.** The generated parser is
   committed so installs need no Java; CI checks it matches the grammar. A grammar
   edit without a regenerated parser (or vice-versa) is a defect. The ANTLR
-  runtime pin in `pyproject.toml` must match the generator version in
-  `grammar/UPSTREAM.md`.
+  runtime pin in `pyproject.toml` must match the generator version, which is the
+  source of record in `tools/regen_parser.sh` (`ANTLR_VERSION`); confirm the two
+  still agree, and that `grammar/UPSTREAM.md`'s provenance is current.
 - [ ] **CLI exit codes and error output** are appropriate for a build step: a
   refusal or syntax error should exit non-zero with a locatable message, so a
   broken `.kql` fails the build loudly rather than emitting empty/partial SQL.
