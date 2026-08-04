@@ -49,6 +49,36 @@ def test_ci_runs_on_pushes_to_main() -> None:
     assert "main" in triggers["push"]["branches"]
 
 
+def test_the_ci_matrix_spans_the_supported_range() -> None:
+    """The lanes must be the floor and the ceiling of what we claim to support.
+
+    Claiming 3.10–3.13 and testing 3.10–3.11 is how a 3.13-only failure reaches
+    ``main``: numpy 2.5 ships stubs using PEP 695 syntax and only resolves on
+    the newer interpreters, so it broke a lane nobody had run locally.
+    """
+    from conftest import read_pyproject  # noqa: PLC0415
+
+    project = read_pyproject()["project"]
+    matrix = [
+        str(v)
+        for v in _load("ci.yml")["jobs"]["test"]["strategy"]["matrix"]["python-version"]
+    ]
+
+    floor = project["requires-python"].lstrip(">=")
+    assert floor in matrix, (
+        f"requires-python is >={floor} but CI never runs it: {matrix}"
+    )
+
+    declared = sorted(
+        (c.rsplit(" :: ", 1)[1] for c in project["classifiers"] if c.count(".") == 1
+         and c.startswith("Programming Language :: Python :: 3.")),
+        key=lambda v: tuple(int(p) for p in v.split(".")),
+    )
+    assert declared[-1] in matrix, (
+        f"the newest declared Python is {declared[-1]} but CI never runs it: {matrix}"
+    )
+
+
 def test_ci_still_runs_the_tests_and_the_linter() -> None:
     steps = [
         step.get("run", "")

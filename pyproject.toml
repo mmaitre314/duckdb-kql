@@ -109,16 +109,24 @@ extend-exclude = ["src/duckdb_kql/_antlr"]
 select = ["E", "F", "I", "UP", "B"]
 
 [tool.mypy]
-python_version = "3.10"
 files = ["src/duckdb_kql"]
 # The whole hand-written package clears this bar. It was reached module by
 # module, but there is no reason to keep the ladder now that everything is at
 # the top of it: a per-module allowance is an invitation to add one more.
 #
-# `strict` minus `disallow_any_explicit`: some values here are honestly Any. A
-# `dynamic` column, a query-parameter value, an ANTLR tree node — naming a type
-# for those would claim knowledge the code does not have. They are declared Any
-# and commented, rather than inferred Any and unremarked.
+# It is `strict` minus `disallow_any_explicit`: some values here are honestly
+# Any. A `dynamic` column, a query-parameter value, an ANTLR tree node — naming
+# a type for those would claim knowledge the code does not have. They are
+# declared Any and commented, rather than inferred Any and unremarked.
+#
+# There is deliberately **no `python_version`**. Pinning it to the floor (3.10)
+# looks right — one run would prove the source works there — but it also makes
+# mypy parse every third-party stub with 3.10's grammar, and modern stubs use
+# PEP 695 `type` statements, which are 3.12+. numpy 2.5 broke CI exactly this
+# way, and the next dependency to adopt the syntax would do it again. Letting
+# each interpreter check against itself is more robust *and* better coverage:
+# CI runs the floor and the ceiling, so 3.10-incompatible code fails on the
+# 3.10 lane while the newest semantics are exercised on the 3.13 one.
 disallow_untyped_defs = true
 disallow_incomplete_defs = true
 disallow_untyped_calls = true

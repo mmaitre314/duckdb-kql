@@ -60,14 +60,16 @@ def _reveal(body: str, tmp_path: Path, cache: Path) -> tuple[list[str], str]:
     script = tmp_path / "consumer.py"
     script.write_text(textwrap.dedent(body), encoding="utf-8")
     config = tmp_path / "mypy.ini"
+    # No `python_version` pin, for the same reason as pyproject's mypy config:
+    # pinning it below the installed stubs' syntax makes mypy refuse to parse
+    # them. The consumer's checker targets whatever they run anyway.
+    #
     # `follow_imports = silent` reproduces the consumer's position exactly: the
     # package's *types* are used, but errors inside it are not reported. A real
     # caller has it in site-packages, where mypy already behaves this way; here
     # it is on MYPYPATH, where mypy would otherwise also grade the vendored
     # ANTLR parser and drown the result.
-    config.write_text(
-        "[mypy]\npython_version = 3.10\nfollow_imports = silent\n", encoding="utf-8"
-    )
+    config.write_text("[mypy]\nfollow_imports = silent\n", encoding="utf-8")
 
     # `sys.executable -m mypy`, not whichever `mypy` is on PATH: a tool-installed
     # mypy runs in its own environment and cannot see duckdb or pandas-stubs, so
