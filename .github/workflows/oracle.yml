@@ -99,9 +99,13 @@ jobs:
       # Drift means the ground truth our entire acceptance suite is measured
       # against has moved. It is a finding to investigate, never something to
       # silently re-freeze.
+      # --include-fixture-cases because the previous step just loaded them.
+      # Without it a third of the frozen expectations are never re-validated,
+      # which is how three of them stayed stale from the day they were written
+      # until the first nightly run (docs/test-plan.md §5.3).
       - name: Check for drift
         if: inputs.mode != 'regenerate'
-        run: python tools/regen_expectations.py --check
+        run: python tools/regen_expectations.py --check --include-fixture-cases
 
       - name: Regenerate expectations
         if: inputs.mode == 'regenerate'

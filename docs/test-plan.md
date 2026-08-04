@@ -245,6 +245,74 @@ outputs), converting into our case format:
 
 Each import records provenance + upstream license in `NOTICE`.
 
+### 5.3 Drift log
+
+`tools/regen_expectations.py --check` exits 3 when the emulator stops producing
+a frozen result. That is a **finding**, not a build break to clear by
+re-freezing: the corpus is the yardstick every acceptance number is measured
+with, so moving it silently moves every number with it. Each drift gets diagnosed
+down to a cause — emulator image, fixture, harvest, or a real change in ADX — and
+recorded here.
+
+#### 2026-08-04 — three expectations frozen against a draft fixture
+
+**Symptom.** The first scheduled Oracle run (`main` @ `5542970`) reported drift
+in three cases: `partition-operator-03` (`243` → `241`),
+`percentile-array-tdigest-function-00`, and `shuffle-query-02`.
+
+**Not the emulator.** The scheduled lane pulls `:latest` rather than the pinned
+digest, so a new Microsoft build was the obvious suspect and the wrong one.
+Re-running the three cases on the **pinned digest** with the committed fixture
+returns the nightly's values exactly, and every one of those values reproduces
+from the committed `StormEvents.csv`:
+
+| Case | Frozen | Committed fixture says |
+|---|---|---|
+| `partition-operator-03` | `243` | `241` rows with `InjuriesIndirect` ∈ {1,2} |
+| `shuffle-query-02` | `NORTH CAROLINA [0, 5000, 0]` | `[1497387, 855502, 5805666]`, all three present as `DamageProperty` values |
+| `percentile-array-tdigest-function-00` | p100 `2500000` for 50 of 51 states | per-state maxima spread across 4.5–5.0 M |
+
+An engine that had changed its `tdigest` algorithm would not land on numbers
+drawn from our own CSV. The emulator was right; the frozen values were stale.
+
+**Cause.** `tools/harvest_docs.py` classified a case as self-contained if it
+contained `datatable`, `print` or `range`. All three of these contain `range`
+— *and* read `StormEvents`. So they were marked `inline_input`, swept by the
+fixture-free freeze pass, and frozen against whatever the emulator held at that
+moment: a draft fixture whose `DamageProperty` came from a handful of fixed
+amounts (`5000`, `300000`, `2500000` — visible in the frozen values). The
+generator later switched to `rng.randrange(1, 5_000_000)` for the same reason
+`sort`/`top-N` cases need distinct keys, the CSV was regenerated and committed,
+and the fixture-backed sweep re-froze the 247 cases that were *labelled*
+fixture-backed. These four were not, so nothing re-froze them.
+
+A fourth case, `bin-function-04`, was misclassified the same way and did **not**
+drift — it filters `CALIFORNIA` + `Strong Wind` inside one week and matches zero
+rows under either fixture. Vacuously stable, which is why it was not a clue.
+
+**Impact: none on the numbers.** All four use constructs we do not translate
+(`partition`, `tdigest`, `make-series hint.shufflekey`, `mv-expand … to typeof`),
+so they sit in the `unsupported` bucket and never reached a comparison. The
+L3 baseline of 245 passing was measured without them and is unchanged. The
+exposure was latent and inverted: implementing `partition` would have graded a
+*correct* result against `243` and reported it as a bug in our own code.
+
+**Fixed.**
+1. `harvest_docs.is_self_contained()` now requires inline input **and** no
+   reference to a fixture table. The four cases are `inline_input: false`.
+2. The three were re-frozen on the pinned digest against the committed fixture.
+   `regen_expectations.py` grew `--only CASE_ID …` to do it: a diagnosed drift
+   needs a handful of cases put right, and rewriting all 1036 to fix three
+   produces a diff nobody can review.
+3. `tests/test_corpus.py::test_self_contained_cases_do_not_read_a_fixture_table`
+   asserts the invariant hermetically, so the next occurrence fails on the
+   commit that causes it instead of waiting for a nightly.
+4. The nightly drift step now passes `--include-fixture-cases`. It already loads
+   the fixtures; without the flag it was re-validating 741 of 1036 frozen
+   expectations and skipping the third of the corpus that depends on exactly the
+   thing that moved. With it, a full sweep on the pinned digest checks **983**
+   and reports no drift — so these three were the only casualties.
+
 ## 6. Behavioral divergence catalog (L5 — hand-authored trap tests)
 
 These are the "almost the same" cases that silently return wrong results. Each

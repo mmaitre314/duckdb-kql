@@ -144,6 +144,34 @@ def test_frozen_cases_supply_their_own_data() -> None:
         )
 
 
+def test_self_contained_cases_do_not_read_a_fixture_table() -> None:
+    """``inline_input`` claims "needs no fixture". It has to be true.
+
+    A case that reads ``StormEvents`` is fixture-backed however much inline input
+    it also builds, and four of them said otherwise because they happened to
+    contain the word ``range``. That put them in the fixture-free freeze sweep,
+    where they were frozen against whatever the emulator was holding at the time
+    — a draft of the fixture — and nothing ever re-froze them against the
+    committed one. The nightly drift lane found it months later; this finds it
+    at harvest time, with no Docker (docs/test-plan.md §5.3).
+
+    Deliberately broader than :func:`_table_references`: a mere mention is enough
+    to disqualify the claim, so this cannot be fooled by a table reference in a
+    position the conservative parser does not look at.
+    """
+    pattern = re.compile(
+        r"\b(" + "|".join(re.escape(t) for t, _, _ in fixtures.TABLES) + r")\b"
+    )
+    offenders = [
+        c["id"] for c in _cases() if c["inline_input"] and pattern.search(c["kql"])
+    ]
+    assert not offenders, (
+        f"cases claim to be self-contained but read a fixture table: {offenders} "
+        "— re-run tools/harvest_docs.py, and re-freeze them with "
+        "--include-fixture-cases"
+    )
+
+
 def _table_references(kql: str) -> set[str]:
     """Identifiers used in table position — the start of the query or a pipe.
 

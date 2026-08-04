@@ -26,14 +26,28 @@ from collections import Counter
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
-from duckdb_kql import validate  # noqa: E402
+from duckdb_kql import fixtures, validate  # noqa: E402
 
 FENCE_RE = re.compile(r"^```[kK]usto\s*$(.*?)^```\s*$", re.MULTILINE | re.DOTALL)
 LINE_COMMENT_RE = re.compile(r"//[^\n]*")
 STRING_RE = re.compile(r"'[^'\n]*'|\"[^\"\n]*\"")
 PIPED_RE = re.compile(r"\|\s*([a-zA-Z][a-zA-Z0-9]*(?:-[a-zA-Z][a-zA-Z0-9]*)*)")
 CALL_RE = re.compile(r"\b([a-zA-Z_][a-zA-Z0-9_]*)\s*\(")
-SELF_CONTAINED_RE = re.compile(r"\b(datatable|print|range)\b")
+INLINES_INPUT_RE = re.compile(r"\b(datatable|print|range)\b")
+
+# A query that reads a fixture table is NOT self-contained, however much inline
+# input it also builds. Four cases used `range` *and* `StormEvents`; the old
+# `inline`-means-`range` rule put them in the fixture-free sweep, where they were
+# frozen against whatever the emulator happened to hold — a draft of the fixture
+# — and were never re-frozen when it settled (docs/test-plan.md §5.3).
+FIXTURE_TABLE_RE = re.compile(
+    r"\b(" + "|".join(re.escape(t) for t, _, _ in fixtures.TABLES) + r")\b"
+)
+
+
+def is_self_contained(code: str) -> bool:
+    """True when the case needs no fixture to reproduce its own result."""
+    return bool(INLINES_INPUT_RE.search(code)) and not FIXTURE_TABLE_RE.search(code)
 
 # ---------------------------------------------------------------------------
 # Block filtering
@@ -115,7 +129,7 @@ def harvest(repo: Path, out_dir: Path, commit: str) -> dict:
                 continue
 
             code = strip_noise(block)
-            inline = bool(SELF_CONTAINED_RE.search(code))
+            inline = is_self_contained(code)
             operators = sorted({mm.group(1) for mm in PIPED_RE.finditer(code)})
             functions = sorted({mm.group(1).lower() for mm in CALL_RE.finditer(code)})
 

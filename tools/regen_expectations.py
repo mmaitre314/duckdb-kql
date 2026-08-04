@@ -43,6 +43,7 @@ def regen(
     kusto: KustoEmulator,
     *,
     limit: int | None = None,
+    only: set[str] | None = None,
     only_missing: bool = False,
     include_fixture_cases: bool = False,
     image_digest: str | None = None,
@@ -73,6 +74,9 @@ def regen(
             corpus_path.write_text(json.dumps(doc, indent=1), encoding="utf-8")
 
     for case in cases:
+        if only is not None and case["id"] not in only:
+            stats["skipped"] += 1
+            continue
         if not case.get("inline_input") and not include_fixture_cases:
             stats["skipped"] += 1
             continue
@@ -155,6 +159,14 @@ def main() -> int:
     ap.add_argument("--limit", type=int, default=None)
     ap.add_argument("--only-missing", action="store_true")
     ap.add_argument(
+        "--only",
+        nargs="+",
+        metavar="CASE_ID",
+        help="re-freeze only these case ids. A diagnosed drift usually needs a "
+        "handful of cases put right; rewriting the whole corpus to do it buries "
+        "the three lines that matter in a thousand-line diff nobody can review",
+    )
+    ap.add_argument(
         "--include-fixture-cases",
         action="store_true",
         help="also run cases that need a mounted sample database",
@@ -188,6 +200,7 @@ def main() -> int:
         args.corpus,
         kusto,
         limit=args.limit,
+        only=set(args.only) if args.only else None,
         only_missing=args.only_missing,
         include_fixture_cases=args.include_fixture_cases,
         image_digest=args.image_digest,
@@ -207,8 +220,10 @@ def main() -> int:
                 print(f"    now:    {str(x['now'])[:160]}")
             print(
                 "\nGround truth changed. Do NOT just re-freeze: work out whether the "
-                "emulator image moved, the harvest changed, or ADX behaviour actually "
-                "differs, and record the finding in docs/test-plan.md §6."
+                "emulator image moved, the fixture changed, the harvest changed, or "
+                "ADX behaviour actually differs. Record the finding in the drift log "
+                "(docs/test-plan.md §5.3); a real KQL/DuckDB divergence also belongs "
+                "in the catalog (§6)."
             )
             return 3
         print("\nno drift — frozen expectations still match the emulator")

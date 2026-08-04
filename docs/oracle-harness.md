@@ -17,8 +17,9 @@
 
 ```bash
 docker compose up -d kusto
+python tools/make_fixtures.py --load                         # ingest StormEvents
 python tools/regen_expectations.py --image-digest <digest>   # freeze
-python tools/regen_expectations.py --check                   # verify, writes nothing
+python tools/regen_expectations.py --check --include-fixture-cases  # verify, writes nothing
 ```
 
 ## Where it runs
