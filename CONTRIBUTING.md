@@ -99,6 +99,19 @@ Contributions that only touch translation logic do not need it — the frozen
 corpus in `tests/cases/` carries the expectations it produced. You need the
 emulator when you are adding a mapping and have to *establish* an expectation.
 
+## Reviewing a change
+
+Reviews here are checklist-led and organized by area, because the dangerous
+change in this project is the one that runs cleanly and returns a *plausible
+wrong answer*. [`docs/code-review/`](docs/code-review/README.md) is the
+framework: a charter (severity scale, reporting format, and the small-diff /
+checklist discipline the literature backs) plus one checklist per area of the
+codebase — translation correctness, public API & typing, security & injection,
+the Kusto client, testing & the oracle, and tooling/packaging/CI/docs. Reviewing
+a change means picking the area(s) it touches and working its list; the
+[`adversarial-reviewer`](.claude/agents/adversarial-reviewer.md) agent automates
+the translation-correctness pass over a mapping diff.
+
 ## Style
 
 Match the surrounding code. Two habits worth copying:
