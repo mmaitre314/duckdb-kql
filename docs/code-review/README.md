@@ -113,6 +113,11 @@ and TRANSLATION.md §4, and reports in the format above.
 | Testing, oracle & fixtures | [`testing-oracle-and-fixtures.md`](testing-oracle-and-fixtures.md) | `tests/`, `oracle.py`, `comparison.py`, `fixtures.py` — does the verification actually verify? |
 | Tooling, packaging, CI & docs | [`tooling-packaging-ci-docs.md`](tooling-packaging-ci-docs.md) | `cli.py`, `tools/`, `pyproject.toml`, `.github/workflows/`, generated-doc staleness |
 
+## Past reviews
+
+- [`review-2026-08-04.md`](review-2026-08-04.md) — the first full pass of this
+  framework over the whole repo (at `728fb55`): 1 S1, 3 S2, 4 S3, 1 S4.
+
 Boundaries overlap on purpose at one seam: **identifier/literal quoting** is a
 translation concern (is it *correct*?) and a security concern (is it *safe*?).
 Translation owns correctness of the emitted form; security owns whether any
