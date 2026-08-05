@@ -87,6 +87,10 @@ __all__ = [
     "execute",
     "df",
     "arrow",
+    # type aliases used in the public signatures above, so callers can annotate
+    "TranslationResult",
+    "Schema",
+    "Parameters",
     "__version__",
 ]
 
@@ -95,11 +99,23 @@ __all__ = [
 _LAYER1 = frozenset({"connect", "sql", "execute", "df", "arrow"})
 
 
+#: Types named in the public signatures. Callers need them to annotate their own
+#: code, and a name that only exists under TYPE_CHECKING cannot be imported.
+#: Resolved from the Layer 0 modules that define them, so this stays duckdb-free.
+_LAYER0_TYPES = {"TranslationResult": "translate", "Parameters": "translate",
+                 "Schema": "schema"}
+
+
 def __getattr__(name: str) -> Any:
     if name in _LAYER1:
         from . import engine
 
         return getattr(engine, name)
+    if name in _LAYER0_TYPES:
+        import importlib
+
+        module = importlib.import_module(f".{_LAYER0_TYPES[name]}", __name__)
+        return getattr(module, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 

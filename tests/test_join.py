@@ -132,3 +132,19 @@ def test_join_without_a_schema_refuses_loudly() -> None:
 def test_non_join_queries_still_need_no_schema() -> None:
     """Only join forces schema resolution; everything else stays schema-free."""
     assert duckdb_kql.to_sql("L | where k == 'a' | project k")
+
+
+def test_a_table_name_is_matched_exactly_not_case_folded() -> None:
+    """R7 — KQL identifiers are case-sensitive, so `foo` is not `Foo`.
+
+    The lookup tried `name`, `name.lower()` and `name.upper()` in turn, so a
+    query naming a table that does not exist could bind to one that does and
+    return somebody else's rows. Raising is the whole point of R7.
+    """
+    schema = {"Foo": ["a", "b"], "Bar": ["a", "c"]}
+    duckdb_kql.to_sql("Foo | join Bar on a", schema=schema)  # exact: fine
+
+    with pytest.raises(duckdb_kql.KqlSchemaError):
+        duckdb_kql.to_sql("foo | join Bar on a", schema=schema)
+    with pytest.raises(duckdb_kql.KqlSchemaError):
+        duckdb_kql.to_sql("FOO | join Bar on a", schema=schema)

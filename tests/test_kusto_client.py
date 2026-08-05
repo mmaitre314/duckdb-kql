@@ -570,3 +570,76 @@ def test_uuid_columns_survive_the_round_trip(client) -> None:
     g = uuid.UUID("12345678-1234-5678-1234-567812345678")
     table = client.execute("db", f"print g = toguid('{g}')").primary_results[0]
     assert table[0]["g"] == str(g)
+
+
+# ---------------------------------------------------------------------------
+# Values Kusto's type system cannot describe
+# ---------------------------------------------------------------------------
+
+
+def test_an_integer_too_wide_for_long_does_not_break_the_dataframe(client) -> None:
+    """DuckDB has integers Kusto does not, and `long` is a claim that can be false.
+
+    A UBIGINT/HUGEINT above 2**63-1 was reported as `long`, and
+    ``dataframe_from_result_table`` then did ``.astype(Int64Dtype())`` and let a
+    bare ``OverflowError`` out of pandas — past the whole KustoError taxonomy,
+    where no caller catching Kusto errors would see it coming. Row access
+    happened to work, so the failure showed up only on the DataFrame path.
+    """
+    pytest.importorskip("pandas")
+    from duckdb_kql.kusto.helpers import dataframe_from_result_table
+
+    client._connection.execute(
+        "CREATE TABLE Wide AS SELECT 18446744073709551615::UBIGINT AS big, 42::BIGINT AS ok"
+    )
+    table = client.execute("db", "Wide").primary_results[0]
+
+    kinds = {c.column_name: c.column_type for c in table.columns}
+    assert kinds["big"] == "string", (
+        "a value outside int64 is not a `long`; string is the one replacement "
+        "that does not round it"
+    )
+    assert kinds["ok"] == "long", "an ordinary integer column must be unaffected"
+
+    frame = dataframe_from_result_table(table)
+    assert frame["big"][0] == "18446744073709551615", "the exact value must survive"
+    assert str(frame["ok"].dtype) == "Int64"
+
+    # Row-level access was already correct and must stay a real int.
+    assert table[0]["big"] == 18446744073709551615
+
+
+def test_an_in_range_unsigned_column_still_reports_long(client) -> None:
+    """The widening is driven by the data, so the common case pays nothing."""
+    pytest.importorskip("pandas")
+    from duckdb_kql.kusto.helpers import dataframe_from_result_table
+
+    client._connection.execute("CREATE TABLE Narrow AS SELECT 7::UBIGINT AS n")
+    table = client.execute("db", "Narrow").primary_results[0]
+    assert [c.column_type for c in table.columns] == ["long"]
+    assert str(dataframe_from_result_table(table)["n"].dtype) == "Int64"
+
+
+def test_closed_client_error_is_parented_where_the_sdk_puts_it() -> None:
+    """`except KustoClientError` must not swallow a closed-client error.
+
+    Verified against azure-kusto-data 5.0.0, where `KustoClosedError` derives
+    from `KustoError` directly. Ours derived from `KustoClientError`, so code
+    that works against the real SDK would silently change behaviour here.
+    """
+    from duckdb_kql.kusto.exceptions import (
+        KustoClientError,
+        KustoClosedError,
+        KustoError,
+    )
+
+    assert issubclass(KustoClosedError, KustoError)
+    assert not issubclass(KustoClosedError, KustoClientError)
+
+
+def test_a_closed_client_raises_it(client) -> None:
+    from duckdb_kql.kusto.exceptions import KustoClosedError
+
+    client.close()
+    with pytest.raises(KustoClosedError):
+        client.execute("db", "print 1")

@@ -22,6 +22,7 @@ from __future__ import annotations
 import base64
 import datetime as _dt
 import json
+import math
 import re
 import uuid
 from dataclasses import dataclass
@@ -343,6 +344,17 @@ def _parse_timespan_body(text: str) -> _dt.timedelta | None:
 
     try:
         # A bare number is a count of days, as in `timespan(3)`.
-        return _dt.timedelta(days=float(text))
+        days = float(text)
     except ValueError:
+        return None
+    # `inf`, `nan` and `1e400` all parse as floats, and a finite value can still
+    # exceed timedelta's ~2.7-million-day range. Left alone they escape as a raw
+    # OverflowError from the stdlib, past the whole KqlError taxonomy, to a
+    # caller who was told `bind()` raises KqlSchemaError. Returning None here is
+    # what turns them into that.
+    if not math.isfinite(days):
+        return None
+    try:
+        return _dt.timedelta(days=days)
+    except OverflowError:
         return None

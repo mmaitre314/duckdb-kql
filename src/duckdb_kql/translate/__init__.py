@@ -17,6 +17,8 @@ from ..errors import KqlUnsupportedError
 from .functions import _TODATETIME, BINARY_OPERATORS, lookup, lookup_aggregate
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from ..params import ParameterDeclaration
     from ..schema import Schema
 
@@ -172,7 +174,13 @@ def render_expr(node: ir.Expr) -> str:
             raise KqlUnsupportedError(
                 f"operator:{node.op}", hint="no DuckDB mapping in this wave"
             )
-        return spec.template.format(render_expr(node.left), render_expr(node.right))
+        left, right = render_expr(node.left), render_expr(node.right)
+        rendered = spec.template.format(left, right)
+        if spec.null_result is None:
+            return rendered
+        return _apply_null_semantics(
+            rendered, spec.null_result, ((node.left, left), (node.right, right))
+        )
 
     if isinstance(node, ir.PathAccess):
         return render_path(node)
@@ -381,7 +389,13 @@ def render_datatable(dt: ir.DataTable) -> str:
 # ---------------------------------------------------------------------------
 
 
-def render_operator(op: ir.Operator, prev: str) -> str:
+def render_operator(op: ir.Operator, prev: str, cols: list[str] | None = None) -> str:
+    """Render one operator as a SELECT over *prev*.
+
+    *cols* is the incoming column order where it is known — from the IR for a
+    `datatable`/`print`/`range` source, or from the caller's schema for a table.
+    Only `extend` needs it, and only to keep a replaced column in place.
+    """
     if isinstance(op, ir.Where):
         return f"SELECT * FROM {prev} WHERE {render_expr(op.predicate)}"
 
@@ -393,18 +407,29 @@ def render_operator(op: ir.Operator, prev: str) -> str:
         return f"SELECT {', '.join(cols)} FROM {prev}"
 
     if isinstance(op, ir.Extend):
-        # `extend` REPLACES a column whose name already exists, and appends
-        # otherwise. A plain `SELECT *, expr AS c` is silently wrong on a
-        # collision — DuckDB emits two columns named `c` without complaining.
-        # `EXCLUDE`/`REPLACE` would fix that but each errors in the opposite
-        # case, and we have no schema here. `COLUMNS(x -> x NOT IN (...))`
-        # filters dynamically, so it is correct either way.
+        # `extend` REPLACES a column whose name already exists, **in its original
+        # position**, and appends otherwise. A plain `SELECT *, expr AS c` is
+        # silently wrong on a collision — DuckDB emits two columns named `c`
+        # without complaining.
         names = [output_name(e, i) for i, e in enumerate(op.expressions)]
-        excluded = ", ".join(quote_string(n) for n in names)
-        added = ", ".join(
-            f"{render_expr(e.expr)} AS {quote_ident(n)}"
+        rendered = {
+            n: f"{render_expr(e.expr)} AS {quote_ident(n)}"
             for e, n in zip(op.expressions, names, strict=True)
-        )
+        }
+        if cols is not None:
+            # Column order is user-visible (TRANSLATION.md §1, §5), so when the
+            # incoming columns are known the list is written out explicitly: a
+            # replaced name keeps its slot, new ones go on the end.
+            select = [rendered.get(c, quote_ident(c)) for c in cols]
+            select += [rendered[n] for n in names if n not in cols]
+            return f"SELECT {', '.join(select)} FROM {prev}"
+        # Without a schema we cannot tell a replacement from an addition, and
+        # `EXCLUDE`/`REPLACE` each error in the opposite case. `COLUMNS(x -> x
+        # NOT IN (...))` filters dynamically, so it is correct either way — but
+        # it appends, so a *replaced* column moves to the end. That is the one
+        # residual divergence, and it is why Layer 1 always passes a schema.
+        excluded = ", ".join(quote_string(n) for n in names)
+        added = ", ".join(rendered[n] for n in names)
         return f"SELECT COLUMNS(x -> x NOT IN ({excluded})), {added} FROM {prev}"
 
     if isinstance(op, ir.Take):
@@ -453,10 +478,14 @@ def render_sort_keys(keys: tuple[ir.SortKey, ...]) -> str:
         # KQL defaults to DESC — the opposite of SQL (R6) — so always emit the
         # direction explicitly rather than relying on either engine's default.
         direction = "ASC" if key.ascending else "DESC"
-        # KQL puts nulls first when descending, last when ascending; state it
-        # rather than inheriting DuckDB's default.
+        # KQL treats null as the SMALLEST value, so it sorts first ascending and
+        # last descending — the opposite of what this emitted until the oracle
+        # was asked (R6). `datatable(x:int) [3, int(null), 1] | sort by x asc`
+        # returns null, 1, 3 on the emulator; `desc` returns 3, 1, null.
+        # DuckDB's own default is NULLS LAST regardless of direction, so this
+        # has to be stated either way.
         if key.nulls_first is None:
-            nulls = "NULLS FIRST" if not key.ascending else "NULLS LAST"
+            nulls = "NULLS FIRST" if key.ascending else "NULLS LAST"
         else:
             nulls = "NULLS FIRST" if key.nulls_first else "NULLS LAST"
         parts.append(f"{render_expr(key.expr)} {direction} {nulls}")
@@ -487,7 +516,12 @@ def to_sql(query: ir.Query, schema: Schema | None = None) -> TranslationResult:
     ]
 
     stages = [render_source(query.source)]
-    cols: list[str] | None = None
+    # Resolved up front rather than on first join: `extend` needs it too, to
+    # keep a replaced column in its original position. A `datatable`/`print`/
+    # `range` source carries its columns in the IR, so this succeeds with no
+    # schema at all; a bare table without one leaves it None and only `join`
+    # then has to fail.
+    cols = _known_source_cols(query.source, schema)
 
     for op in query.operators:
         prev = f"_s{len(stages) - 1}"
@@ -503,7 +537,7 @@ def to_sql(query: ir.Query, schema: Schema | None = None) -> TranslationResult:
 
             cols = join_output_columns(cols, right_cols, op.kind)
         else:
-            stages.append(render_operator(op, prev))
+            stages.append(render_operator(op, prev, cols))
             if cols is not None:
                 from ..schema import _operator_columns
 
@@ -535,6 +569,21 @@ def _schema_with_lets(query: ir.Query, schema: Schema | None) -> Schema | None:
             except Exception:  # noqa: BLE001 - resolve lazily; join reports it
                 pass
     return extended
+
+
+def _known_source_cols(source: ir.Source, schema: Schema | None) -> list[str] | None:
+    """The source's columns, or None when they cannot be known here.
+
+    Unlike :func:`_source_cols` this never raises: not knowing the columns is
+    only fatal for `join`, which asks separately and reports it properly.
+    """
+    from ..errors import KqlSchemaError
+    from ..schema import _source_columns
+
+    try:
+        return _source_columns(source, schema)
+    except KqlSchemaError:
+        return None
 
 
 def _source_cols(query: ir.Query, schema: Schema | None) -> list[str]:
@@ -762,6 +811,52 @@ def _renamed(left_cols: list[str], right_cols: list[str]) -> list[str]:
     return join_output_columns(left_cols, right_cols, "inner")[len(left_cols):]
 
 
+def _never_null(node: ir.Expr) -> bool:
+    """Whether *node* is statically incapable of evaluating to null."""
+    return isinstance(node, ir.Literal) and node.value is not None
+
+
+def _apply_null_semantics(
+    rendered: str, when_null: str, operands: Sequence[tuple[ir.Expr, str]]
+) -> str:
+    """Give *rendered* KQL's null behaviour rather than SQL's (R4).
+
+    KQL's equality, membership and string-matching operators are **total**: a
+    null operand makes the positive form false and the negated form true. SQL
+    answers NULL to both, and `where` drops the row — so `| where s !contains
+    "x"` silently loses every null row instead of keeping it.
+
+    The trap is that null-on-*both*-sides is the one case KQL leaves NULL
+    (`a == b` with both null is null, not false), so a blanket ``coalesce``
+    would trade one wrong answer for another on `where a != b`. When an operand
+    is a literal that cannot be null that case is unreachable and the cheap form
+    is exact — which is nearly every real predicate, so the generated SQL stays
+    readable. Otherwise the comparison is guarded.
+
+    All of this is measured on the emulator (`tests/test_null_semantics.py`),
+    not read off the documentation.
+    """
+    if any(_never_null(expr) for expr, _ in operands):
+        return f"coalesce({rendered}, {when_null})"
+    both_null = " AND ".join(f"{sql} IS NULL" for _, sql in operands)
+    return f"CASE WHEN {both_null} THEN NULL ELSE coalesce({rendered}, {when_null}) END"
+
+
+def _in_result(sql: str, node: ir.InList, value: str) -> str:
+    """``in`` / ``!in`` with KQL's null behaviour rather than SQL's (R4).
+
+    Verified on the emulator for all three forms — a literal list, a
+    ``dynamic([...])`` array and a subquery behave identically: a null left
+    operand makes ``in`` false and ``!in`` **true**, where SQL leaves both NULL
+    and `where` drops the row. Unlike ``==``, membership has no symmetric
+    both-null case to preserve, so the plain coalesce is exact.
+    """
+    rendered = f"(NOT {sql})" if node.negated else sql
+    if _never_null(node.value):
+        return rendered
+    return f"coalesce({rendered}, {'TRUE' if node.negated else 'FALSE'})"
+
+
 def render_in_list(node: ir.InList) -> str:
     """``x in (a, b, ...)`` and its ``!in`` / ``in~`` variants.
 
@@ -780,7 +875,7 @@ def render_in_list(node: ir.InList) -> str:
             value = f"lower({value})"
             inner = f"SELECT lower(CAST(COLUMNS(*) AS VARCHAR)) FROM ({inner})"
         sql = f"({value} IN ({inner}))"
-        return f"(NOT {sql})" if node.negated else sql
+        return _in_result(sql, node, value)
 
     # `x in (dynamic([...]))` tests membership in an ARRAY, not equality with
     # one value — a plain IN would compare the value against the whole array.
@@ -791,14 +886,14 @@ def render_in_list(node: ir.InList) -> str:
             arr = f"list_transform({arr}, v -> lower(v))"
             needle = f"lower({needle})"
         sql = f"list_contains({arr}, {needle})"
-        return f"(NOT {sql})" if node.negated else sql
+        return _in_result(sql, node, needle)
 
     items = [render_expr(i) for i in node.items]
     if node.case_insensitive:
         value = f"lower({value})"
         items = [f"lower({i})" for i in items]
     sql = f"({value} IN ({', '.join(items)}))"
-    return f"(NOT {sql})" if node.negated else sql
+    return _in_result(sql, node, value)
 
 
 def _is_dynamic_expr(node: ir.Expr) -> bool:

@@ -505,9 +505,20 @@ KQL↔DuckDB semantic gaps** and should grow as we find more.
 **Row-shaping operators**
 - `take`/`limit` and bare `sample` are **nondeterministic order** — assert as sets.
 - `top N by X` = sort+take with **nondeterministic tie-breaking**.
-- `sort`/`order by` default **`desc`**; nulls-ordering convention.
+- `sort`/`order by` default **`desc`**; null is the **smallest** value, so it
+  sorts first ascending and last descending (settled against the oracle
+  2026-08-05; the emitter had it inverted — TRANSLATION.md R6/§9).
 - `extend` may **overwrite** an existing column; `project` reorders and can
   compute; `project-away`/`project-keep`/`project-rename` column-set effects.
+
+**Null semantics**
+- KQL's equality/membership/matching operators are **total**: one null operand
+  makes the positive form false and the negated form **true**, where SQL yields
+  NULL and `where` drops the row. Ordering comparisons (`<`, `>`, …) stay
+  three-valued in both. Null on *both* sides is null in KQL, which is what stops
+  the fix being a blanket `coalesce` (R4, `tests/test_null_semantics.py`).
+- KQL has no null `string` — an absent string is the empty string. A DuckDB
+  VARCHAR can be NULL, so `s == ""` diverges there; recorded, not reconciled.
 
 **Identifiers & typing**
 - KQL identifiers are **case-sensitive**; DuckDB is case-insensitive by default —

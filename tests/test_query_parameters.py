@@ -281,3 +281,31 @@ def test_translation_result_is_still_a_string() -> None:
     assert isinstance(translated, str)
     assert translated.parameters == {}
     assert translated.unbound == ()
+
+
+# ---------------------------------------------------------------------------
+# Numbers that parse but are not durations
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("value", ["inf", "-inf", "nan", "1e400", "1e10", "-1e10"])
+def test_an_unrepresentable_timespan_raises_a_kql_error(value: str) -> None:
+    """These reached `timedelta(days=float(text))` and escaped as OverflowError.
+
+    A raw stdlib exception past the public boundary is a broken contract: the
+    caller was told `bind()` raises `KqlSchemaError`, so `except KqlError`
+    around it does nothing and the process dies on a bad parameter value. No
+    wrong answer and no SQL is reached — but the failure mode is the one the
+    error taxonomy exists to prevent.
+    """
+    kql = 'declare query_parameters(window:timespan);\nT | where d > ago(window)'
+    with pytest.raises(duckdb_kql.KqlSchemaError):
+        duckdb_kql.to_sql(kql, parameters={"window": value})
+
+
+def test_a_representable_timespan_still_works() -> None:
+    """The counterweight: widening the rejection must not reject real values."""
+    kql = 'declare query_parameters(window:timespan);\nT | where d > ago(window)'
+    for value in ("3", "1.5", "4.00:00:00", "00:05:00"):
+        translated = duckdb_kql.to_sql(kql, parameters={"window": value})
+        assert translated.parameters, value

@@ -24,7 +24,7 @@ Docker, DuckDB and the emulator yourself.
 Before opening a pull request:
 
 ```bash
-ruff check src tests tools
+ruff check src tools tests
 mypy
 pytest
 ```

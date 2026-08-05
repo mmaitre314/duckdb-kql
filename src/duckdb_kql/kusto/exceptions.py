@@ -74,8 +74,13 @@ class KustoClientError(KustoError):
     """The client was asked for something it cannot do."""
 
 
-class KustoClosedError(KustoClientError):
-    """The client has been closed."""
+class KustoClosedError(KustoError):
+    """The client has been closed.
+
+    Parented on ``KustoError``, not ``KustoClientError`` — that is where the
+    real SDK puts it, and a caller writing ``except KustoClientError`` around a
+    call expects a closed client to propagate rather than be swallowed.
+    """
 
     def __init__(self) -> None:
         super().__init__("Client is closed")

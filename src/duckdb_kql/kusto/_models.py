@@ -36,6 +36,7 @@ __all__ = [
     "JsonTable",
     "kusto_type",
     "to_wire",
+    "widen_out_of_range",
 ]
 
 #: One column of Kusto's JSON response shape: ``{"ColumnName": …, "ColumnType": …}``.
@@ -114,6 +115,42 @@ def kusto_type(duckdb_type: Any) -> str:
     # An unmapped type still has a faithful string form, and `string` is the one
     # answer that cannot make a value look like something it is not.
     return "string"
+
+
+#: Kusto's widest integer is a 64-bit `long`. DuckDB's UBIGINT, HUGEINT and
+#: UHUGEINT are wider, so a value can be a perfectly good DuckDB integer and
+#: still not be a `long`.
+_INT64_MIN, _INT64_MAX = -(2**63), 2**63 - 1
+
+
+def widen_out_of_range(
+    types: list[str], rows: Sequence[Sequence[Any]]
+) -> list[str]:
+    """Re-type `long` columns holding values a 64-bit integer cannot represent.
+
+    Calling such a value a `long` is a claim that breaks downstream:
+    ``dataframe_from_result_table`` does ``.astype(Int64Dtype())`` and pandas
+    raises a bare ``OverflowError`` from inside the conversion, where no caller
+    can catch it as a Kusto error. Row-level access happens to work, so the
+    failure appears only on the DataFrame path.
+
+    The replacement is ``string``, not ``decimal`` or ``real``: those are the
+    types that would round the value we are here to preserve. Widening is
+    per-column and driven by the data, so an ordinary UBIGINT column that fits
+    keeps reporting `long` and its DataFrame dtype is unchanged.
+    """
+    widened = list(types)
+    for i, kind in enumerate(types):
+        if kind != "long":
+            continue
+        if any(
+            isinstance(row[i], int)
+            and not isinstance(row[i], bool)
+            and not (_INT64_MIN <= row[i] <= _INT64_MAX)
+            for row in rows
+        ):
+            widened[i] = "string"
+    return widened
 
 
 def to_wire(value: Any, column_type: str) -> Any:

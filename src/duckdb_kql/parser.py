@@ -85,6 +85,9 @@ def parse(kql: str) -> ParseResult:
     Raises:
         KqlSyntaxError: if the query does not parse. Every diagnostic is
             attached, not only the first.
+        TypeError: if *kql* is not a ``str``. This one is deliberately **not** a
+            ``KqlError`` — it is a bug in the calling code, not a fact about the
+            query — so ``except KqlError`` will not catch it.
     """
     if not isinstance(kql, str):
         raise TypeError(f"kql must be str, got {type(kql).__name__}")

@@ -30,7 +30,8 @@ import uuid
 from typing import TYPE_CHECKING, Any, cast
 
 from ..errors import KqlError
-from ._models import WellKnownDataSet, kusto_type, to_wire
+from ..translate import quote_ident
+from ._models import WellKnownDataSet, kusto_type, to_wire, widen_out_of_range
 from .client_request_properties import ClientRequestProperties
 from .exceptions import KustoClosedError, KustoServiceError, KustoUnsupportedError
 from .response import KustoResponseDataSet
@@ -409,7 +410,10 @@ class KustoClient:
             ).fetchall()
         }
         if database in attached:
-            self._connection.execute(f'USE "{database}"')
+            # `database` is already gated by exact membership above, so this is
+            # not a vector — but it was the one identifier reaching SQL without
+            # the doubling helper, and that is not a property to leave to luck.
+            self._connection.execute(f"USE {quote_ident(database)}")
             return self._connection
 
         if self.default_database and database != self.default_database:
@@ -452,6 +456,10 @@ class KustoClient:
     ) -> KustoResponseDataSet:
         """Assemble the three tables a Kusto query response carries."""
         crid = getattr(properties, "client_request_id", None) or f"duckdb-kql;{uuid.uuid4()}"
+
+        # A DuckDB integer wider than 64 bits is not a Kusto `long`, and saying
+        # it is makes the DataFrame path raise a bare OverflowError.
+        types = widen_out_of_range(types, rows)
 
         primary = {
             "TableName": "PrimaryResult",

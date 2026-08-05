@@ -17,21 +17,11 @@ from . import ir
 from .errors import KqlSchemaError
 
 __all__ = [
-    "Schema", "output_columns", "needs_schema", "join_output_columns", "disambiguate",
+    "Schema", "output_columns", "join_output_columns", "disambiguate",
 ]
 
 #: Table name -> ordered column names.
 Schema = dict[str, list[str]]
-
-
-def needs_schema(query: ir.Query) -> bool:
-    """True if translating *query* requires knowing base-table columns."""
-    for op in query.operators:
-        if isinstance(op, ir.Join):
-            return True
-        if isinstance(op, ir.Join) and needs_schema(op.right):
-            return True
-    return False
 
 
 def _table_columns(name: str, schema: Schema | None) -> list[str]:
@@ -41,9 +31,11 @@ def _table_columns(name: str, schema: Schema | None) -> list[str]:
             hint="join needs the table's columns to reproduce KQL's column "
             "renaming; use duckdb_kql.sql(con, ...) or pass schema=",
         )
-    for key in (name, name.lower(), name.upper()):
-        if key in schema:
-            return list(schema[key])
+    # Exact match only. KQL identifiers are case-sensitive (R7), so folding the
+    # case here would let `foo` silently bind to a table named `Foo` — resolving
+    # arbitrarily where the rule says to raise.
+    if name in schema:
+        return list(schema[name])
     raise KqlSchemaError(name, hint=f"unknown table; known: {sorted(schema)}")
 
 
@@ -79,10 +71,14 @@ def _operator_columns(
     if isinstance(op, ir.Project):
         return [output_name(e, i) for i, e in enumerate(op.expressions)]
     if isinstance(op, ir.Extend):
-        # `extend` replaces a column of the same name in place, else appends.
+        # `extend` replaces a column of the same name IN PLACE, keeping its
+        # position, and appends only genuinely-new names. Returning `kept +
+        # added` moved a replaced column to the end, which a `join` downstream
+        # then inherited as the wrong column order. Confirmed on the emulator:
+        # `datatable(a:int, b:int, c:int) [1,2,3] | extend a = 99` returns
+        # a, b, c — not b, c, a.
         added = [output_name(e, i) for i, e in enumerate(op.expressions)]
-        kept = [c for c in cols if c not in added]
-        return kept + added
+        return cols + [c for c in added if c not in cols]
     if isinstance(op, ir.ProjectAway):
         return [c for c in cols if c not in op.columns]
     if isinstance(op, ir.ProjectRename):

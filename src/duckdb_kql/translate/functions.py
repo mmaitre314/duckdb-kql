@@ -298,9 +298,10 @@ SCALAR_FUNCTIONS: dict[str, FunctionSpec] = {
         _f("max", "native", "max({0})", (1,), ("R4",)),
         _f("stdev", "native", "stddev_samp({0})", (1,), ("R4",)),
         _f("variance", "native", "var_samp({0})", (1,), ("R4",)),
-        # dcount is APPROXIMATE in KQL (R11) — matching it with an approximate
-        # DuckDB aggregate is deliberate, not a shortcut.
-        _f("dcount", "template", "approx_count_distinct({0})", (1, 2), ("R11",)),
+        # No scalar `dcount` row: it is only valid inside `summarize`, and the
+        # aggregate registry maps it to EXACT count(DISTINCT) after measuring
+        # approx_count_distinct ~13% low against the oracle. A scalar row saying
+        # the opposite is a landmine for whatever reaches for it next.
         _f("make_list", "native", "list({0})", (1, 2), ("R4",)),
         _f("make_set", "native", "list(DISTINCT {0})", (1, 2), ("R4",)),
     ]
@@ -318,6 +319,10 @@ class BinarySpec:
     template: str
     rules: tuple[str, ...] = ()
     note: str = ""
+    #: What KQL yields when exactly one operand is null, where SQL yields NULL.
+    #: ``None`` means SQL's NULL is already what KQL produces. Measured on the
+    #: emulator, not inferred — see ``_apply_null_semantics`` and R4.
+    null_result: str | None = None
 
 
 def _escape_like(operand: str) -> str:
@@ -357,35 +362,54 @@ BINARY_OPERATORS: dict[str, BinarySpec] = {
         BinarySpec(">=", "({0} >= {1})"),
         BinarySpec("and", "({0} AND {1})"),
         BinarySpec("or", "({0} OR {1})"),
-        # R2 — equality case sensitivity
-        BinarySpec("==", "({0} = {1})", ("R2",), "case-SENSITIVE"),
-        BinarySpec("!=", "({0} <> {1})", ("R2", "R4")),
-        BinarySpec("<>", "({0} <> {1})", ("R2", "R4")),
-        BinarySpec("=~", "(lower({0}) = lower({1}))", ("R2",), "case-INsensitive"),
-        BinarySpec("!~", "(lower({0}) <> lower({1}))", ("R2",)),
+        # R4 — the equality and matching families are TOTAL in KQL where SQL's
+        # are three-valued. Against a null operand KQL answers false for the
+        # positive form and TRUE for the negated one; SQL answers NULL both
+        # times, and `where` drops the row. That makes `| where s !contains "x"`
+        # silently lose every null row. Measured on the emulator, per operator.
+        # Ordering comparisons above (`<`, `>`, `<=`, `>=`) are NOT total —
+        # they stay null in KQL too, which is why they carry no null_result.
+        BinarySpec("==", "({0} = {1})", ("R2", "R4"), "case-SENSITIVE",
+                   null_result="FALSE"),
+        BinarySpec("!=", "({0} <> {1})", ("R2", "R4"), null_result="TRUE"),
+        BinarySpec("<>", "({0} <> {1})", ("R2", "R4"), null_result="TRUE"),
+        BinarySpec("=~", "(lower({0}) = lower({1}))", ("R2", "R4"),
+                   "case-INsensitive", null_result="FALSE"),
+        BinarySpec("!~", "(lower({0}) <> lower({1}))", ("R2", "R4"),
+                   null_result="TRUE"),
         # R3 — contains is SUBSTRING, case-insensitive by default
-        BinarySpec("contains", _CONTAINS, ("R3",)),
-        BinarySpec("!contains", f"NOT {_CONTAINS}", ("R3",)),
-        BinarySpec("contains_cs", _CONTAINS_CS, ("R3",)),
-        BinarySpec("!contains_cs", f"NOT {_CONTAINS_CS}", ("R3",)),
+        BinarySpec("contains", _CONTAINS, ("R3", "R4"), null_result="FALSE"),
+        BinarySpec("!contains", f"NOT {_CONTAINS}", ("R3", "R4"), null_result="TRUE"),
+        BinarySpec("contains_cs", _CONTAINS_CS, ("R3", "R4"), null_result="FALSE"),
+        BinarySpec("!contains_cs", f"NOT {_CONTAINS_CS}", ("R3", "R4"),
+                   null_result="TRUE"),
         # R3 — has is TERM-based, not substring
-        BinarySpec("has", _HAS, ("R3",), "whole-term match"),
-        BinarySpec("!has", f"NOT {_HAS}", ("R3",)),
-        BinarySpec("has_cs", _HAS_CS, ("R3",)),
-        BinarySpec("!has_cs", f"NOT {_HAS_CS}", ("R3",)),
+        BinarySpec("has", _HAS, ("R3", "R4"), "whole-term match", null_result="FALSE"),
+        BinarySpec("!has", f"NOT {_HAS}", ("R3", "R4"), null_result="TRUE"),
+        BinarySpec("has_cs", _HAS_CS, ("R3", "R4"), null_result="FALSE"),
+        BinarySpec("!has_cs", f"NOT {_HAS_CS}", ("R3", "R4"), null_result="TRUE"),
         # R3 — prefix / suffix, case-insensitive by default
-        BinarySpec("startswith", "({0} ILIKE " + _escape_like("{1}") + " || '%')", ("R3",)),
-        BinarySpec("!startswith", "NOT ({0} ILIKE " + _escape_like("{1}") + " || '%')", ("R3",)),
-        BinarySpec("startswith_cs", "starts_with({0}, {1})", ("R3",)),
-        BinarySpec("endswith", "({0} ILIKE '%' || " + _escape_like("{1}") + ")", ("R3",)),
-        BinarySpec("!endswith", "NOT ({0} ILIKE '%' || " + _escape_like("{1}") + ")", ("R3",)),
-        BinarySpec("endswith_cs", "ends_with({0}, {1})", ("R3",)),
-        BinarySpec("!endswith_cs", "NOT ends_with({0}, {1})", ("R3",)),
-        BinarySpec("!startswith_cs", "NOT starts_with({0}, {1})", ("R3",)),
+        BinarySpec("startswith", "({0} ILIKE " + _escape_like("{1}") + " || '%')",
+                   ("R3", "R4"), null_result="FALSE"),
+        BinarySpec("!startswith", "NOT ({0} ILIKE " + _escape_like("{1}") + " || '%')",
+                   ("R3", "R4"), null_result="TRUE"),
+        BinarySpec("startswith_cs", "starts_with({0}, {1})", ("R3", "R4"),
+                   null_result="FALSE"),
+        BinarySpec("endswith", "({0} ILIKE '%' || " + _escape_like("{1}") + ")",
+                   ("R3", "R4"), null_result="FALSE"),
+        BinarySpec("!endswith", "NOT ({0} ILIKE '%' || " + _escape_like("{1}") + ")",
+                   ("R3", "R4"), null_result="TRUE"),
+        BinarySpec("endswith_cs", "ends_with({0}, {1})", ("R3", "R4"),
+                   null_result="FALSE"),
+        BinarySpec("!endswith_cs", "NOT ends_with({0}, {1})", ("R3", "R4"),
+                   null_result="TRUE"),
+        BinarySpec("!startswith_cs", "NOT starts_with({0}, {1})", ("R3", "R4"),
+                   null_result="TRUE"),
         # `matches regex` is a FULL-string match in Azure Monitor transformations
         # but a partial match in Log Analytics; KQL proper is partial, which is
         # what regexp_matches does.
-        BinarySpec("matches regex", "regexp_matches({0}, {1})", ("R3",)),
+        BinarySpec("matches regex", "regexp_matches({0}, {1})", ("R3", "R4"),
+                   null_result="FALSE"),
     ]
 }
 

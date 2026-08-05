@@ -126,7 +126,7 @@ value (e.g. typed null literals, §3).
 | KQL | Case | DuckDB |
 |---|---|---|
 | `==` | **sensitive** | `=` |
-| `!=` | **sensitive** | `<>` (plus null handling, R4) |
+| `!=` | **sensitive** | `<>`, wrapped so a null operand is **true** (R4) |
 | `=~` | **insensitive** | `lower(a) = lower(b)` |
 | `!~` | **insensitive** | `lower(a) <> lower(b)` |
 
@@ -155,8 +155,9 @@ The highest-risk family in the language.
   `"error"`, because `has` matches whole terms delimited by non-alphanumeric
   characters. Emit a tokenization-aware form (regex on term boundaries), never a
   bare `LIKE '%x%'`.
-- Every operator above has a negated form (`!has`, `!contains`, …) which must also
-  handle nulls (R4).
+- Every operator above has a negated form (`!has`, `!contains`, …), and each is
+  **true** on a null operand rather than null (R4) — a bare `NOT (…)` silently
+  drops those rows.
 
 > Getting `has` wrong yields plausible-but-wrong results on real log queries. It
 > must be implemented as a family, with the whole matrix tested at once.
@@ -169,10 +170,29 @@ The highest-risk family in the language.
 - **Aggregates ignore nulls:** `count(Expr)` counts **non-null** values
   (→ `count(expr)`), while bare `count()` counts **all rows** (→ `count(*)`).
   `sum`/`avg`/`min`/`max` ignore nulls, matching SQL.
-- **Comparison with null** yields null (not false) — as in SQL — but KQL's
-  negated string operators (`!has`, `!contains`, `!=`) must be checked against the
-  oracle: KQL's treatment of null on the negated forms does **not** always match a
-  naive `NOT (…)`.
+- **The equality, membership and matching families are TOTAL**, where SQL's are
+  three-valued. Measured on the emulator (`tests/test_null_semantics.py`):
+
+  | family | non-null | one operand null | both null |
+  |---|---|---|---|
+  | `==` `=~` `in` `contains` `has` `startswith` `endswith` `matches regex` | as expected | **false** | null |
+  | `!=` `!~` `!in` `!contains` `!has` `!startswith` `!endswith` | as expected | **true** | null |
+  | `<` `<=` `>` `>=` | as expected | null | null |
+
+  A naive `NOT (…)` therefore **drops** every null row from
+  `| where s !contains "x"` — a smaller, plausible answer with nothing to
+  indicate it. The emitter wraps these in `coalesce(…, TRUE/FALSE)`. The both-null
+  row of the table is why it cannot do so unconditionally: `a == b` with both
+  sides null is null, so a blanket coalesce trades one wrong answer for another.
+  When either operand is a literal that case is unreachable and the cheap form
+  is exact; otherwise the comparison is guarded.
+- **Ordering comparisons are not total** and must stay three-valued — the fix
+  above must not be extended to them.
+- **Known divergence:** KQL has no null `string` — an absent string *is* the
+  empty string, so `isnull(s)` is always false and `s == ""` is true for it. A
+  DuckDB `VARCHAR` really can be NULL, so `s == ""` against a null column is
+  true in Kusto and false here. Not reconciled: doing so means coalescing every
+  string operand to `''`, which changes `isnull`/`isempty` as well.
 - `isnull()`, `isnotnull()`, `isempty()` (null **or** empty string),
   `isnotempty()`, `coalesce()` — note `isempty` ≠ `isnull`.
 - Arithmetic propagates null.
@@ -369,7 +389,10 @@ wrong answer (principle 5).
 - `has` tokenization: regex boundaries vs UDF — decide after the R3 trap tests
   run against the emulator.
 - `mv-expand` null/empty-array row preservation (R9).
-- Null-ordering defaults for `sort` (R6).
+- ~~Null-ordering defaults for `sort` (R6).~~ **Settled 2026-08-05:** KQL treats
+  null as the **smallest** value — `sort by x asc` returns null first, `desc`
+  returns it last. The emitter had this inverted while its comments asserted the
+  opposite as fact. Pinned by `tests/test_column_order_and_null_sort.py`.
 - Whether the emitter builds SQL strings directly or via `sqlglot`
   (`implementation-options.md` Option 2) — deferred; keep the emitter behind a
   narrow interface either way.
