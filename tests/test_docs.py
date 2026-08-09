@@ -21,7 +21,7 @@ README = Path("README.md")
 #: Community files live at the root, and their links rot the same way.
 ROOT_DOCS = [
     Path(name)
-    for name in ("CONTRIBUTING.md", "SECURITY.md", "CODE_OF_CONDUCT.md", "CHANGELOG.md")
+    for name in ("CONTRIBUTING.md", "SECURITY.md", "CODE_OF_CONDUCT.md")
 ]
 
 pytestmark = pytest.mark.skipif(not README.is_file(), reason="run from the repo root")

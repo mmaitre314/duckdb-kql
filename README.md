@@ -180,7 +180,7 @@ approximation.
 | [`docs/licensing.md`](https://github.com/mmaitre314/duckdb-kql/blob/main/docs/licensing.md) | Third-party licensing review |
 | [CONTRIBUTING.md](https://github.com/mmaitre314/duckdb-kql/blob/main/CONTRIBUTING.md) | How to add a mapping, and when not to |
 | [SECURITY.md](https://github.com/mmaitre314/duckdb-kql/blob/main/SECURITY.md) | Reporting vulnerabilities; what is in scope |
-| [CHANGELOG.md](https://github.com/mmaitre314/duckdb-kql/blob/main/CHANGELOG.md) | What changed, and when |
+| [Releases](https://github.com/mmaitre314/duckdb-kql/releases) | What changed, and when |
 
 ## Design
 

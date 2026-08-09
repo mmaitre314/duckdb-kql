@@ -170,11 +170,12 @@ Optional, and worth it for a first release or anything unusual:
       --extra-index-url https://pypi.org/simple duckdb-kql
   ```
 
-- **Update `CHANGELOG.md`** before tagging. Nothing enforces it — the release no
-  longer gates on it, because a release that is blocked on a doc edit is a
-  release someone does by hand at the worst moment. It is still the place where
-  a behaviour change gets explained to the people it affects, and generated
-  release notes are a list of commits, not an explanation.
+- **Edit the generated notes** before publishing. There is no `CHANGELOG.md`;
+  the release notes and the git history are the record. *Generate release notes*
+  gives you the list of commits, which is a fine skeleton and a poor explanation
+  — so lead with a short paragraph on what changed for the people using the
+  package, especially anything that returns a different answer than it did
+  before. This is the reason commit messages here are written to be read.
 
 **Before the very first release**, two one-time setup steps that only an owner
 can do:

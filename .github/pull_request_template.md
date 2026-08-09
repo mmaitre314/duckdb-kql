@@ -30,4 +30,5 @@ be wrong, and the test that covers it. If there is genuinely no trap, say so.
       supported surface moved)
 - [ ] Coverage baselines updated if they went up
       (`BASELINE_PASSING`, `BASELINE_SUPPORTED`)
-- [ ] `CHANGELOG.md` updated under `Unreleased` for anything user-visible
+- [ ] The commit message explains anything user-visible — it is what the
+      release notes are built from

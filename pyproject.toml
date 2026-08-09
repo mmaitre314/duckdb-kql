@@ -78,7 +78,7 @@ duckdb-kql = "duckdb_kql.cli:main"
 Homepage = "https://github.com/mmaitre314/duckdb-kql"
 Documentation = "https://github.com/mmaitre314/duckdb-kql/blob/main/docs/getting-started.md"
 Source = "https://github.com/mmaitre314/duckdb-kql"
-Changelog = "https://github.com/mmaitre314/duckdb-kql/blob/main/CHANGELOG.md"
+Changelog = "https://github.com/mmaitre314/duckdb-kql/releases"
 Issues = "https://github.com/mmaitre314/duckdb-kql/issues"
 "KQL support matrix" = "https://github.com/mmaitre314/duckdb-kql/blob/main/docs/kql-support.md"
 
