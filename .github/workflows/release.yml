@@ -20,9 +20,14 @@
 name: Release
 
 on:
+  # Deliberately NOT `tags: ["v*"]`. Creating a release from the UI creates the
+  # tag and publishes the release, so a tag filter here fires a second run for
+  # the same commit — and both runs share a concurrency group, because
+  # `github.ref` is the tag either way. That is not a cosmetic duplicate: it
+  # cancelled the release run and left the tag-push run, which by design never
+  # publishes, so v0.0.1.dev1 built cleanly and reached nothing.
   push:
     branches: [main]
-    tags: ["v*"]
   pull_request:
   release:
     types: [published]
@@ -35,7 +40,10 @@ permissions:
 
 concurrency:
   group: release-${{ github.ref }}
-  cancel-in-progress: true
+  # Superseding a build on a busy branch is fine; interrupting an upload is not.
+  # A run that can publish must never be cancellable — belt and braces now that
+  # the duplicate-run cause is gone too.
+  cancel-in-progress: ${{ github.event_name != 'release' }}
 
 jobs:
   build:

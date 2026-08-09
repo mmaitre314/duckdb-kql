@@ -178,3 +178,29 @@ def test_untagged_builds_do_not_get_a_local_version() -> None:
 
     raw = read_pyproject()["tool"]["hatch"]["version"]["raw-options"]
     assert raw.get("local_scheme") == "no-local-version"
+
+
+def test_a_release_produces_exactly_one_run() -> None:
+    """Creating a release must not also fire a tag-push run.
+
+    Publishing a release from the UI creates the tag *and* publishes the release,
+    so a `tags:` filter on `push` fires a second run for the same commit. Both
+    runs get `github.ref` = the tag, so they share the concurrency group, and
+    `cancel-in-progress` then kills one of them. It killed the release run — the
+    only one that can publish — and left the tag-push run, which by design never
+    does. v0.0.1.dev1 built green and reached PyPI never.
+    """
+    push = _triggers(_load("release.yml"))["push"]
+    assert "tags" not in push, (
+        "the release workflow builds on tag pushes again, which duplicates the "
+        "run a release already produces and lets one cancel the other"
+    )
+
+
+def test_a_publishing_run_cannot_be_cancelled() -> None:
+    """Superseding a build is fine; interrupting an upload is not."""
+    cancel = str(_load("release.yml")["concurrency"]["cancel-in-progress"])
+    assert "github.event_name != 'release'" in cancel, (
+        f"a release run is cancellable ({cancel}) — a newer run could kill it "
+        "mid-publish, or before it starts"
+    )
