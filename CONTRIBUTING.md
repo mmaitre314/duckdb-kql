@@ -159,16 +159,13 @@ That is it. The release workflow builds the sdist and wheel, verifies the built
 version equals the tag, smoke-tests the wheel in a clean environment, uploads to
 PyPI via [Trusted Publishing][oidc], and attaches the artifacts to the release.
 
-Optional, and worth it for a first release or anything unusual:
+Two things worth doing around it:
 
-- **Dry run to TestPyPI.** *Actions → Release → Run workflow*, tick *Publish to
-  TestPyPI*. Untagged commits build as `X.Y.Z.devN`, so this works on any commit.
-  Then, in a clean environment:
-
-  ```bash
-  pip install -i https://test.pypi.org/simple/ \
-      --extra-index-url https://pypi.org/simple duckdb-kql
-  ```
+- **Rehearse with a manual run** for a first release, or after any packaging
+  change: *Actions → Release → Run workflow*. That does everything except
+  publish — build, metadata check, and the clean-environment smoke test of the
+  wheel — so a packaging break surfaces without spending a version number. The
+  same build also runs on every push and pull request.
 
 - **Edit the generated notes** before publishing. There is no `CHANGELOG.md`;
   the release notes and the git history are the record. *Generate release notes*
@@ -183,12 +180,11 @@ can do:
 1. Register the PyPI publisher (a *pending* publisher, since the project does not
    exist yet) at <https://pypi.org/manage/account/publishing/>: owner
    `mmaitre314`, repository `duckdb-kql`, workflow `release.yml`, environment
-   `pypi`. Repeat on <https://test.pypi.org> with environment `testpypi` for the
-   dry-run lane.
-2. Create the `pypi` and `testpypi` environments under **Settings →
-   Environments**. The names must match the publisher registration, because PyPI
-   checks the environment in the OIDC claim. Adding yourself as a required
-   reviewer on `pypi` makes every upload a deliberate two-step action.
+   `pypi`.
+2. Create the `pypi` environment under **Settings → Environments**. The name
+   must match the publisher registration, because PyPI checks the environment in
+   the OIDC claim. Adding yourself as a required reviewer on it makes every
+   upload a deliberate two-step action.
 
 ## Licensing
 

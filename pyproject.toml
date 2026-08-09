@@ -86,10 +86,11 @@ Issues = "https://github.com/mmaitre314/duckdb-kql/issues"
 source = "vcs"
 
 [tool.hatch.version.raw-options]
-# Without this an untagged build gets a PEP 440 *local* version (`+g1a2b3c`),
-# which every index rejects on upload — so the TestPyPI dry run would fail on a
-# commit that has no tag, which is exactly when you want to dry-run. Dropping
-# the local segment leaves `0.2.0.dev4`, which uploads fine.
+# setuptools_scm's default appends a PEP 440 *local* segment (`+g1a2b3c`) to any
+# untagged build. Only tagged builds are ever published, so this is a matter of
+# taste rather than necessity — but a local version cannot be uploaded to any
+# index and puts a `+` in the wheel filename, which is a poor trade for the
+# commit hash. Untagged builds are plain `0.2.0.dev4`.
 local_scheme = "no-local-version"
 
 # Written at build time so the installed package can report its own version

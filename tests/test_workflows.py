@@ -110,12 +110,10 @@ def test_publishing_requires_a_published_release() -> None:
 
 def test_publishing_uses_trusted_publishing_not_a_stored_token() -> None:
     """OIDC means there is no long-lived credential in this repository to leak."""
-    jobs = _load("release.yml")["jobs"]
-    for name in ("publish-to-pypi", "publish-to-testpypi"):
-        job = jobs[name]
-        assert job["permissions"]["id-token"] == "write", f"{name} lost OIDC access"
-        steps = "\n".join(str(s) for s in job["steps"])
-        assert "password" not in steps, f"{name} appears to use a stored token"
+    job = _load("release.yml")["jobs"]["publish-to-pypi"]
+    assert job["permissions"]["id-token"] == "write", "publishing lost OIDC access"
+    steps = "\n".join(str(s) for s in job["steps"])
+    assert "password" not in steps, "publishing appears to use a stored token"
 
 
 def test_readme_badges_point_at_workflows_that_exist() -> None:
@@ -169,10 +167,12 @@ def test_the_version_is_not_written_down_anywhere() -> None:
 
 
 def test_untagged_builds_do_not_get_a_local_version() -> None:
-    """A `+g1a2b3c` local version is rejected by every index on upload.
+    """Every version this project produces stays a plain PEP 440 public version.
 
-    Without this the TestPyPI dry run fails on exactly the commits it exists to
-    rehearse — the ones that have no tag yet.
+    setuptools_scm's default appends `+g1a2b3c` to an untagged build. Nothing
+    uploads untagged builds any more, so this is no longer load-bearing — but a
+    local segment makes a version unpublishable to any index and puts a `+` in
+    the wheel filename, and neither is worth the commit hash it buys.
     """
     from conftest import read_pyproject  # noqa: PLC0415
 
