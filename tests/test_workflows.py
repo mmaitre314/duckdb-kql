@@ -130,3 +130,51 @@ def test_readme_badges_point_at_workflows_that_exist() -> None:
 
     missing = sorted(name for name in referenced if not (WORKFLOWS / name).is_file())
     assert not missing, f"README badges reference missing workflows: {missing}"
+
+
+def test_the_release_build_checks_out_the_tags() -> None:
+    """hatch-vcs reads the version out of git, so the tags have to be there.
+
+    This replaced a job that compared the tag against two hard-coded version
+    strings. Deriving the version instead removes the disagreement entirely, but
+    it introduces one failure that is worse for being quiet: `actions/checkout`
+    is shallow by default, hatch-vcs then sees no tag, and the build publishes a
+    dev version under a release's name. A PyPI version number cannot be reused,
+    so this has to fail in CI rather than on the index.
+    """
+    build = _load("release.yml")["jobs"]["build"]
+    checkout = next(
+        s for s in build["steps"] if str(s.get("uses", "")).startswith("actions/checkout")
+    )
+    assert checkout.get("with", {}).get("fetch-depth") == 0, (
+        "the release build does a shallow checkout, so hatch-vcs cannot see the "
+        "tag and would publish a dev version"
+    )
+
+
+def test_the_version_is_not_written_down_anywhere() -> None:
+    """One source of truth: the tag.
+
+    A literal version in pyproject.toml is what made a release a multi-file
+    edit, and what made it possible for the tag and the package to disagree.
+    """
+    from conftest import read_pyproject  # noqa: PLC0415
+
+    project = read_pyproject()["project"]
+    assert "version" not in project, (
+        "pyproject.toml pins a literal version again; the tag should be the "
+        "only source (dynamic = ['version'])"
+    )
+    assert "version" in project.get("dynamic", [])
+
+
+def test_untagged_builds_do_not_get_a_local_version() -> None:
+    """A `+g1a2b3c` local version is rejected by every index on upload.
+
+    Without this the TestPyPI dry run fails on exactly the commits it exists to
+    rehearse — the ones that have no tag yet.
+    """
+    from conftest import read_pyproject  # noqa: PLC0415
+
+    raw = read_pyproject()["tool"]["hatch"]["version"]["raw-options"]
+    assert raw.get("local_scheme") == "no-local-version"

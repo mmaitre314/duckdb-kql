@@ -6,6 +6,10 @@ __pycache__/
 # C extensions
 *.so
 
+# Generated at build time by hatch-vcs from the git tag. Never commit it —
+# a stale copy would silently win over the real version.
+src/duckdb_kql/_version.py
+
 # Distribution / packaging
 .Python
 build/

@@ -64,7 +64,21 @@ if TYPE_CHECKING:
     from .schema import Schema
     from .translate import TranslationResult
 
-__version__ = "0.0.1.dev0"
+try:
+    # Written by hatch-vcs at build time from the git tag (pyproject.toml).
+    from ._version import __version__
+except ImportError:  # pragma: no cover - a source tree that was never built
+    # Running straight out of `src/` with nothing installed — several of the
+    # dev tools do exactly that. Ask the installed distribution, and if there
+    # isn't one, say so with a version that could not be mistaken for a release
+    # rather than inventing a plausible number.
+    from importlib.metadata import PackageNotFoundError
+    from importlib.metadata import version as _installed_version
+
+    try:
+        __version__ = _installed_version("duckdb-kql")
+    except PackageNotFoundError:
+        __version__ = "0.0.0.dev0+unbuilt"
 
 __all__ = [
     # Layer 0 — KQL text, no database

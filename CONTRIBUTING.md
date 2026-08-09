@@ -142,30 +142,52 @@ tracker.
 
 ## Releasing (maintainers)
 
-Publishing is automated, but deliberately not automatic: a tag builds and checks,
-and only a **published GitHub Release** uploads to PyPI.
+**The git tag is the version.** There is no file to bump: `hatch-vcs` reads the
+tag at build time and writes it into the distribution, so the tag and the package
+cannot disagree.
 
-1. Move `CHANGELOG.md`'s `Unreleased` section under the new version, with the
-   date.
-2. Bump the version in **both** `pyproject.toml` and
-   `src/duckdb_kql/__init__.py`. CI compares them against the tag and fails the
-   release if any of the three disagree, so there is no silent mismatch — but
-   it is quicker to get right the first time.
-3. Optionally dry-run: **Actions → Release → Run workflow**, with
-   *Publish to TestPyPI* checked. Then
-   `pip install -i https://test.pypi.org/simple/ duckdb-kql` in a clean
-   environment.
-4. Tag and push: `git tag v0.1.0 && git push origin v0.1.0`. This builds and
-   runs the version check; it does not publish, so a bad tag costs nothing.
-5. Publish the GitHub Release for that tag. That is what uploads to PyPI, via
-   [Trusted Publishing][oidc] — there is no API token stored in this repository.
-   The built artifacts are attached to the release afterwards.
+Publishing is automated but deliberately not automatic — only a **published
+GitHub Release** uploads to PyPI. A tag on its own builds and checks; it does
+not publish, so a bad tag costs nothing.
 
-The first release needs the publisher registered on PyPI first
-(`owner: mmaitre314`, `repository: duckdb-kql`, `workflow: release.yml`,
-`environment: pypi`), and a `pypi` environment configured on the repository.
+The whole procedure:
 
-[oidc]: https://docs.pypi.org/trusted-publishers/
+1. Go to **Releases → Draft a new release**, create the tag `vX.Y.Z` on `main`,
+   click **Generate release notes**, and publish.
+
+That is it. The release workflow builds the sdist and wheel, verifies the built
+version equals the tag, smoke-tests the wheel in a clean environment, uploads to
+PyPI via [Trusted Publishing][oidc], and attaches the artifacts to the release.
+
+Optional, and worth it for a first release or anything unusual:
+
+- **Dry run to TestPyPI.** *Actions → Release → Run workflow*, tick *Publish to
+  TestPyPI*. Untagged commits build as `X.Y.Z.devN`, so this works on any commit.
+  Then, in a clean environment:
+
+  ```bash
+  pip install -i https://test.pypi.org/simple/ \
+      --extra-index-url https://pypi.org/simple duckdb-kql
+  ```
+
+- **Update `CHANGELOG.md`** before tagging. Nothing enforces it — the release no
+  longer gates on it, because a release that is blocked on a doc edit is a
+  release someone does by hand at the worst moment. It is still the place where
+  a behaviour change gets explained to the people it affects, and generated
+  release notes are a list of commits, not an explanation.
+
+**Before the very first release**, two one-time setup steps that only an owner
+can do:
+
+1. Register the PyPI publisher (a *pending* publisher, since the project does not
+   exist yet) at <https://pypi.org/manage/account/publishing/>: owner
+   `mmaitre314`, repository `duckdb-kql`, workflow `release.yml`, environment
+   `pypi`. Repeat on <https://test.pypi.org> with environment `testpypi` for the
+   dry-run lane.
+2. Create the `pypi` and `testpypi` environments under **Settings →
+   Environments**. The names must match the publisher registration, because PyPI
+   checks the environment in the OIDC claim. Adding yourself as a required
+   reviewer on `pypi` makes every upload a deliberate two-step action.
 
 ## Licensing
 

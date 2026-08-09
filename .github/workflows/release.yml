@@ -14,9 +14,9 @@
 #     workflow:    release.yml
 #     environment: pypi          (and `testpypi` for the TestPyPI publisher)
 #
-# Release checklist is in CONTRIBUTING.md; the short version is: bump the
-# version in pyproject.toml and src/duckdb_kql/__init__.py, move the CHANGELOG's
-# Unreleased section under the new version, tag, and publish the GitHub Release.
+# The version comes from the git tag (hatch-vcs, see pyproject.toml). Publishing
+# a GitHub Release for `v0.2.0` is the whole procedure — there is no file to bump
+# and nothing that can disagree with the tag.
 name: Release
 
 on:
@@ -47,6 +47,12 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+        with:
+          # hatch-vcs derives the version from the git tag, so the tags have to
+          # be here. The default shallow clone has none of them, and the failure
+          # is silent: the build succeeds and publishes `0.1.dev1` instead of
+          # `0.1.0`.
+          fetch-depth: 0
 
       - uses: actions/setup-python@v5
         with:
@@ -60,6 +66,34 @@ jobs:
 
       - name: Check the metadata renders
         run: python -m twine check --strict dist/*
+
+      # The old job compared the tag against two files. There are no files left
+      # to disagree, but one failure mode survives and it is silent: if the tags
+      # are missing from the checkout, hatch-vcs falls back to a dev version and
+      # the build happily publishes `0.1.dev1` as if it were `0.1.0`. On PyPI
+      # that number is then spent forever.
+      - name: The built version is the tag
+        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'release'
+        run: |
+          python - <<'PY'
+          import os
+          import sys
+          from pathlib import Path
+
+          from packaging.utils import parse_wheel_filename
+          from packaging.version import Version
+
+          tag = Version(os.environ["GITHUB_REF_NAME"].lstrip("v"))
+          wheel = next(Path("dist").glob("*.whl"))
+          # Compare parsed versions, not strings: `v1.0.0-rc1` and the `1.0.0rc1`
+          # in the filename are the same version spelled two ways.
+          built = parse_wheel_filename(wheel.name)[1]
+
+          if built != tag:
+              sys.exit(f"::error::tag says {tag}, built distribution is {built} "
+                       "— the checkout is probably missing its tags")
+          print(f"built {built} from tag {tag}")
+          PY
 
       # The wheel is what almost everyone installs, so it is what gets smoke
       # tested — installed into a clean environment from the built artifact
@@ -102,53 +136,6 @@ jobs:
           path: dist/
           if-no-files-found: error
 
-  # A tag says a release is intended, so the thing being released has to be
-  # coherent: the tag, the package version and the changelog all naming the same
-  # release. Checked before publishing, not after.
-  version-matches-the-tag:
-    name: Version matches the tag
-    needs: build
-    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'release'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.13"
-
-      - name: Compare the tag, pyproject and __version__
-        run: |
-          python - <<'PY'
-          import os
-          import re
-          import sys
-          import tomllib
-          from pathlib import Path
-
-          tag = os.environ["GITHUB_REF_NAME"].lstrip("v")
-          pyproject = tomllib.loads(Path("pyproject.toml").read_text())["project"]["version"]
-          source = re.search(
-              r'^__version__ = "([^"]+)"',
-              Path("src/duckdb_kql/__init__.py").read_text(),
-              re.MULTILINE,
-          )
-          assert source, "src/duckdb_kql/__init__.py no longer defines __version__"
-
-          problems = []
-          if pyproject != tag:
-              problems.append(f"pyproject.toml says {pyproject}, tag says {tag}")
-          if source.group(1) != tag:
-              problems.append(f"__version__ is {source.group(1)}, tag says {tag}")
-          if f"[{tag}]" not in Path("CHANGELOG.md").read_text():
-              problems.append(f"CHANGELOG.md has no section for {tag}")
-
-          if problems:
-              sys.exit("::error::" + "; ".join(problems))
-          print(f"tag, package and changelog all agree on {tag}")
-          PY
-
   publish-to-testpypi:
     name: Publish to TestPyPI
     needs: build
@@ -175,7 +162,7 @@ jobs:
 
   publish-to-pypi:
     name: Publish to PyPI
-    needs: [build, version-matches-the-tag]
+    needs: build
     # Only a published GitHub Release publishes. A tag push builds and checks
     # but does not upload, so tagging is recoverable and releasing is deliberate.
     if: github.event_name == 'release' && github.event.action == 'published'
