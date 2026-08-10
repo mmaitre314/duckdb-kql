@@ -67,6 +67,12 @@ dev = [
     # tests/test_workflows.py reads the GitHub Actions definitions.
     "pyyaml",
     "types-PyYAML",
+    # tests/test_demo_notebook.py re-executes demo/duckdb-kql-demo.ipynb. These
+    # are only here so that check actually runs: skipping it in CI would leave
+    # the demo's committed outputs asserting things nothing verifies.
+    "nbformat",
+    "nbclient",
+    "ipykernel",
 ]
 
 # Translating at build time means the *output* has no dependency on this
@@ -92,6 +98,19 @@ source = "vcs"
 # index and puts a `+` in the wheel filename, which is a poor trade for the
 # commit hash. Untagged builds are plain `0.2.0.dev4`.
 local_scheme = "no-local-version"
+# TAG RELEASES AS PLAIN VERSIONS — `v0.2.0`, or `v0.2.0rc1` for a pre-release.
+# A tag ending in `.devN` cannot be built forward from *at all*: setuptools_scm
+# uses `.devN` itself for the distance from the last tag, so it has nothing left
+# to bump, and every later commit fails with
+#
+#   ValueError: choosing custom numbers for the `.devX` distance is not
+#   supported. The 0.0.1.dev1 can't be bumped
+#
+# No `version_scheme` fixes this. `post-release` gets further and then emits
+# `0.0.1.dev1.post1`, which PEP 440 rejects because `.dev` has to come last.
+# The tag has to go. `v0.0.1.dev1` was one, and it broke `main` until it was
+# deleted; the release workflow now refuses such a tag up front rather than
+# failing later with that traceback.
 
 # Written at build time so the installed package can report its own version
 # without paying an importlib.metadata lookup on import. Generated, so it is

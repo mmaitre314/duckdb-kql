@@ -64,6 +64,25 @@ jobs:
           python-version: "3.13"
           cache: pip
 
+      # One bad tag poisons every later build, and the failure names neither the
+      # tag nor the fix — it is a traceback about bumping a `.devX` distance,
+      # raised while computing the version of an unrelated commit. Checked here,
+      # where the message can say which tag to delete.
+      - name: Reject a tag nothing can be built from
+        run: |
+          nearest=$(git describe --tags --abbrev=0 2>/dev/null || true)
+          if [ -z "$nearest" ]; then
+            echo "no tags yet"
+          elif case "$nearest" in *.dev*|*.post*) true ;; *) false ;; esac; then
+            echo "::error::nearest tag '$nearest' ends in .dev/.post. setuptools_scm"\
+                 "uses those fields itself and cannot build forward from one, so this"\
+                 "tag breaks every build after it. Delete it and tag a plain version"\
+                 "(v0.2.0, or v0.2.0rc1 for a pre-release)."
+            exit 1
+          else
+            echo "nearest tag: $nearest"
+          fi
+
       - name: Build
         run: |
           python -m pip install --upgrade build twine

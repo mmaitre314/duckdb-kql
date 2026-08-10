@@ -24,7 +24,7 @@ Docker, DuckDB and the emulator yourself.
 Before opening a pull request:
 
 ```bash
-ruff check src tools tests
+ruff check src tools tests demo
 mypy
 pytest
 ```
@@ -87,6 +87,7 @@ report waiting to be filed against someone else's report.
 | Links in the docs resolve | Including the absolute ones the README uses for PyPI. |
 | A consumer's type checker sees real types | The package ships `py.typed`, so `Any` in a public signature is a promise broken silently. `tests/test_typing.py` checks from the outside; `mypy` alone cannot. |
 | The committed parser matches `grammar/Kql.g4` | The generated parser is committed so installs need no Java. |
+| The demo notebook still executes | `demo/` ships with its outputs, so a broken demo keeps looking authoritative. |
 
 ## The emulator
 
@@ -154,6 +155,13 @@ The whole procedure:
 
 1. Go to **Releases → Draft a new release**, create the tag `vX.Y.Z` on `main`,
    click **Generate release notes**, and publish.
+
+**Tag plain versions only** — `v0.2.0`, or `v0.2.0rc1` for a pre-release. A tag
+ending in `.devN` or `.postN` cannot be built forward from: `setuptools_scm` uses
+those fields itself to express distance from the last tag, so it has nothing left
+to bump and *every subsequent commit* fails to build. `v0.0.1.dev1` did exactly
+that. The release workflow now rejects such a tag up front, with a message naming
+the tag to delete.
 
 That is it. The release workflow builds the sdist and wheel, verifies the built
 version equals the tag, smoke-tests the wheel in a clean environment, uploads to
