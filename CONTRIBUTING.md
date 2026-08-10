@@ -156,12 +156,14 @@ The whole procedure:
 1. Go to **Releases → Draft a new release**, create the tag `vX.Y.Z` on `main`,
    click **Generate release notes**, and publish.
 
-**Tag plain versions only** — `v0.2.0`, or `v0.2.0rc1` for a pre-release. A tag
-ending in `.devN` or `.postN` cannot be built forward from: `setuptools_scm` uses
-those fields itself to express distance from the last tag, so it has nothing left
-to bump and *every subsequent commit* fails to build. `v0.0.1.dev1` did exactly
-that. The release workflow now rejects such a tag up front, with a message naming
-the tag to delete.
+**The tag is used verbatim**, so any PEP 440 version works — `v0.2.0`,
+`v0.2.0rc1`, `v0.0.1.dev1`. This is `version_scheme = "only-version"` in
+`pyproject.toml`, and it is deliberate: `setuptools_scm`'s default invents a
+version for untagged commits by guessing the next release and appending
+`.dev<distance>`, which makes a tag that already ends in `.devN` unbuildable and
+breaks *every commit after it*. Taking the tag as written avoids the guess
+entirely; untagged builds are told apart by a local segment naming the commit
+(`0.0.1.dev1+gfe285ea`) rather than by counting commits.
 
 That is it. The release workflow builds the sdist and wheel, verifies the built
 version equals the tag, smoke-tests the wheel in a clean environment, uploads to

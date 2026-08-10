@@ -166,18 +166,29 @@ def test_the_version_is_not_written_down_anywhere() -> None:
     assert "version" in project.get("dynamic", [])
 
 
-def test_untagged_builds_do_not_get_a_local_version() -> None:
-    """Every version this project produces stays a plain PEP 440 public version.
+def test_the_version_is_taken_from_the_tag_verbatim() -> None:
+    """`only-version` is load-bearing, and its absence fails at a distance.
 
-    setuptools_scm's default appends `+g1a2b3c` to an untagged build. Nothing
-    uploads untagged builds any more, so this is no longer load-bearing — but a
-    local segment makes a version unpublishable to any index and puts a `+` in
-    the wheel filename, and neither is worth the commit hash it buys.
+    setuptools_scm's default invents a version for untagged commits by guessing
+    the next release and appending `.dev<distance>`. That guess is what makes a
+    tag ending in `.devN` unbuildable — the field is already taken — and the
+    failure lands on *later* commits, as a traceback about bumping a version
+    nobody was asking about. `v0.0.1.dev1` broke `main` that way.
+
+    `only-version` returns the tag as written and lets the local segment
+    (`+g1a2b3c`) distinguish builds, so any PEP 440 tag works.
     """
     from conftest import read_pyproject  # noqa: PLC0415
 
     raw = read_pyproject()["tool"]["hatch"]["version"]["raw-options"]
-    assert raw.get("local_scheme") == "no-local-version"
+    assert raw.get("version_scheme") == "only-version", (
+        "the version scheme guesses again; a tag like v0.0.1.dev1 will break "
+        "every build after it"
+    )
+    assert "local_scheme" not in raw, (
+        "the local segment is what tells an untagged build from the release it "
+        "follows, now that the distance is not in the version"
+    )
 
 
 def test_a_release_produces_exactly_one_run() -> None:

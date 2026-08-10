@@ -92,25 +92,26 @@ Issues = "https://github.com/mmaitre314/duckdb-kql/issues"
 source = "vcs"
 
 [tool.hatch.version.raw-options]
-# setuptools_scm's default appends a PEP 440 *local* segment (`+g1a2b3c`) to any
-# untagged build. Only tagged builds are ever published, so this is a matter of
-# taste rather than necessity — but a local version cannot be uploaded to any
-# index and puts a `+` in the wheel filename, which is a poor trade for the
-# commit hash. Untagged builds are plain `0.2.0.dev4`.
-local_scheme = "no-local-version"
-# TAG RELEASES AS PLAIN VERSIONS — `v0.2.0`, or `v0.2.0rc1` for a pre-release.
-# A tag ending in `.devN` cannot be built forward from *at all*: setuptools_scm
-# uses `.devN` itself for the distance from the last tag, so it has nothing left
-# to bump, and every later commit fails with
+# Take the tag and nothing else.
 #
-#   ValueError: choosing custom numbers for the `.devX` distance is not
-#   supported. The 0.0.1.dev1 can't be bumped
+# setuptools_scm's default (`guess-next-dev`) has to invent a version for
+# *untagged* commits too, and it does that by guessing the next release and
+# marking it as a pre-release of it: `v0.1.0` plus four commits becomes
+# `0.1.1.dev4`, where `dev4` is the distance. That is why a tag ending in
+# `.devN` is fatal to it — the field it needs is already occupied, so there is
+# nothing to bump and every later commit fails to build.
 #
-# No `version_scheme` fixes this. `post-release` gets further and then emits
-# `0.0.1.dev1.post1`, which PEP 440 rejects because `.dev` has to come last.
-# The tag has to go. `v0.0.1.dev1` was one, and it broke `main` until it was
-# deleted; the release workflow now refuses such a tag up front rather than
-# failing later with that traceback.
+# We do not need the guess. `only-version` returns the tag verbatim, and the
+# *local* segment does the job of telling builds apart: a release is exactly
+# `0.0.1.dev1`, while a commit past it is `0.0.1.dev1+gfe285eae7`, naming the
+# commit rather than counting to it. So `v0.0.1.dev1` is a perfectly good tag
+# here, and so is any other PEP 440 version.
+#
+# The trade, stated: commits between two tags no longer sort among themselves —
+# they all share a release segment and differ only in the local part. For dev
+# builds the exact commit is the more useful fact, and nothing publishes them:
+# an index rejects local versions, and only a release event uploads anything.
+version_scheme = "only-version"
 
 # Written at build time so the installed package can report its own version
 # without paying an importlib.metadata lookup on import. Generated, so it is

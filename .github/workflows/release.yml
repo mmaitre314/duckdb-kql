@@ -54,34 +54,16 @@ jobs:
       - uses: actions/checkout@v4
         with:
           # hatch-vcs derives the version from the git tag, so the tags have to
-          # be here. The default shallow clone has none of them, and the failure
-          # is silent: the build succeeds and publishes `0.1.dev1` instead of
-          # `0.1.0`.
+          # be here. The default shallow clone has none of them, and the build
+          # still succeeds — it just produces `0.0+g1a2b3c` instead of the
+          # release. The step below catches that; an index would reject the
+          # local segment anyway, but not before the run looked green.
           fetch-depth: 0
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
           cache: pip
-
-      # One bad tag poisons every later build, and the failure names neither the
-      # tag nor the fix — it is a traceback about bumping a `.devX` distance,
-      # raised while computing the version of an unrelated commit. Checked here,
-      # where the message can say which tag to delete.
-      - name: Reject a tag nothing can be built from
-        run: |
-          nearest=$(git describe --tags --abbrev=0 2>/dev/null || true)
-          if [ -z "$nearest" ]; then
-            echo "no tags yet"
-          elif case "$nearest" in *.dev*|*.post*) true ;; *) false ;; esac; then
-            echo "::error::nearest tag '$nearest' ends in .dev/.post. setuptools_scm"\
-                 "uses those fields itself and cannot build forward from one, so this"\
-                 "tag breaks every build after it. Delete it and tag a plain version"\
-                 "(v0.2.0, or v0.2.0rc1 for a pre-release)."
-            exit 1
-          else
-            echo "nearest tag: $nearest"
-          fi
 
       - name: Build
         run: |
@@ -92,10 +74,10 @@ jobs:
         run: python -m twine check --strict dist/*
 
       # The old job compared the tag against two files. There are no files left
-      # to disagree, but one failure mode survives and it is silent: if the tags
-      # are missing from the checkout, hatch-vcs falls back to a dev version and
-      # the build happily publishes `0.1.dev1` as if it were `0.1.0`. On PyPI
-      # that number is then spent forever.
+      # to disagree, but one failure mode survives: if the tags are missing from
+      # the checkout, the version is computed from no tag at all and the run
+      # still goes green. A PyPI version number cannot be reused, so the
+      # published artifact has to be checked against the tag before it ships.
       - name: The built version is the tag
         if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'release'
         run: |
