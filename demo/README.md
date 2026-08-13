@@ -10,6 +10,22 @@ in-process, and nothing is downloaded.
 
 ## Running it
 
+### In a container, with nothing installed locally
+
+[`.devcontainer/demo/`](../.devcontainer/demo/devcontainer.json) is a
+**user's** environment, not a contributor's: a stock Python image plus
+`pip install duckdb-kql[all] ipykernel`, and none of the development machinery —
+no JDK, no Docker-in-Docker, no Kusto Emulator, no editable install of this
+repository. The notebook therefore exercises the package as published, not the
+working tree.
+
+Open the repository in VS Code, **Reopen in Container**, and pick
+*duckdb-kql demo (PyPI)*. Or start it in the cloud:
+
+[![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/mmaitre314/duckdb-kql?devcontainer_path=.devcontainer%2Fdemo%2Fdevcontainer.json)
+
+### Locally
+
 The notebook installs the package itself — from PyPI if it is published there,
 and otherwise from the checkout it is sitting in — so this is enough:
 
