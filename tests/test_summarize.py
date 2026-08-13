@@ -38,7 +38,7 @@ WITH_NULL = "datatable(x:int, y:string)[1,'a', int(null),'a', 3,'b']"
 
 def _run(kql: str):
     con = duckdb.connect()
-    rel = duckdb_kql.sql(con, kql)
+    rel = duckdb_kql.kql(con, kql)
     return list(rel.columns), rel.fetchall()
 
 

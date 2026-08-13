@@ -77,7 +77,7 @@ def _f(
 # that honours an offset -- and try_strptime only sees what it rejects.
 #
 # This branch reads the session TimeZone for offset-less input, so the emitted
-# SQL is correct only under `SET TimeZone='UTC'` (R8). duckdb_kql.sql() sets it;
+# SQL is correct only under `SET TimeZone='UTC'` (R8). duckdb_kql.kql() sets it;
 # to_sql() documents it for callers running the SQL themselves.
 _DATETIME_FORMATS = (
     "%m-%d-%Y", "%m/%d/%Y", "%m.%d.%Y",

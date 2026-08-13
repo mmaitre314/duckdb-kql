@@ -25,7 +25,7 @@ duckdb = pytest.importorskip("duckdb")
 def _one(kql: str, tz: str = "UTC"):
     con = duckdb.connect()
     con.execute(f"SET TimeZone='{tz}'")
-    return duckdb_kql.sql(con, kql).fetchone()[0]
+    return duckdb_kql.kql(con, kql).fetchone()[0]
 
 
 # ADX: print todatetime('12-02-2022') -> 2022-12-02T00:00:00Z

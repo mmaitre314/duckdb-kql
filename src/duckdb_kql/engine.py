@@ -45,7 +45,7 @@ Parameters = dict[str, Any]
 #: Table name -> column names, as :func:`schema` returns it.
 Schema = dict[str, list[str]]
 
-__all__ = ["connect", "sql", "execute", "df", "arrow", "schema", "Parameters", "Schema"]
+__all__ = ["connect", "kql", "execute", "df", "arrow", "schema", "Parameters", "Schema"]
 
 
 def connect(database: str = ":memory:", **kwargs: Any) -> DuckDBPyConnection:
@@ -77,12 +77,16 @@ def _require_duckdb() -> Any:
     return duckdb
 
 
-def sql(
+def kql(
     con: DuckDBPyConnection,
-    kql: str,
+    query: str,
     parameters: Parameters | None = None,
 ) -> DuckDBPyRelation:
-    """Execute *kql* against a DuckDB connection, returning a relation.
+    """Execute the KQL *query* against a DuckDB connection, returning a relation.
+
+    Named for what it takes. It was ``sql()``, which read as though the argument
+    were SQL — in a package whose entire job is that the two are not the same.
+    The argument is KQL; :func:`duckdb_kql.to_sql` is the one that deals in SQL.
 
     Sets ``TimeZone='UTC'`` on *con* first. This changes connection state
     deliberately: leaving it to the caller means a machine in a non-UTC zone
@@ -95,40 +99,40 @@ def sql(
     declarations, by KQL name. They are bound by DuckDB, never substituted into
     the SQL, so a caller-supplied string cannot become part of the query::
 
-        duckdb_kql.sql(
+        duckdb_kql.kql(
             con,
             "declare query_parameters(state:string);"
             " StormEvents | where State == state",
             {"state": user_input},   # safe whatever user_input contains
         )
     """
-    translated, bound = _prepare(con, kql, parameters)
+    translated, bound = _prepare(con, query, parameters)
     return con.sql(translated, params=bound) if bound else con.sql(translated)
 
 
 def execute(
     con: DuckDBPyConnection,
-    kql: str,
+    query: str,
     parameters: Parameters | None = None,
 ) -> DuckDBPyConnection:
-    """Execute *kql* and return the connection, mirroring ``con.execute``.
+    """Execute the KQL *query* and return the connection, mirroring ``con.execute``.
 
-    Use this for its side effect or its cursor; use :func:`sql` when you want a
+    Use this for its side effect or its cursor; use :func:`kql` when you want a
     relation to keep composing.
     """
-    translated, bound = _prepare(con, kql, parameters)
+    translated, bound = _prepare(con, query, parameters)
     return con.execute(translated, bound) if bound else con.execute(translated)
 
 
 def _prepare(
-    con: DuckDBPyConnection, kql: str, parameters: Parameters | None
+    con: DuckDBPyConnection, query: str, parameters: Parameters | None
 ) -> tuple[str, Parameters]:
-    """Translate *kql* and get *con* into the state the SQL assumes."""
+    """Translate the KQL *query* and get *con* into the state the SQL assumes."""
     from . import to_sql
     from .errors import KqlSchemaError
 
     con.execute("SET TimeZone='UTC'")
-    translated: TranslationResult = to_sql(kql, schema=schema(con), parameters=parameters)
+    translated: TranslationResult = to_sql(query, schema=schema(con), parameters=parameters)
 
     if translated.unbound:
         # DuckDB would raise too, but naming a generated slot rather than the
@@ -142,20 +146,20 @@ def _prepare(
 
 def df(
     con: DuckDBPyConnection,
-    kql: str,
+    query: str,
     parameters: Parameters | None = None,
 ) -> pd.DataFrame:
-    """Execute *kql* and return a pandas DataFrame."""
-    return sql(con, kql, parameters).df()
+    """Execute the KQL *query* and return a pandas DataFrame."""
+    return kql(con, query, parameters).df()
 
 
 def arrow(
     con: DuckDBPyConnection,
-    kql: str,
+    query: str,
     parameters: Parameters | None = None,
 ) -> pa.Table:
-    """Execute *kql* and return a pyarrow Table."""
-    return sql(con, kql, parameters).arrow()
+    """Execute the KQL *query* and return a pyarrow Table."""
+    return kql(con, query, parameters).arrow()
 
 
 def schema(con: DuckDBPyConnection) -> Schema:

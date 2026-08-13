@@ -42,7 +42,7 @@ con.sql("""
     ) t(Host, Level, Timestamp)
 """)
 
-rel = duckdb_kql.sql(con, """
+rel = duckdb_kql.kql(con, """
     Events
     | where Level == "Error"
     | summarize Errors = count() by Host
@@ -53,7 +53,7 @@ print(rel.fetchall())
 # [('web-01', 2), ('web-02', 1)]
 ```
 
-`duckdb_kql.sql()` returns a DuckDB *relation*, so you can keep composing with
+`duckdb_kql.kql()` returns a DuckDB *relation*, so you can keep composing with
 DuckDB's own API — `.fetchall()`, `.df()`, `.arrow()`, `.limit(10)`, or feeding
 it into another query.
 
@@ -83,7 +83,7 @@ con = duckdb_kql.connect("analytics.duckdb")
 con.sql("CREATE VIEW Logs AS SELECT * FROM 'logs/*.parquet'")
 con.sql("CREATE VIEW Signins AS SELECT * FROM read_csv('signins.csv')")
 
-duckdb_kql.sql(con, "Logs | where Level == 'Error' | take 100")
+duckdb_kql.kql(con, "Logs | where Level == 'Error' | take 100")
 ```
 
 A pandas DataFrame works too — register it under the name your KQL uses:
@@ -93,7 +93,7 @@ import pandas as pd
 
 frame = pd.read_parquet("events.parquet")
 con.register("Events", frame)
-duckdb_kql.sql(con, "Events | summarize n = count() by Level")
+duckdb_kql.kql(con, "Events | summarize n = count() by Level")
 ```
 
 Table and column names are **case-sensitive**, matching KQL. `Events` and
@@ -104,7 +104,7 @@ Table and column names are **case-sensitive**, matching KQL. `Events` and
 Do not build queries with f-strings. Declare parameters and pass values:
 
 ```python
-rel = duckdb_kql.sql(con, """
+rel = duckdb_kql.kql(con, """
     declare query_parameters(host:string, since:datetime);
     Events
     | where Host == host and Timestamp > since
@@ -156,7 +156,7 @@ the placeholders) and `.unbound` (declared parameters still without a value).
 Anything expecting a plain string keeps working.
 
 `join` is the one operator that needs to know the input columns, to reproduce
-KQL's column-renaming rules. `duckdb_kql.sql()` reads them from the connection;
+KQL's column-renaming rules. `duckdb_kql.kql()` reads them from the connection;
 if you call `to_sql()` directly, pass them:
 
 ```python
@@ -223,7 +223,7 @@ anything the library raises.
 **Datetimes are UTC.** KQL datetimes carry no time zone and are always UTC.
 DuckDB reads the *session* `TimeZone` when casting a string without an offset,
 so on a machine in, say, `Europe/Paris`, `datetime(2024-01-01)` becomes
-`2023-12-31T23:00:00Z` — quietly. `duckdb_kql.connect()` and `duckdb_kql.sql()`
+`2023-12-31T23:00:00Z` — quietly. `duckdb_kql.connect()` and `duckdb_kql.kql()`
 set `TimeZone='UTC'` for you. If you run the SQL from `to_sql()` yourself, set
 it yourself:
 

@@ -116,12 +116,12 @@ jobs:
           con = duckdb_kql.connect()
           con.sql("CREATE TABLE T AS SELECT 'x' AS s, 1 AS n")
 
-          assert duckdb_kql.sql(con, "T | where s == 'x' | count").fetchall() == [(1,)]
+          assert duckdb_kql.kql(con, "T | where s == 'x' | count").fetchall() == [(1,)]
           assert duckdb_kql.to_sql("print x = 1").startswith("SELECT")
 
           # A parameter must still be bound rather than spliced, from the wheel.
           kql = "declare query_parameters(p:string); T | where s == p | count"
-          assert duckdb_kql.sql(con, kql, {"p": "' OR 1=1 --"}).fetchall() == [(0,)]
+          assert duckdb_kql.kql(con, kql, {"p": "' OR 1=1 --"}).fetchall() == [(0,)]
 
           with KustoClient(":memory:") as client:
               assert client.execute("db", "print n = 1").primary_results[0].raw_rows == [[1]]

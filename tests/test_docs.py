@@ -226,3 +226,37 @@ def test_readme_coverage_number_is_not_ahead_of_the_baseline() -> None:
     assert int(claimed.group(1)) <= int(baseline.group(1)), (
         "README claims more passing corpus cases than the test baseline enforces"
     )
+
+
+def test_the_query_entry_point_is_not_called_sql() -> None:
+    """`kql(con, query)` takes KQL. `to_sql(kql)` returns SQL. Both say so.
+
+    The package exists because KQL and SQL look alike and behave differently, so
+    an entry point named `sql()` that takes KQL was the one piece of the API
+    arguing against the whole premise — `duckdb_kql.sql(con, "T | count")` reads
+    as though the string were SQL.
+
+    Asserted rather than assumed because the old name is the natural thing to
+    reach for: DuckDB's own method is `con.sql()`, and a well-meaning alias would
+    put the confusion straight back.
+    """
+    import duckdb_kql  # noqa: PLC0415
+
+    assert "kql" in duckdb_kql.__all__
+    assert "sql" not in duckdb_kql.__all__, (
+        "a `sql` entry point is back; the argument is KQL, and only `to_sql` "
+        "should carry that name"
+    )
+    assert not hasattr(duckdb_kql, "sql"), "duckdb_kql.sql resolves again"
+
+    # `to_sql` keeps its name: it is the one that genuinely produces SQL.
+    assert callable(duckdb_kql.to_sql)
+
+
+def test_the_docs_call_it_kql() -> None:
+    """Docs that still say `duckdb_kql.sql(` would teach the old name."""
+    for path in [README, *sorted(DOCS.glob("*.md"))]:
+        if path.parts[:2] == ("docs", "code-review"):
+            continue
+        text = _read(path)
+        assert "duckdb_kql.sql(" not in text, f"{path} still documents duckdb_kql.sql()"

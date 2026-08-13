@@ -185,7 +185,7 @@ def test_layer_1_returns_duckdb_types(tmp_path: Path, cache: Path) -> None:
         def go() -> None:
             con = duckdb_kql.connect()
             reveal_type(con)
-            reveal_type(duckdb_kql.sql(con, "T | count"))
+            reveal_type(duckdb_kql.kql(con, "T | count"))
             reveal_type(duckdb_kql.execute(con, "T | count"))
             reveal_type(duckdb_kql.engine.schema(con))
         """,
@@ -231,7 +231,7 @@ WRONG_USAGE = [
         id="to_sql-takes-a-string",
     ),
     pytest.param(
-        'duckdb_kql.sql("not a connection", "T | count")',
+        'duckdb_kql.kql("not a connection", "T | count")',
         "arg-type",
         id="sql-takes-a-connection",
     ),
@@ -265,7 +265,7 @@ def test_a_correct_call_is_not_reported(tmp_path: Path, cache: Path) -> None:
 
         def go() -> None:
             con = duckdb_kql.connect("analytics.duckdb")
-            rel = duckdb_kql.sql(con, "T | count", {"p": "x"})
+            rel = duckdb_kql.kql(con, "T | count", {"p": "x"})
             rows = rel.fetchall()
             print(rows, duckdb_kql.to_sql("print 1").parameters)
         """,

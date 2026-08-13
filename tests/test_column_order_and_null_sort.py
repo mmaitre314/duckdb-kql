@@ -46,7 +46,7 @@ def con():
 
 
 def test_extend_overwriting_a_column_keeps_its_position(con) -> None:
-    rel = duckdb_kql.sql(con, "T | extend a = 99")
+    rel = duckdb_kql.kql(con, "T | extend a = 99")
     assert list(rel.columns) == ["a", "b", "c"], (
         "a replaced column moved to the end; KQL replaces in place"
     )
@@ -55,20 +55,20 @@ def test_extend_overwriting_a_column_keeps_its_position(con) -> None:
 
 def test_extend_overwriting_a_middle_column_keeps_its_position(con) -> None:
     """The end column is the easy case — `b` is the one that proves position."""
-    rel = duckdb_kql.sql(con, "T | extend b = 99")
+    rel = duckdb_kql.kql(con, "T | extend b = 99")
     assert list(rel.columns) == ["a", "b", "c"]
     assert rel.fetchall() == [(1, 99, 3)]
 
 
 def test_extend_adding_a_column_appends(con) -> None:
     """The counterweight: in-place replacement must not stop new columns landing."""
-    rel = duckdb_kql.sql(con, "T | extend d = 99")
+    rel = duckdb_kql.kql(con, "T | extend d = 99")
     assert list(rel.columns) == ["a", "b", "c", "d"]
     assert rel.fetchall() == [(1, 2, 3, 99)]
 
 
 def test_extend_replacing_and_adding_at_once(con) -> None:
-    rel = duckdb_kql.sql(con, "T | extend b = 99, z = 7")
+    rel = duckdb_kql.kql(con, "T | extend b = 99, z = 7")
     assert list(rel.columns) == ["a", "b", "c", "z"]
     assert rel.fetchall() == [(1, 99, 3, 7)]
 
@@ -90,7 +90,7 @@ def test_output_columns_agrees_with_what_runs(con) -> None:
 
     query = lower("T | extend a = 99")
     schema = duckdb_kql.engine.schema(con)
-    assert output_columns(query, schema) == list(duckdb_kql.sql(con, "T | extend a = 99").columns)
+    assert output_columns(query, schema) == list(duckdb_kql.kql(con, "T | extend a = 99").columns)
 
 
 # ---------------------------------------------------------------------------
@@ -99,20 +99,20 @@ def test_output_columns_agrees_with_what_runs(con) -> None:
 
 
 def test_ascending_sort_puts_nulls_first(con) -> None:
-    rel = duckdb_kql.sql(con, "N | sort by x asc")
+    rel = duckdb_kql.kql(con, "N | sort by x asc")
     assert [r[0] for r in rel.fetchall()] == [None, 1, 3], (
         "KQL treats null as the smallest value, so ascending puts it first"
     )
 
 
 def test_descending_sort_puts_nulls_last(con) -> None:
-    rel = duckdb_kql.sql(con, "N | sort by x desc")
+    rel = duckdb_kql.kql(con, "N | sort by x desc")
     assert [r[0] for r in rel.fetchall()] == [3, 1, None]
 
 
 def test_bare_sort_defaults_to_desc_and_nulls_last(con) -> None:
     """KQL's default direction is `desc` (R6); the null end follows from it."""
-    rel = duckdb_kql.sql(con, "N | sort by x")
+    rel = duckdb_kql.kql(con, "N | sort by x")
     assert [r[0] for r in rel.fetchall()] == [3, 1, None]
 
 
@@ -127,5 +127,5 @@ def test_bare_sort_defaults_to_desc_and_nulls_last(con) -> None:
 )
 def test_an_explicit_nulls_clause_still_wins(con, clause: str, expected: list) -> None:
     """Fixing the default must not override what the query says outright."""
-    rel = duckdb_kql.sql(con, f"N | sort by {clause}")
+    rel = duckdb_kql.kql(con, f"N | sort by {clause}")
     assert [r[0] for r in rel.fetchall()] == expected

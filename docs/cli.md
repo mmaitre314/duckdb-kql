@@ -72,7 +72,7 @@ WITH _s0 AS (SELECT * FROM "StormEvents"),
      ...
 ```
 
-**Set `TimeZone='UTC'` before running the SQL.** `duckdb_kql.sql()` does it for
+**Set `TimeZone='UTC'` before running the SQL.** `duckdb_kql.kql()` does it for
 you at Layer 1; nothing does it for you here. Getting it wrong does not raise —
 it shifts every datetime — which is why the warning travels with the file.
 

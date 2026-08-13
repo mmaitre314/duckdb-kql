@@ -106,7 +106,7 @@ and `.message`.
 
 ## Layer 1 — `duckdb_kql.engine`
 
-Requires `duckdb`. Also re-exported from the top level (`duckdb_kql.sql`, …),
+Requires `duckdb`. Also re-exported from the top level (`duckdb_kql.kql`, …),
 resolved lazily so that importing `duckdb_kql` does not import `duckdb`.
 
 Every function here sets `TimeZone='UTC'` on the connection and reads its schema,
@@ -118,7 +118,7 @@ so `join` works without you supplying one.
 the zone yourself. Raises `ImportError` with an install hint if `duckdb` is not
 installed.
 
-### `sql(con, kql, parameters=None) -> DuckDBPyRelation`
+### `kql(con, query, parameters=None) -> DuckDBPyRelation`
 
 Execute and return a relation, so you can keep composing with DuckDB's API.
 
@@ -128,7 +128,7 @@ Mirrors `con.execute` — for the cursor, or the side effect.
 
 ### `df(con, kql, parameters=None)` · `arrow(con, kql, parameters=None)`
 
-`sql(...).df()` and `sql(...).arrow()`. Need `pandas` and `pyarrow` respectively.
+`kql(...).df()` and `kql(...).arrow()`. Need `pandas` and `pyarrow` respectively.
 
 ### `schema(con) -> dict[str, list[str]]`
 
@@ -139,7 +139,7 @@ than raising on a connection with no schema.
 import duckdb_kql
 
 con = duckdb_kql.connect("analytics.duckdb")
-rel = duckdb_kql.sql(con, """
+rel = duckdb_kql.kql(con, """
     declare query_parameters(since:datetime);
     Logs | where Timestamp > since | summarize n = count() by Level
 """, {"since": "2024-01-01T00:00:00Z"})
@@ -287,11 +287,11 @@ these annotations. What you get:
 ```python
 >>> reveal_type(duckdb_kql.connect())
 _duckdb.DuckDBPyConnection
->>> reveal_type(duckdb_kql.sql(con, "T | count"))
+>>> reveal_type(duckdb_kql.kql(con, "T | count"))
 _duckdb.DuckDBPyRelation
 >>> reveal_type(duckdb_kql.df(con, "T | count"))
 pandas.core.frame.DataFrame
->>> duckdb_kql.sql("not a connection", "T | count")
+>>> duckdb_kql.kql("not a connection", "T | count")
 error: Argument 1 has incompatible type "str"; expected "DuckDBPyConnection"
 ```
 

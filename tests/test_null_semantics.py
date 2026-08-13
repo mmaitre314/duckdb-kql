@@ -61,7 +61,7 @@ def con():
 
 def kept(con, predicate: str) -> list[int]:
     """The row ids `| where <predicate>` keeps, in order."""
-    rel = duckdb_kql.sql(con, f"T | where {predicate} | project rid | sort by rid asc")
+    rel = duckdb_kql.kql(con, f"T | where {predicate} | project rid | sort by rid asc")
     return [row[0] for row in rel.fetchall()]
 
 
@@ -134,7 +134,7 @@ def test_null_on_both_sides_stays_null(con) -> None:
     assert kept(con, "n != m") == []
 
     # The projected value is where the two differ visibly: null, not false.
-    rel = duckdb_kql.sql(con, "T | sort by rid asc | project e = n == m, ne = n != m")
+    rel = duckdb_kql.kql(con, "T | sort by rid asc | project e = n == m, ne = n != m")
     assert rel.fetchall() == [(True, False), (None, None)]
 
 
@@ -170,7 +170,7 @@ def test_ordering_comparisons_stay_null(con, predicate: str) -> None:
 
 def test_a_null_row_survives_a_negated_filter_end_to_end(con) -> None:
     """The shape of the bug as a user would hit it: a count that was too low."""
-    rel = duckdb_kql.sql(con, 'T | where s !contains "zzz" | count')
+    rel = duckdb_kql.kql(con, 'T | where s !contains "zzz" | count')
     assert rel.fetchall() == [(2,)], (
         "both rows lack 'zzz', so both must be counted — the null row was the "
         "one silently missing"

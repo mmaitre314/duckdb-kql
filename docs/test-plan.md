@@ -333,7 +333,7 @@ KQL↔DuckDB semantic gaps** and should grow as we find more.
   colliding names: `k`→`k1`, and `k1`→`k2` when `k1` is taken. No separator, so
   `k_1` would be wrong. Semi/anti kinds return **one side's columns only**.
   Reproducing this needs both sides' column names, which is why `join` — alone
-  among the operators — requires a schema; `duckdb_kql.sql(con, …)` supplies it
+  among the operators — requires a schema; `duckdb_kql.kql(con, …)` supplies it
   from the connection, and `to_sql()` without one raises `KqlSchemaError` rather
   than guessing.
 - **Open — `innerunique` picks an arbitrary left row per key.** DuckDB's
@@ -442,7 +442,7 @@ KQL↔DuckDB semantic gaps** and should grow as we find more.
 - **Session `TimeZone` is part of the contract (R8).** DuckDB reads it when
   casting an offset-less datetime string, so identical SQL yields different
   answers on a non-UTC machine. Neither candidate formulation was found to be
-  session-independent, so `duckdb_kql.sql()` forces `SET TimeZone='UTC'` and
+  session-independent, so `duckdb_kql.kql()` forces `SET TimeZone='UTC'` and
   `to_sql()` documents the requirement for callers running the SQL themselves.
 
 **Numbers & null propagation**

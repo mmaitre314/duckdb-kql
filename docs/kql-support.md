@@ -11,7 +11,7 @@ A construct that is not supported raises `KqlUnsupportedError`. It never
 returns an approximate answer.
 
 > **Two things apply everywhere.** KQL datetimes are UTC, so the generated SQL
-> needs `SET TimeZone='UTC'` — `duckdb_kql.connect()` and `duckdb_kql.sql()` do
+> needs `SET TimeZone='UTC'` — `duckdb_kql.connect()` and `duckdb_kql.kql()` do
 > it for you (R8). And KQL identifiers are case-sensitive while DuckDB folds
 > case, so identifiers are always emitted quoted and a collision is a
 > `KqlSchemaError` rather than an arbitrary winner (R7).
@@ -45,7 +45,7 @@ returns an approximate answer.
 | `project-rename` | Keeps the renamed column's position. |
 | `extend` | Redefining an existing column **replaces** it rather than adding a second one. |
 | `summarize` | Auto-generated column names follow KQL (`count_`, `avg_X`); group keys come first in source order, and a null key forms its own group (R12). |
-| `join` | Needs the input schema to reproduce KQL's column renaming — `duckdb_kql.sql()` supplies it; `to_sql()` needs `schema=`. |
+| `join` | Needs the input schema to reproduce KQL's column renaming — `duckdb_kql.kql()` supplies it; `to_sql()` needs `schema=`. |
 | `mv-expand` | One column at a time. Multi-column `mv-expand` (zipped expansion) is not supported. |
 | `distinct` | Column list only. `distinct *` works but expands to every column of a wide table. |
 | `count` | Output column is named `Count`. |

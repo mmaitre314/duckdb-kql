@@ -28,7 +28,7 @@ Layer 2  duckdb_kql.kusto    KustoClient drop-in.     + pandas
 ```
 
 - [ ] **Importing `duckdb_kql` must not import `duckdb`.** Layer 1 names
-  (`connect`, `sql`, `execute`, `df`, `arrow`) are resolved lazily via
+  (`connect`, `kql`, `execute`, `df`, `arrow`) are resolved lazily via
   `__getattr__` / `_LAYER1`. Any new top-level function that eagerly imports
   `engine` (or `duckdb`, or `pandas`) breaks Layer 0 — an **S2**. Check new
   imports at module top and inside `to_sql`/`query_parameters` (they import
@@ -54,7 +54,7 @@ checks from the outside — treat it as part of the public API.
   query-parameter value) it is annotated `Any` *with a comment saying why* —
   never left to inference.
 - [ ] **Lazy re-exports keep real types.** The `TYPE_CHECKING` block exists so a
-  checker sees `connect`/`sql`/`df`/… with their true signatures despite the
+  checker sees `connect`/`kql`/`df`/… with their true signatures despite the
   runtime laziness. A new Layer-1 export added without a matching
   `TYPE_CHECKING` import regresses this silently.
 - [ ] **Return types are honest subclasses.** `to_sql` returns a `str` subclass

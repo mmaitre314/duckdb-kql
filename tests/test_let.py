@@ -35,7 +35,7 @@ def con():
 
 
 def _rows(con, kql):
-    rel = duckdb_kql.sql(con, kql)
+    rel = duckdb_kql.kql(con, kql)
     return sorted(rel.fetchall(), key=lambda r: tuple(str(x) for x in r))
 
 
@@ -80,7 +80,7 @@ def test_materialize_is_a_hint_and_unwraps(con) -> None:
 
 def test_tabular_let_can_be_joined(con) -> None:
     """The join needs the let's columns, which are resolved from the binding."""
-    rel = duckdb_kql.sql(con, "let A = T; A | join kind=inner (R) on a | project a, s, r")
+    rel = duckdb_kql.kql(con, "let A = T; A | join kind=inner (R) on a | project a, s, r")
     assert list(rel.columns) == ["a", "s", "r"]
     assert sorted(rel.fetchall()) == [(1, "x", "p"), (9, "x", "q")]
 

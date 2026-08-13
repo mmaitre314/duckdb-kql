@@ -203,7 +203,7 @@ print(duckdb_kql.engine.schema(con))
 
 code('''
 # sql() returns a DuckDB relation — lazy, composable, and printable.
-duckdb_kql.sql(con, """
+duckdb_kql.kql(con, """
 Requests
 | where Status >= 500
 | summarize Failures = count(), Users = dcount(UserId) by Service, Region
@@ -270,9 +270,9 @@ code('''
 # reaches the SQL text at all — it is only ever compared as a string.
 payload = "auth' OR 1=1 --"
 
-print("rows for a real service :", duckdb_kql.sql(con, parameterized,
+print("rows for a real service :", duckdb_kql.kql(con, parameterized,
       {"service": "auth", "floor": 500}).fetchall())
-print("rows for the payload    :", duckdb_kql.sql(con, parameterized,
+print("rows for the payload    :", duckdb_kql.kql(con, parameterized,
       {"service": payload, "floor": 500}).fetchall())
 
 sql_text = str(duckdb_kql.to_sql(parameterized, parameters={"service": payload, "floor": 500}))
@@ -396,7 +396,7 @@ Ascending puts nulls first; descending puts them last. DuckDB's own default is
 """)
 
 code('''
-duckdb_kql.sql(con, "datatable(x:int) [3, int(null), 1] | sort by x asc").fetchall()
+duckdb_kql.kql(con, "datatable(x:int) [3, int(null), 1] | sort by x asc").fetchall()
 ''')
 
 md("""
@@ -411,7 +411,7 @@ code('''
 con.execute("CREATE OR REPLACE TABLE Notes(rid INTEGER, note VARCHAR)")
 con.executemany("INSERT INTO Notes VALUES (?, ?)", [(1, "timeout"), (2, None)])
 
-kept = duckdb_kql.sql(con, 'Notes | where note !contains "retry" | count').fetchone()[0]
+kept = duckdb_kql.kql(con, 'Notes | where note !contains "retry" | count').fetchone()[0]
 naive = con.sql("SELECT count(*) FROM Notes WHERE NOT (note ILIKE '%retry%')").fetchone()[0]
 
 print(f"KQL semantics           : {kept} rows")
@@ -431,7 +431,7 @@ sums that nobody thinks to question.
 """)
 
 code('''
-duckdb_kql.sql(con, """
+duckdb_kql.kql(con, """
 let L = datatable(k:string, v:int) ["a", 1, "a", 2, "b", 3];
 let R = datatable(k:string, w:int) ["a", 10, "b", 20];
 L | join R on k
@@ -444,7 +444,7 @@ Ask for SQL's semantics and you get them — but you have to ask:
 """)
 
 code('''
-duckdb_kql.sql(con, """
+duckdb_kql.kql(con, """
 let L = datatable(k:string, v:int) ["a", 1, "a", 2, "b", 3];
 let R = datatable(k:string, w:int) ["a", 10, "b", 20];
 L | join kind=inner R on k

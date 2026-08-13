@@ -162,7 +162,7 @@ OPERATORS: list[tuple[str, str, str]] = [
     ("project-rename", "T | project-rename c = a", "Keeps the renamed column's position."),
     ("extend", "T | extend c = 1", "Redefining an existing column **replaces** it rather than adding a second one."),
     ("summarize", "T | summarize n = count() by a", "Auto-generated column names follow KQL (`count_`, `avg_X`); group keys come first in source order, and a null key forms its own group (R12)."),
-    ("join", "T | join kind=inner (T) on a", "Needs the input schema to reproduce KQL's column renaming — `duckdb_kql.sql()` supplies it; `to_sql()` needs `schema=`."),
+    ("join", "T | join kind=inner (T) on a", "Needs the input schema to reproduce KQL's column renaming — `duckdb_kql.kql()` supplies it; `to_sql()` needs `schema=`."),
     ("mv-expand", "T | mv-expand a", "One column at a time. Multi-column `mv-expand` (zipped expansion) is not supported."),
     ("distinct", "T | distinct a", "Column list only. `distinct *` works but expands to every column of a wide table."),
     ("count", "T | count", "Output column is named `Count`."),
@@ -468,7 +468,7 @@ def build() -> str:
     a("returns an approximate answer.")
     a("")
     a("> **Two things apply everywhere.** KQL datetimes are UTC, so the generated SQL")
-    a("> needs `SET TimeZone='UTC'` — `duckdb_kql.connect()` and `duckdb_kql.sql()` do")
+    a("> needs `SET TimeZone='UTC'` — `duckdb_kql.connect()` and `duckdb_kql.kql()` do")
     a("> it for you (R8). And KQL identifiers are case-sensitive while DuckDB folds")
     a("> case, so identifiers are always emitted quoted and a collision is a")
     a("> `KqlSchemaError` rather than an arbitrary winner (R7).")

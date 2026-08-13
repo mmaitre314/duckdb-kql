@@ -78,18 +78,18 @@ def test_payload_never_reaches_the_sql_text(payload: str) -> None:
 @pytest.mark.parametrize("payload", PAYLOADS)
 def test_payload_is_matched_as_a_literal_string(con, payload: str) -> None:
     """A payload is data: it matches no row, rather than selecting them all."""
-    rows = engine.sql(con, LOOKUP, {"name_p": payload}).fetchall()
+    rows = engine.kql(con, LOOKUP, {"name_p": payload}).fetchall()
     assert rows == []
 
 
 def test_table_survives_a_drop_payload(con) -> None:
-    engine.sql(con, LOOKUP, {"name_p": "'; DROP TABLE Users; --"}).fetchall()
+    engine.kql(con, LOOKUP, {"name_p": "'; DROP TABLE Users; --"}).fetchall()
     assert con.sql("SELECT count(*) FROM Users").fetchone()[0] == 2
 
 
 def test_a_real_value_still_matches(con) -> None:
     """The obvious counterweight: the safe path must not be a broken path."""
-    assert engine.sql(con, LOOKUP, {"name_p": "alice"}).fetchall() == [
+    assert engine.kql(con, LOOKUP, {"name_p": "alice"}).fetchall() == [
         ("alice", "public")
     ]
 
@@ -97,7 +97,7 @@ def test_a_real_value_still_matches(con) -> None:
 def test_parameter_cannot_smuggle_in_an_operator(con) -> None:
     """A value spelling a whole KQL pipeline stays a string."""
     payload = "alice | project tier"
-    assert engine.sql(con, LOOKUP, {"name_p": payload}).fetchall() == []
+    assert engine.kql(con, LOOKUP, {"name_p": payload}).fetchall() == []
 
 
 # ---------------------------------------------------------------------------
@@ -118,12 +118,12 @@ def test_declarations_are_reported_in_order() -> None:
 
 def test_default_is_used_when_no_value_is_supplied(con) -> None:
     kql = "declare query_parameters(n:long = 7);\nprint x = n"
-    assert engine.sql(con, kql).fetchall() == [(7,)]
+    assert engine.kql(con, kql).fetchall() == [(7,)]
 
 
 def test_supplied_value_wins_over_the_default(con) -> None:
     kql = "declare query_parameters(n:long = 7);\nprint x = n"
-    assert engine.sql(con, kql, {"n": 9}).fetchall() == [(9,)]
+    assert engine.kql(con, kql, {"n": 9}).fetchall() == [(9,)]
 
 
 def test_escaped_parameter_name_is_reported_unescaped() -> None:
@@ -150,7 +150,7 @@ def test_a_let_may_read_a_parameter(con) -> None:
         "let bound = lo * 10;\n"
         "print x = bound"
     )
-    assert engine.sql(con, kql, {"lo": 3}).fetchall() == [(30,)]
+    assert engine.kql(con, kql, {"lo": 3}).fetchall() == [(30,)]
 
 
 def test_duplicate_declaration_is_refused() -> None:
@@ -187,7 +187,7 @@ def test_missing_value_is_reported_at_translation_but_only_fails_on_execute(con)
     translated = duckdb_kql.to_sql(LOOKUP)
     assert translated.unbound == ("name_p",)
     with pytest.raises(KqlSchemaError):
-        engine.sql(con, LOOKUP)
+        engine.kql(con, LOOKUP)
 
 
 @pytest.mark.parametrize(
@@ -230,31 +230,31 @@ def test_value_of_the_wrong_type_is_refused(kind: str, value: object) -> None:
 )
 def test_value_round_trips_with_its_declared_type(con, kind, value, expected) -> None:
     kql = f"declare query_parameters(p:{kind});\nprint x = p"
-    assert engine.sql(con, kql, {"p": value}).fetchone()[0] == expected
+    assert engine.kql(con, kql, {"p": value}).fetchone()[0] == expected
 
 
 def test_guid_round_trips(con) -> None:
     g = uuid.UUID("12345678-1234-5678-1234-567812345678")
     kql = "declare query_parameters(p:guid);\nprint x = p"
-    assert engine.sql(con, kql, {"p": str(g)}).fetchone()[0] == g
+    assert engine.kql(con, kql, {"p": str(g)}).fetchone()[0] == g
 
 
 def test_dynamic_parameter_is_indexable(con) -> None:
     """A dynamic value crosses as JSON text and must come back as a document."""
     kql = "declare query_parameters(p:dynamic);\nprint x = p.items[1]"
-    assert engine.sql(con, kql, {"p": {"items": [10, 20]}}).fetchone()[0] == "20"
+    assert engine.kql(con, kql, {"p": {"items": [10, 20]}}).fetchone()[0] == "20"
 
 
 def test_aware_datetime_is_converted_to_utc(con) -> None:
     """KQL datetimes are UTC (R8); an offset must be applied, not dropped."""
     aware = dt.datetime(2020, 1, 1, 12, tzinfo=dt.timezone(dt.timedelta(hours=2)))
     kql = "declare query_parameters(p:datetime);\nprint x = p"
-    assert engine.sql(con, kql, {"p": aware}).fetchone()[0] == dt.datetime(2020, 1, 1, 10)
+    assert engine.kql(con, kql, {"p": aware}).fetchone()[0] == dt.datetime(2020, 1, 1, 10)
 
 
 def test_offset_in_a_datetime_string_is_applied(con) -> None:
     kql = "declare query_parameters(p:datetime);\nprint x = p"
-    got = engine.sql(con, kql, {"p": "2020-01-01T12:00:00+02:00"}).fetchone()[0]
+    got = engine.kql(con, kql, {"p": "2020-01-01T12:00:00+02:00"}).fetchone()[0]
     assert got == dt.datetime(2020, 1, 1, 10)
 
 

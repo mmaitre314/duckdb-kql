@@ -60,7 +60,7 @@ def _connection():
     """
     con = duckdb.connect()
     # R8 — KQL datetimes are UTC, and DuckDB reads the session TimeZone when
-    # casting offset-less strings. duckdb_kql.sql() sets this; the harness calls
+    # casting offset-less strings. duckdb_kql.kql() sets this; the harness calls
     # to_sql() directly, so it must set it itself.
     con.execute("SET TimeZone='UTC'")
     fixtures.load_duckdb(con)

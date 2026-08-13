@@ -30,7 +30,7 @@ def con():
 
 
 def _rows(con, kql):
-    return duckdb_kql.sql(con, kql).fetchall()
+    return duckdb_kql.kql(con, kql).fetchall()
 
 
 # --- range -----------------------------------------------------------------
@@ -120,8 +120,8 @@ def test_in_tabular_is_case_insensitive_with_tilde(con) -> None:
 )
 def test_render_leaves_the_result_untouched(con, clause: str) -> None:
     base = "datatable(x:int, y:int)[1,10, 2,20] | project x, y"
-    plain = duckdb_kql.sql(con, base)
-    rendered = duckdb_kql.sql(con, f"{base} | {clause}")
+    plain = duckdb_kql.kql(con, base)
+    rendered = duckdb_kql.kql(con, f"{base} | {clause}")
     assert list(plain.columns) == list(rendered.columns)
     assert plain.fetchall() == rendered.fetchall()
 
@@ -129,7 +129,7 @@ def test_render_leaves_the_result_untouched(con, clause: str) -> None:
 # --- summarize name collisions ---------------------------------------------
 def test_duplicate_aggregate_names_get_kql_suffixes(con) -> None:
     """KQL suffixes with no separator (`set_y1`); DuckDB would emit `set_y_1`."""
-    rel = duckdb_kql.sql(
+    rel = duckdb_kql.kql(
         con,
         "range x from 1 to 2 step 1 | extend y = iff(x == 1, real(null), real(5)) "
         "| summarize make_set(y), make_set(y)",

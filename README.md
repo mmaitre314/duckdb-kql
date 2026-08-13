@@ -85,7 +85,7 @@ runs without a database.
 import duckdb_kql
 
 con = duckdb_kql.connect("analytics.duckdb")   # duckdb.connect + TimeZone=UTC
-rel = duckdb_kql.sql(con, "StormEvents | summarize n = count() by State")
+rel = duckdb_kql.kql(con, "StormEvents | summarize n = count() by State")
 rel.fetchall()
 ```
 
@@ -120,7 +120,7 @@ values; they are bound as values, so the generated SQL contains no
 caller-controlled text at all.
 
 ```python
-duckdb_kql.sql(con, """
+duckdb_kql.kql(con, """
     declare query_parameters(state:string);
     StormEvents | where State == state
 """, {"state": user_input})     # safe whatever user_input contains

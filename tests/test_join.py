@@ -34,7 +34,7 @@ def con():
 
 
 def _rows(con, kql):
-    rel = duckdb_kql.sql(con, kql)
+    rel = duckdb_kql.kql(con, kql)
     return list(rel.columns), sorted(rel.fetchall(), key=lambda r: tuple(str(x) for x in r))
 
 

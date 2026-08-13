@@ -229,7 +229,7 @@ duckdb_kql.validate(kql) -> list[Diagnostic]
 
 # Layer 1 — duckdb_kql.engine — + duckdb. Also re-exported at the top level.
 duckdb_kql.connect(database=":memory:") -> DuckDBPyConnection
-duckdb_kql.sql(con, kql, parameters=None) -> DuckDBPyRelation
+duckdb_kql.kql(con, kql, parameters=None) -> DuckDBPyRelation
 duckdb_kql.df(con, kql, parameters=None) -> pandas.DataFrame
 duckdb_kql.arrow(con, kql, parameters=None) -> pyarrow.Table
 

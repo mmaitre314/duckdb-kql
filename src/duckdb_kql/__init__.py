@@ -27,7 +27,7 @@ Layer 1 — execute against a DuckDB connection::
     import duckdb, duckdb_kql
     con = duckdb_kql.connect()               # or duckdb.connect(), TimeZone=UTC
     con.sql("CREATE TABLE Logs AS SELECT 'Error' AS Level")
-    duckdb_kql.sql(con, "Logs | where Level == 'Error'").fetchall()
+    duckdb_kql.kql(con, "Logs | where Level == 'Error'").fetchall()
 
 Layer 2 — the ``azure-kusto-data`` shape, for code already written against it::
 
@@ -60,7 +60,7 @@ if TYPE_CHECKING:
     # and a caller would be told their code is fine when it is not. Importing
     # the real names here, for the checker only, keeps the laziness without
     # paying for it in the signatures.
-    from .engine import Parameters, arrow, connect, df, execute, sql
+    from .engine import Parameters, arrow, connect, df, execute, kql
     from .schema import Schema
     from .translate import TranslationResult
 
@@ -97,7 +97,7 @@ __all__ = [
     "KqlSchemaError",
     # Layer 1 — requires duckdb
     "connect",
-    "sql",
+    "kql",
     "execute",
     "df",
     "arrow",
@@ -110,7 +110,7 @@ __all__ = [
 
 #: Layer 1 names, re-exported here for convenience but defined in ``engine``.
 #: Resolved on first access so that importing this package never imports duckdb.
-_LAYER1 = frozenset({"connect", "sql", "execute", "df", "arrow"})
+_LAYER1 = frozenset({"connect", "kql", "execute", "df", "arrow"})
 
 
 #: Types named in the public signatures. Callers need them to annotate their own
@@ -151,7 +151,7 @@ def to_sql(
 
     Returns a ``str`` subclass that also carries ``.parameters`` — the values
     for the placeholders a ``declare query_parameters`` query renders. Pass
-    those to DuckDB alongside the SQL; :func:`duckdb_kql.sql` does it for you.
+    those to DuckDB alongside the SQL; :func:`duckdb_kql.kql` does it for you.
 
     Args:
         kql: the query text.
@@ -164,7 +164,7 @@ def to_sql(
        KQL datetimes are UTC (``docs/TRANSLATION.md`` R8), and DuckDB reads the
        **session** ``TimeZone`` when casting a string that carries no offset. Run
        the returned SQL on a connection with ``SET TimeZone='UTC'`` or datetime
-       values will be silently shifted. :func:`duckdb_kql.sql` and
+       values will be silently shifted. :func:`duckdb_kql.kql` and
        :func:`duckdb_kql.connect` do this for you; the requirement only falls to
        callers who execute the SQL themselves.
 

@@ -28,11 +28,11 @@ def con():
 
 
 def _one(con, kql):
-    return duckdb_kql.sql(con, kql).fetchall()[0][0]
+    return duckdb_kql.kql(con, kql).fetchall()[0][0]
 
 
 def _rows(con, kql):
-    return duckdb_kql.sql(con, kql).fetchall()
+    return duckdb_kql.kql(con, kql).fetchall()
 
 
 def _json(con, kql):
@@ -132,7 +132,7 @@ def test_mv_expand_null_keeps_one_row(con) -> None:
 
 
 def test_mv_expand_with_itemindex(con) -> None:
-    rel = duckdb_kql.sql(
+    rel = duckdb_kql.kql(
         con,
         "range x from 1 to 4 step 1 | summarize x = make_list(x) "
         "| mv-expand with_itemindex=Index x",
