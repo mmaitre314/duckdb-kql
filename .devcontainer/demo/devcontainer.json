@@ -1,38 +1,10 @@
-// A demo environment — what a *user* of the package would set up, not what a
-// contributor needs. Opening this container and running
-// `demo/duckdb-kql-demo.ipynb` is the whole purpose.
-//
-// Deliberately none of the development machinery: no Java (only the parser
-// regeneration needs a JDK, and the generated parser is committed), no
-// Docker-in-Docker and no Kusto Emulator (that is the acceptance oracle, not
-// something a user runs), and no editable install of this repository. The
-// package comes from PyPI exactly as `pip install` would deliver it, so the
-// notebook exercises the published artifact rather than the working tree.
-//
-// The repository's own dev container is `.devcontainer/devcontainer.json`;
-// VS Code offers both when you reopen in a container.
 {
   "name": "duckdb-kql demo (PyPI)",
-
-  // A stock Python image. Nothing is layered on top, so there is no Dockerfile
-  // to keep in sync and the container starts from a cached pull.
   "image": "mcr.microsoft.com/devcontainers/python:1-3.13-bookworm",
-
-  // `[all]` pulls duckdb, pandas and pyarrow, which the notebook's three layers
-  // need. `ipykernel` is what lets VS Code run the notebook against this
-  // interpreter; it is not a dependency of the package.
-  //
-  // No `--pre` is needed even while the only published version is a
-  // pre-release: pip falls back to one when a project has no stable release,
-  // and switches to the stable release as soon as there is one.
   "postCreateCommand": "pip install --upgrade 'duckdb-kql[all]' ipykernel",
-
   "customizations": {
     "vscode": {
-      "extensions": ["ms-python.python", "ms-toolsai.jupyter"],
-      "settings": {
-        "notebook.output.textLineLimit": 60
-      }
+      "extensions": ["ms-python.python", "ms-toolsai.jupyter"]
     }
   }
 }

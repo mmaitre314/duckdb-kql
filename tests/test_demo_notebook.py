@@ -21,7 +21,6 @@ from pathlib import Path
 import pytest
 
 NOTEBOOK = Path("demo/duckdb-kql-demo.ipynb")
-SOURCE = Path("demo/build_notebook.py")
 
 nbformat = pytest.importorskip("nbformat")
 
@@ -34,9 +33,7 @@ def _notebook() -> nbformat.NotebookNode:
     return nbformat.read(NOTEBOOK, as_version=4)
 
 
-def test_the_notebook_is_generated_from_the_committed_source() -> None:
-    """Editing the `.ipynb` directly is how the two drift apart."""
-    assert SOURCE.is_file(), "demo/build_notebook.py is missing"
+def test_the_notebook_has_code_in_it() -> None:
     cells = [c for c in _notebook().cells if c.cell_type == "code"]
     assert cells, "the demo has no code cells"
 
@@ -62,7 +59,7 @@ def test_the_committed_outputs_are_not_empty() -> None:
     ]
     assert len(executed) >= 15, (
         f"only {len(executed)} code cells carry output — the committed notebook "
-        "was not executed; run `python demo/run_notebook.py`"
+        "was not executed — run every cell and save before committing"
     )
 
 
@@ -74,8 +71,9 @@ def test_the_committed_outputs_are_not_empty() -> None:
 def test_the_notebook_still_runs() -> None:
     """The one that matters: every cell executes against the current code.
 
-    The notebook's first cell installs the package only when it is not already
-    importable, so this runs against the working tree rather than PyPI.
+    The notebook is hand-maintained, so nothing but this stops it drifting from
+    the API it demonstrates. Its first cell installs the package only when it is
+    not already importable, so this runs against the working tree, not PyPI.
     """
     from nbclient import NotebookClient  # noqa: PLC0415
     from nbclient.exceptions import CellExecutionError  # noqa: PLC0415
