@@ -50,6 +50,8 @@ def output_columns(query: ir.Query, schema: Schema | None = None) -> list[str]:
 def _source_columns(source: ir.Source, schema: Schema | None) -> list[str]:
     if isinstance(source, ir.TableRef):
         return _table_columns(source.name, schema)
+    if isinstance(source, ir.CommandSource):
+        return list(source.columns)
     if isinstance(source, ir.DataTable):
         return [name for name, _ in source.columns]
     if isinstance(source, ir.RangeSource):

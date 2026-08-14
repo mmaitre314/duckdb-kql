@@ -43,6 +43,8 @@ from .errors import KqlUnsupportedError
 __all__ = [
     "is_control_command",
     "translate_control_command",
+    "split_command",
+    "COLUMNS",
     "SUPPORTED",
     "UNSUPPORTED_HINT",
 ]
@@ -51,6 +53,32 @@ __all__ = [
 #: describes administering a cluster — ingestion, policies, schema management —
 #: and there is no cluster for it to act on.
 SUPPORTED = (".show version", ".show databases", ".show tables")
+
+#: What each command produces, measured on the emulator. Needed once a command
+#: can be piped: the operators that resolve names before the query runs — `join`
+#: renaming, `extend`'s in-place ordering — have to know them.
+COLUMNS: dict[str, tuple[str, ...]] = {
+    ".show version": (
+        "BuildVersion",
+        "BuildTime",
+        "ServiceType",
+        "ProductVersion",
+        "ServiceOffering",
+    ),
+    ".show databases": (
+        "DatabaseName",
+        "PersistentStorage",
+        "Version",
+        "IsCurrent",
+        "DatabaseAccessMode",
+        "PrettyName",
+        "ReservedSlot1",
+        "DatabaseId",
+        "InTransitionTo",
+        "SuspensionState",
+    ),
+    ".show tables": ("TableName", "DatabaseName", "Folder", "DocString"),
+}
 
 #: Said once, so Layer 0's KqlUnsupportedError and Layer 2's
 #: KustoUnsupportedError cannot drift into describing different sets.
@@ -77,6 +105,42 @@ def _normalize(text: str) -> str:
     return _WHITESPACE.sub(" ", text.strip().rstrip(";").strip()).lower()
 
 
+def split_command(text: str) -> tuple[str, str]:
+    """Split `.show tables | limit 3` into its command and its pipeline.
+
+    Kusto composes the two dialects: a control command produces a table, and
+    ordinary query operators can be piped onto it. Verified on the emulator —
+    `| limit`, `| count`, `| where`, `| project`, `| summarize` and `| extend`
+    all work on `.show tables`.
+
+    The split matches a **known command as a prefix** rather than cutting at the
+    first `|`. That ordering matters: `|` is not only a pipe in this dialect
+    (`.ingest inline into table T <| …`), so cutting first would mis-split a
+    command we do not support and report the wrong half as the problem. Matching
+    the head first means only commands whose syntax we know are ever divided.
+
+    Returns ``(command, pipeline)`` with *pipeline* empty when there is none, and
+    the whole input as *command* when it matches nothing — leaving the refusal,
+    and the error message, to the caller.
+    """
+    collapsed = _WHITESPACE.sub(" ", text.strip().rstrip(";").strip())
+    lowered = collapsed.lower()
+    for command in sorted(SUPPORTED, key=len, reverse=True):
+        if lowered == command:
+            return command, ""
+        if lowered.startswith(command):
+            # Sliced from `collapsed`, not `lowered`: the command half is
+            # case-insensitive but the pipeline is KQL, where identifiers are
+            # case-sensitive (R7). Lowercasing it turned `| project TableName`
+            # into a column called `tablename`. The indices line up because the
+            # commands are ASCII, so lowering the matched prefix cannot change
+            # its length.
+            rest = collapsed[len(command) :].lstrip()
+            if rest.startswith("|"):
+                return command, rest
+    return lowered, ""
+
+
 def translate_control_command(text: str) -> str:
     """Translate a supported control command to DuckDB SQL.
 
@@ -84,7 +148,12 @@ def translate_control_command(text: str) -> str:
         KqlUnsupportedError: for every other `.`-command, naming the ones that
             do work rather than leaving the caller to guess.
     """
-    command = _normalize(text)
+    command, pipeline = split_command(text)
+    if pipeline:
+        raise KqlUnsupportedError(
+            f"control command {text.strip()!r}",
+            hint="a piped command is translated by duckdb_kql.to_sql, not here",
+        )
     build = _COMMANDS.get(command)
     if build is None:
         raise KqlUnsupportedError(

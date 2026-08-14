@@ -158,6 +158,26 @@ class TableRef(Source):
 
 
 @dataclass(frozen=True)
+class CommandSource(Source):
+    """A control command's result, standing in as a table.
+
+    Kusto composes the two dialects: `.show tables | limit 3` runs the command
+    and pipes its result through ordinary query operators. The command half has
+    no query syntax — it is a closed set of literals, not a grammar — so it
+    arrives here already translated, and the pipeline after the first `|` is
+    lowered by the normal path with this as its source.
+
+    ``columns`` is what the command produces, needed by the operators that
+    resolve names before the query runs (`join` renaming, `extend` ordering).
+    """
+
+    sql: str
+    columns: tuple[str, ...]
+    #: The command as written, for error messages that name what the user typed.
+    command: str
+
+
+@dataclass(frozen=True)
 class DataTable(Source):
     """``datatable(col:type, ...) [values...]`` — inlines its own input.
 

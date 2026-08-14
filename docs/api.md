@@ -123,7 +123,9 @@ installed.
 Execute and return a relation, so you can keep composing with DuckDB's API.
 
 Also accepts the control commands `.show version`, `.show databases` and
-`.show tables` — a separate Kusto dialect, with the column shapes Kusto returns.
+`.show tables` — a separate Kusto dialect, with the column shapes Kusto returns
+— and pipelines built on them, such as
+`.show tables | where TableName startswith "Storm"`.
 See [Control commands](kusto-client.md#control-commands).
 
 ### `execute(con, kql, parameters=None) -> DuckDBPyConnection`

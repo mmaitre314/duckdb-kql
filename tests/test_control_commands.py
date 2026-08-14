@@ -229,3 +229,83 @@ def test_layer_2_refuses_with_its_own_error_type() -> None:
 
     # ...and it still names the commands that work, from the one place they are listed.
     assert ".show tables" in str(caught.value)
+
+
+# ---------------------------------------------------------------------------
+# Piping a command into query operators
+# ---------------------------------------------------------------------------
+#
+# Kusto composes the two dialects, and the emulator confirms it: `| limit`,
+# `| count`, `| where`, `| project`, `| summarize` and `| extend` all work on
+# `.show tables`. The command half is a closed set of literals; everything after
+# the first `|` is plain KQL and goes through the ordinary translator with the
+# command standing in as the source.
+
+
+PIPED_COLUMNS = [
+    (".show tables | count", ["Count"]),
+    (".show tables | project TableName", ["TableName"]),
+    (".show databases | project DatabaseName, IsCurrent", ["DatabaseName", "IsCurrent"]),
+    (".show version | project ServiceType", ["ServiceType"]),
+    (
+        ".show version | extend Tag = 'x' | project Tag, ServiceType",
+        ["Tag", "ServiceType"],
+    ),
+]
+
+
+@pytest.mark.parametrize("query,columns", PIPED_COLUMNS, ids=[q for q, _ in PIPED_COLUMNS])
+def test_a_command_pipes_into_query_operators(con, query: str, columns: list) -> None:
+    """Each of these was checked against the emulator, which returns the same."""
+    assert list(duckdb_kql.kql(con, query).columns) == columns
+
+
+def test_the_pipeline_half_keeps_its_case(con) -> None:
+    """KQL identifiers are case-sensitive (R7); only the command head is not.
+
+    Normalizing the whole string for matching lowercased the pipeline too, so
+    `| project TableName` produced a column called `tablename` — a wrong answer
+    that runs cleanly, which is the shape of bug this project is built around.
+    """
+    assert list(duckdb_kql.kql(con, ".show tables | project TableName").columns) == [
+        "TableName"
+    ]
+    # ...and the command half stays case-insensitive, as Kusto has it.
+    assert list(duckdb_kql.kql(con, ".SHOW TABLES | project TableName").columns) == [
+        "TableName"
+    ]
+
+
+def test_the_pipeline_filters_real_rows(con) -> None:
+    names = {r[0] for r in duckdb_kql.kql(con, ".show tables").fetchall()}
+    filtered = {
+        r[0]
+        for r in duckdb_kql.kql(
+            con, '.show tables | where TableName startswith "Req"'
+        ).fetchall()
+    }
+    assert filtered == {n for n in names if n.startswith("Req")}
+    assert filtered < names, "the filter matched everything, so it proves nothing"
+
+
+def test_an_unsupported_operator_after_a_command_still_refuses(con) -> None:
+    """`getschema` is not implemented, and composing must not paper over that."""
+    with pytest.raises(duckdb_kql.KqlUnsupportedError):
+        duckdb_kql.to_sql(".show version | getschema")
+
+
+def test_the_split_matches_the_command_before_looking_for_a_pipe() -> None:
+    """`|` is not only a pipe in this dialect, so cutting at the first one is wrong.
+
+    `.ingest inline into table T <| 1` contains `<|`. Matching a known command
+    head first means only commands whose syntax we know are ever divided, and an
+    unsupported one is reported whole rather than mis-split.
+    """
+    from duckdb_kql.control import split_command  # noqa: PLC0415
+
+    assert split_command(".show tables") == (".show tables", "")
+    assert split_command(".show tables | limit 3") == (".show tables", "| limit 3")
+    assert split_command(".ingest inline into table T <| 1") == (
+        ".ingest inline into table t <| 1",
+        "",
+    )

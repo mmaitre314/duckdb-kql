@@ -178,16 +178,31 @@ def to_sql(
     worth reading on its own. The names still missing are listed in
     ``.unbound``, and executing is what turns them into an error.
     """
-    from .control import is_control_command, translate_control_command
+    from . import ir
+    from .control import COLUMNS, is_control_command, split_command
+    from .control import translate_control_command as _command_sql
     from .lower import lower
     from .params import bind
     from .translate import TranslationResult as _Result
     from .translate import to_sql as _emit
 
     if is_control_command(kql):
-        # `.show tables` and friends are a different dialect (see
-        # duckdb_kql.control). They take no schema and declare no parameters.
-        return _Result(translate_control_command(kql))
+        # A different dialect (see duckdb_kql.control), and one that composes
+        # with this one: Kusto pipes a command's tabular result through ordinary
+        # query operators, so `.show tables | limit 3` is a command followed by
+        # a pipeline. The command half is a closed set of literals; the half
+        # after the first `|` is plain KQL and goes through the normal path with
+        # the command standing in as its source.
+        command, pipeline = split_command(kql)
+        head = _command_sql(command)  # raises, naming the ones that work
+        if not pipeline:
+            return _Result(head)
+
+        # Lowered against a placeholder table, whose source is then replaced.
+        # `lower` wants a whole query and the pipeline alone is not one.
+        tail = lower(f"__command__ {pipeline}")
+        source = ir.CommandSource(head, COLUMNS[command], command)
+        return _emit(ir.Query(source, tail.operators), schema)
 
     query = lower(kql)
     result = _emit(query, schema)

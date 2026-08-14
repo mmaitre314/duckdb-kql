@@ -143,6 +143,19 @@ too, and both go through the same translation
 | `.show tables` | `TableName`, `DatabaseName`, `Folder`, `DocString` | Tables **and views** in the current database — a view is a queryable table as far as KQL is concerned. `Folder` and `DocString` are null. |
 | everything else | — | `KustoUnsupportedError`, naming the three that work. |
 
+A command's result can be **piped into query operators**, as it can in Kusto:
+
+```kusto
+.show tables | where TableName startswith "Storm" | project TableName
+.show tables | count
+.show databases | project DatabaseName, IsCurrent
+```
+
+The command half is a fixed set of literals and is case-insensitive; everything
+after the first `|` is ordinary KQL, translated by the ordinary path, so
+identifiers there are case-sensitive and any operator this package does not
+support still raises.
+
 The column names and order are measured against the Kusto Emulator, because
 callers index into them by name and a plausible subset breaks at the point of
 use rather than at the point of translation.

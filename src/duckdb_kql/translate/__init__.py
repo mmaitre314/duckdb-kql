@@ -339,6 +339,11 @@ def render_source(source: ir.Source) -> str:
         ]
         return "SELECT " + ", ".join(cols)
 
+    if isinstance(source, ir.CommandSource):
+        # Already SQL — see duckdb_kql.control. Wrapped so the operators after
+        # it compose exactly as they would over a table.
+        return f"SELECT * FROM ({source.sql})"
+
     if isinstance(source, ir.RangeSource):
         return render_range(source)
 
