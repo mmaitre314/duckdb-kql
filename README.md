@@ -178,7 +178,7 @@ approximation.
 | [`docs/m0-grammar-spike.md`](https://github.com/mmaitre314/duckdb-kql/blob/main/docs/m0-grammar-spike.md) | Grammar viability result |
 | [`docs/frequency-scan-results.md`](https://github.com/mmaitre314/duckdb-kql/blob/main/docs/frequency-scan-results.md) | What KQL constructs actually get used |
 | [`docs/licensing.md`](https://github.com/mmaitre314/duckdb-kql/blob/main/docs/licensing.md) | Third-party licensing review |
-| [demo/](https://github.com/mmaitre314/duckdb-kql/blob/main/demo/duckdb-kql-demo.ipynb) | Notebook tour of all three layers, with outputs |
+| [demo/](https://github.com/mmaitre314/duckdb-kql/blob/main/demo/demo.ipynb) | Notebook tour of all three layers, with outputs |
 | [CONTRIBUTING.md](https://github.com/mmaitre314/duckdb-kql/blob/main/CONTRIBUTING.md) | How to add a mapping, and when not to |
 | [SECURITY.md](https://github.com/mmaitre314/duckdb-kql/blob/main/SECURITY.md) | Reporting vulnerabilities; what is in scope |
 | [Releases](https://github.com/mmaitre314/duckdb-kql/releases) | What changed, and when |

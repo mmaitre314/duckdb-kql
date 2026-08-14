@@ -109,8 +109,9 @@ def test_the_demo_container_can_open_the_notebook() -> None:
     )
 
 
-def test_the_notebook_the_demo_container_points_at_exists() -> None:
-    assert Path("demo/duckdb-kql-demo.ipynb").is_file()
+def test_the_demo_container_has_a_notebook_to_open() -> None:
+    """By existence, not by name — the file has been renamed once already."""
+    assert sorted(Path("demo").glob("*.ipynb")), "demo/ has no notebook in it"
 
 
 def test_the_dev_container_still_has_what_the_demo_one_drops() -> None:

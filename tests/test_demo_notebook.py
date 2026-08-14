@@ -1,11 +1,11 @@
 """The demo notebook is a claim about what the package does. Check it.
 
-`demo/duckdb-kql-demo.ipynb` is committed with its outputs, because that is how
-it gets read — on GitHub, by someone deciding whether this package is worth
-installing. Committed outputs are exactly what makes it dangerous: they keep
-looking authoritative long after the code they describe has moved. A demo that
-has quietly stopped working is a documented claim that the package does
-something it no longer does.
+Everything in `demo/` is committed with its outputs, because that is how it gets
+read — on GitHub, by someone deciding whether this package is worth installing.
+Those committed outputs are exactly what makes it dangerous: they keep looking
+authoritative long after the code they describe has moved. A demo that has
+quietly stopped working is a documented claim that the package does something it
+no longer does.
 
 So the notebook is re-executed here, from the committed source, and any cell
 that raises fails the build. Outputs are not diffed — the notebook prints
@@ -20,46 +20,76 @@ from pathlib import Path
 
 import pytest
 
-NOTEBOOK = Path("demo/duckdb-kql-demo.ipynb")
+DEMO = Path("demo")
 
 nbformat = pytest.importorskip("nbformat")
 
-pytestmark = pytest.mark.skipif(
-    not NOTEBOOK.is_file(), reason="run from the repo root"
-)
+# Skip only when the directory itself is absent — that means we are not at the
+# repo root. Anything else is checked, including "the directory is there and has
+# no notebook in it", which is a bug rather than a reason to stay quiet.
+pytestmark = pytest.mark.skipif(not DEMO.is_dir(), reason="run from the repo root")
+
+#: Found, not named. Renaming the file used to make every test below skip with
+#: "run from the repo root" — including the one that executes it — so the demo
+#: went unverified while the suite stayed green. A missing notebook is now a
+#: failure; a renamed one is simply picked up.
+NOTEBOOKS = sorted(DEMO.glob("*.ipynb"))
 
 
-def _notebook() -> nbformat.NotebookNode:
-    return nbformat.read(NOTEBOOK, as_version=4)
+def test_the_demo_directory_still_has_a_notebook() -> None:
+    assert NOTEBOOKS, (
+        "demo/ contains no .ipynb — if it moved, the tests below are testing "
+        "nothing at all"
+    )
 
 
-def test_the_notebook_has_code_in_it() -> None:
-    cells = [c for c in _notebook().cells if c.cell_type == "code"]
-    assert cells, "the demo has no code cells"
+def _notebook(path: Path) -> nbformat.NotebookNode:
+    return nbformat.read(path, as_version=4)
 
 
-def test_every_code_cell_compiles() -> None:
-    """A cheap check that runs even where a kernel is not available."""
-    for i, cell in enumerate(_notebook().cells):
+@pytest.mark.parametrize("path", NOTEBOOKS, ids=str)
+def test_the_notebook_has_code_in_it(path: Path) -> None:
+    cells = [c for c in _notebook(path).cells if c.cell_type == "code"]
+    assert cells, f"{path} has no code cells"
+
+
+@pytest.mark.parametrize("path", NOTEBOOKS, ids=str)
+def test_every_code_cell_compiles(path: Path) -> None:
+    """A cheap check that runs even where a kernel is not available.
+
+    Cells are run through IPython's input transformer first. A notebook is not
+    plain Python — `!duckdb-kql demo.kql` and `%timeit` are valid in a cell and a
+    SyntaxError to `compile()` — so checking the raw source would report the
+    notebook's own syntax as broken.
+    """
+    transform = pytest.importorskip(
+        "IPython.core.inputtransformer2"
+    ).TransformerManager().transform_cell
+
+    for i, cell in enumerate(_notebook(path).cells):
         if cell.cell_type != "code":
             continue
-        compile(cell.source, f"<cell {i}>", "exec")
+        compile(transform(cell.source), f"<{path} cell {i}>", "exec")
 
 
-def test_the_committed_outputs_are_not_empty() -> None:
+@pytest.mark.parametrize("path", NOTEBOOKS, ids=str)
+def test_every_cell_was_actually_run(path: Path) -> None:
     """An unexecuted notebook renders as a wall of empty cells on GitHub.
 
-    It is also the state the file lands in if someone regenerates without
-    re-running, which is easy to do and invisible in a diff full of JSON.
+    Measured by ``execution_count`` rather than by counting outputs: a cell that
+    assigns without printing has no output and was still run, and a threshold on
+    "how many cells have output" silently stops meaning anything the moment the
+    notebook is resized — which is exactly what happened when it went from 43
+    cells to 18.
     """
-    executed = [
-        c
-        for c in _notebook().cells
-        if c.cell_type == "code" and c.get("outputs")
+    unrun = [
+        i
+        for i, c in enumerate(_notebook(path).cells)
+        if c.cell_type == "code" and c.get("execution_count") is None
     ]
-    assert len(executed) >= 15, (
-        f"only {len(executed)} code cells carry output — the committed notebook "
-        "was not executed — run every cell and save before committing"
+    assert not unrun, (
+        f"cells {unrun} of {path} were never run — run every cell and save "
+        "before committing, or the published outputs are a fiction"
     )
 
 
@@ -68,7 +98,8 @@ def test_the_committed_outputs_are_not_empty() -> None:
     or importlib.util.find_spec("ipykernel") is None,
     reason="nbclient and ipykernel are needed to execute the notebook",
 )
-def test_the_notebook_still_runs() -> None:
+@pytest.mark.parametrize("path", NOTEBOOKS, ids=str)
+def test_the_notebook_still_runs(path: Path) -> None:
     """The one that matters: every cell executes against the current code.
 
     The notebook is hand-maintained, so nothing but this stops it drifting from
@@ -78,14 +109,14 @@ def test_the_notebook_still_runs() -> None:
     from nbclient import NotebookClient  # noqa: PLC0415
     from nbclient.exceptions import CellExecutionError  # noqa: PLC0415
 
-    nb = _notebook()
+    nb = _notebook(path)
     client = NotebookClient(
         nb,
         timeout=600,
         kernel_name="python3",
-        resources={"metadata": {"path": str(NOTEBOOK.parent)}},
+        resources={"metadata": {"path": str(path.parent)}},
     )
     try:
         client.execute()
     except CellExecutionError as exc:  # pragma: no cover - only on a real break
-        pytest.fail(f"the demo notebook no longer runs:\n{exc}")
+        pytest.fail(f"{path} no longer runs:\n{exc}")
