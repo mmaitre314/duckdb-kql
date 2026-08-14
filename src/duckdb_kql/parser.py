@@ -14,6 +14,7 @@ from antlr4.error.ErrorListener import ErrorListener
 
 from ._antlr.KqlLexer import KqlLexer
 from ._antlr.KqlParser import KqlParser
+from .control import is_control_command
 from .errors import Diagnostic, KqlSyntaxError, SourceSpan
 
 __all__ = ["parse", "validate", "ParseResult"]
@@ -40,6 +41,10 @@ class _DiagnosticCollector(ErrorListener):  # type: ignore[misc]  # untyped base
 class ParseResult:
     """A parsed query: the concrete syntax tree plus any diagnostics.
 
+    ``tree`` is ``None`` for a **control command** (`.show tables`). Those are a
+    separate Kusto dialect with their own grammar, so the vendored query grammar
+    has no tree to produce for one — see :mod:`duckdb_kql.control`.
+
     ``tree`` is deliberately typed ``Any``. The ANTLR runtime ships no type
     information, so the concrete syntax tree cannot be described honestly here —
     calling it ``ParserRuleContext`` would name a type a checker resolves to
@@ -64,6 +69,14 @@ class ParseResult:
 
 
 def _build(kql: str) -> ParseResult:
+    # A control command is not KQL, and running it through the query grammar
+    # reports a syntax error listing every keyword in the language. It is
+    # well-formed input that this package supports, so it parses clean and
+    # carries no tree; whether it is *translatable* is `to_sql`'s business,
+    # exactly as it is for an unsupported query construct.
+    if is_control_command(kql):
+        return ParseResult(None, [], kql)
+
     collector = _DiagnosticCollector()
 
     lexer = KqlLexer(InputStream(kql))

@@ -336,53 +336,35 @@ class KustoClient:
         """
         self._check_open()
         con = self._select_database(database)
-        command = " ".join(query.strip().lower().split())
 
-        columns: list[str]
-        types: list[str]
-        rows: list[Row]
+        # One implementation, shared with Layer 0. It used to be hand-rolled
+        # here, and had drifted: `.show version` was missing ServiceOffering and
+        # `.show databases` reported three of Kusto's ten columns, which is the
+        # shape of breakage that only shows up in a caller indexing by name.
+        from ..control import UNSUPPORTED_HINT, translate_control_command
+        from ..errors import KqlUnsupportedError
 
-        if command == ".show version":
-            columns = ["BuildVersion", "BuildTime", "ServiceType", "ProductVersion"]
-            types = ["string", "datetime", "string", "string"]
-            from .. import __version__ as version
-
-            rows = [
-                (
-                    version,
-                    dt.datetime(2026, 1, 1),
-                    "Engine",
-                    f"duckdb-kql {version}",
-                )
-            ]
-        elif command == ".show databases":
-            columns = ["DatabaseName", "PersistentStorage", "Version"]
-            types = ["string", "string", "string"]
-            rows = [
-                (name, self._data_source, "v1.0")
-                for (name,) in con.execute(
-                    "SELECT database_name FROM duckdb_databases() "
-                    "WHERE NOT internal ORDER BY database_name"
-                ).fetchall()
-            ]
-        elif command == ".show tables":
-            columns = ["TableName", "DatabaseName", "Folder", "DocString"]
-            types = ["string", "string", "string", "string"]
-            rows = [
-                (table, db, None, None)
-                for table, db in con.execute(
-                    "SELECT table_name, table_catalog FROM information_schema.tables "
-                    "ORDER BY table_catalog, table_name"
-                ).fetchall()
-            ]
-        else:
+        try:
+            sql = translate_control_command(query)
+        except KqlUnsupportedError as exc:
+            # This client's own refusal type, not a service error: "we do not
+            # implement that command" is a statement about the client, and it is
+            # what callers of execute_mgmt are documented to catch.
             raise KustoUnsupportedError(
-                f"control command {query.strip()!r}",
-                hint=(
-                    "this client implements .show version, .show databases and "
-                    ".show tables; there is no cluster for the rest to act on"
-                ),
-            )
+                f"control command {query.strip()!r}", hint=UNSUPPORTED_HINT
+            ) from exc
+        except KqlError as exc:
+            raise _semantic_error(exc) from exc
+
+        with self._deadline(properties):
+            try:
+                with self._lock:
+                    rel = con.sql(sql)
+                    columns = list(rel.columns)
+                    types = [kusto_type(t) for t in rel.types]
+                    rows = rel.fetchall()
+            except Exception as exc:  # noqa: BLE001 - any engine failure is the answer
+                raise KustoServiceError(str(exc)) from exc
 
         return self._response(query, columns, types, rows, properties)
 

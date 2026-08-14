@@ -178,9 +178,16 @@ def to_sql(
     worth reading on its own. The names still missing are listed in
     ``.unbound``, and executing is what turns them into an error.
     """
+    from .control import is_control_command, translate_control_command
     from .lower import lower
     from .params import bind
+    from .translate import TranslationResult as _Result
     from .translate import to_sql as _emit
+
+    if is_control_command(kql):
+        # `.show tables` and friends are a different dialect (see
+        # duckdb_kql.control). They take no schema and declare no parameters.
+        return _Result(translate_control_command(kql))
 
     query = lower(kql)
     result = _emit(query, schema)

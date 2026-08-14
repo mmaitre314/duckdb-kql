@@ -132,16 +132,25 @@ applied.
 
 ## Control commands
 
-| Command | Behaviour |
-|---|---|
-| `.show version` | Reports the `duckdb-kql` version. |
-| `.show databases` | The DuckDB catalogs currently attached. |
-| `.show tables` | Tables and views visible to the connection. |
-| everything else | `KustoUnsupportedError`. |
+These are not Layer 2 only — `duckdb_kql.kql(con, ".show tables")` runs them
+too, and both go through the same translation
+([`duckdb_kql.control`](../src/duckdb_kql/control.py)).
 
-Ingestion, policy and schema-management commands administer a cluster, and there
-is no cluster. A stub returning an empty table would look like a command that
-worked.
+| Command | Columns (as Kusto returns them) | Behaviour |
+|---|---|---|
+| `.show version` | `BuildVersion`, `BuildTime`, `ServiceType`, `ProductVersion`, `ServiceOffering` | This package's version, and DuckDB's in `ProductVersion`. `BuildTime` is null — there is no build timestamp to report. |
+| `.show databases` | `DatabaseName`, `PersistentStorage`, `Version`, `IsCurrent`, `DatabaseAccessMode`, `PrettyName`, `ReservedSlot1`, `DatabaseId`, `InTransitionTo`, `SuspensionState` | The DuckDB catalogs attached to the connection. `Version` is DuckDB's; `DatabaseId` and the cluster-only columns are null. |
+| `.show tables` | `TableName`, `DatabaseName`, `Folder`, `DocString` | Tables **and views** in the current database — a view is a queryable table as far as KQL is concerned. `Folder` and `DocString` are null. |
+| everything else | — | `KustoUnsupportedError`, naming the three that work. |
+
+The column names and order are measured against the Kusto Emulator, because
+callers index into them by name and a plausible subset breaks at the point of
+use rather than at the point of translation.
+
+Where a column describes something a cluster has and a DuckDB file does not, it
+is **null** rather than filled with something plausible. Ingestion, policy and
+schema-management commands administer a cluster, and there is no cluster; a stub
+returning an empty table would look like a command that worked.
 
 ## Databases
 
