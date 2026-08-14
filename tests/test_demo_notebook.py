@@ -48,6 +48,35 @@ def _notebook(path: Path) -> nbformat.NotebookNode:
 
 
 @pytest.mark.parametrize("path", NOTEBOOKS, ids=str)
+def test_the_notebook_json_has_no_duplicate_keys(path: Path) -> None:
+    """A notebook can be malformed in a way every Python reader forgives.
+
+    An editor wrote `"execution_count"` twice into three cells. Python's `json`
+    keeps the last of a duplicated key, so `nbformat` loaded it, the notebook
+    executed, and every check here passed — while `ruff`, whose parser is
+    stricter, rejected the file outright and failed CI with a message pointing
+    at line 1 of a 500-line JSON document.
+
+    Checked here so the failure names the key and the cell instead.
+    """
+    import json  # noqa: PLC0415
+    from collections import Counter  # noqa: PLC0415
+
+    duplicated: list[str] = []
+
+    def find(pairs: list[tuple[str, object]]) -> dict[str, object]:
+        counts = Counter(key for key, _ in pairs)
+        duplicated.extend(key for key, n in counts.items() if n > 1)
+        return dict(pairs)
+
+    json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=find)
+    assert not duplicated, (
+        f"{path} repeats {sorted(set(duplicated))} within a single JSON object. "
+        "Python reads it happily and ruff does not; re-save the notebook."
+    )
+
+
+@pytest.mark.parametrize("path", NOTEBOOKS, ids=str)
 def test_the_notebook_has_code_in_it(path: Path) -> None:
     cells = [c for c in _notebook(path).cells if c.cell_type == "code"]
     assert cells, f"{path} has no code cells"
