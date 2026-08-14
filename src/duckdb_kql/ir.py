@@ -249,6 +249,16 @@ class Sort(Operator):
 
 
 @dataclass(frozen=True)
+class GetSchema(Operator):
+    """``getschema`` — replace the rows with a description of the columns.
+
+    Unusual among operators in that its output does not depend on the input's
+    *values* at all, only on its shape. That is what makes it useful as a test:
+    it turns "what type is this column" into a row you can assert on.
+    """
+
+
+@dataclass(frozen=True)
 class Count(Operator):
     """``count`` — a single row named ``Count``."""
 

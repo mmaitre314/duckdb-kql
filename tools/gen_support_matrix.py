@@ -176,7 +176,7 @@ OPERATORS: list[tuple[str, str, str]] = [
     ("parse", "T | parse a with * 'x' *", "Needs a pattern-to-regex compiler covering the greedy/lazy `*` forms and typed captures. The largest single gap — around 27 corpus cases. `extract()` and `extract_all()` cover the regex cases meanwhile."),
     ("parse-where", "T | parse-where a with * 'x' *", "The same pattern compiler as `parse`, plus dropping non-matching rows."),
     ("lookup", "T | lookup (T) on a", "A leftouter join with dimension-table semantics. Close to `join kind=leftouter`, which is supported — but the column-collision rules differ, so it is not aliased to it."),
-    ("getschema", "T | getschema", "Needs the input schema *as data*, in KQL type names rather than DuckDB's. The type mapping exists (`duckdb_kql.kusto`); it is not wired to an operator."),
+    ("getschema", "T | getschema", "Reports `ColumnName`, `ColumnOrdinal` (0-based), `DataType` and `ColumnType`, verified against the emulator including the non-obvious .NET names (`bool` is `System.SByte`, `decimal` is `System.Data.SqlTypes.SqlDecimal`). Types are DuckDB's, named as Kusto names them, so a DuckDB type with no Kusto counterpart reports as `dynamic` (composites) or `string` (everything else) rather than inventing a name."),
     ("project-keep", "T | project-keep a", "Wildcard column selection against the input schema. The plumbing `project-away` uses would cover it."),
     ("project-reorder", "T | project-reorder b, a", "The same schema plumbing as `project-keep`, plus the trailing-column rules."),
     ("make-series", "T | make-series n = count() on a from 1 to 2 step 1", "Produces array-valued columns over a generated axis, with gap filling. A different result *shape*, not just a different aggregate."),

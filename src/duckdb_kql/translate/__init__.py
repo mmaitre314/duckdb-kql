@@ -353,6 +353,33 @@ def render_source(source: ir.Source) -> str:
     raise KqlUnsupportedError(f"source:{type(source).__name__}")
 
 
+def render_getschema(prev: str) -> str:
+    """``getschema`` — the input's columns, as rows.
+
+    DuckDB's `DESCRIBE` is the only thing that knows a subquery's column types,
+    and it works as a subquery itself, so the shape is available without the
+    translator having to track types through the pipeline.
+
+    Column names, order and the 0-based ordinal are Kusto's, measured on the
+    emulator. `DataType` is the .NET name it reports (`System.SByte` for a bool,
+    `System.Data.SqlTypes.SqlDecimal` for a decimal), derived from the same
+    table the Kusto client labels its columns with — see duckdb_kql.types.
+    """
+    from ..types import kusto_type_sql, net_type_sql
+
+    inner = (
+        "SELECT column_name AS \"ColumnName\", "
+        "CAST(row_number() OVER () - 1 AS INTEGER) AS \"ColumnOrdinal\", "
+        f"{kusto_type_sql('column_type')} AS \"ColumnType\" "
+        f"FROM (DESCRIBE SELECT * FROM {prev})"
+    )
+    return (
+        'SELECT "ColumnName", "ColumnOrdinal", '
+        f'{net_type_sql(chr(34) + "ColumnType" + chr(34))} AS "DataType", '
+        f'"ColumnType" FROM ({inner})'
+    )
+
+
 def render_datatable(dt: ir.DataTable) -> str:
     """Render ``datatable(...)`` as a VALUES list.
 
@@ -440,6 +467,9 @@ def render_operator(op: ir.Operator, prev: str, cols: list[str] | None = None) -
     if isinstance(op, ir.Take):
         # Row order is undefined without a terminal sort (R10).
         return f"SELECT * FROM {prev} LIMIT {op.count}"
+
+    if isinstance(op, ir.GetSchema):
+        return render_getschema(prev)
 
     if isinstance(op, ir.Count):
         return f"SELECT count(*) AS {quote_ident(op.name)} FROM {prev}"

@@ -37,6 +37,41 @@ from duckdb_kql.control import SUPPORTED, is_control_command
 
 duckdb = pytest.importorskip("duckdb")
 
+#: The full schema Kusto reports for each command — `(name, ordinal, DataType,
+#: ColumnType)` — captured verbatim from `.show X | getschema` on the emulator.
+#:
+#: This is the stronger form of the name check below: a column can carry the
+#: right name and the wrong type, and a caller reading `IsCurrent` as a bool or
+#: `DatabaseId` as a GUID would find out at the point of use. `getschema` turns
+#: "what type is this column" into rows, so the whole shape is one assertion.
+KUSTO_SCHEMA: dict[str, list[tuple[str, int, str, str]]] = {
+    ".show version": [
+        ("BuildVersion", 0, "System.String", "string"),
+        ("BuildTime", 1, "System.DateTime", "datetime"),
+        ("ServiceType", 2, "System.String", "string"),
+        ("ProductVersion", 3, "System.String", "string"),
+        ("ServiceOffering", 4, "System.String", "string"),
+    ],
+    ".show databases": [
+        ("DatabaseName", 0, "System.String", "string"),
+        ("PersistentStorage", 1, "System.String", "string"),
+        ("Version", 2, "System.String", "string"),
+        ("IsCurrent", 3, "System.SByte", "bool"),
+        ("DatabaseAccessMode", 4, "System.String", "string"),
+        ("PrettyName", 5, "System.String", "string"),
+        ("ReservedSlot1", 6, "System.SByte", "bool"),
+        ("DatabaseId", 7, "System.Guid", "guid"),
+        ("InTransitionTo", 8, "System.String", "string"),
+        ("SuspensionState", 9, "System.String", "string"),
+    ],
+    ".show tables": [
+        ("TableName", 0, "System.String", "string"),
+        ("DatabaseName", 1, "System.String", "string"),
+        ("Folder", 2, "System.String", "string"),
+        ("DocString", 3, "System.String", "string"),
+    ],
+}
+
 #: Measured on the emulator. Order is part of the shape.
 KUSTO_COLUMNS = {
     ".show version": [
@@ -86,6 +121,19 @@ def test_the_command_runs_through_the_public_api(con, command: str) -> None:
 @pytest.mark.parametrize("command", SUPPORTED)
 def test_the_columns_are_the_ones_kusto_returns(con, command: str) -> None:
     assert list(duckdb_kql.kql(con, command).columns) == KUSTO_COLUMNS[command]
+
+
+@pytest.mark.parametrize("command", SUPPORTED)
+def test_the_whole_schema_is_the_one_kusto_returns(con, command: str) -> None:
+    """Names, order, ordinals and types — checked with `getschema` itself.
+
+    The names alone were already asserted above, and names alone are not enough:
+    `IsCurrent` typed as a string, or `DatabaseId` as text rather than a guid,
+    would pass that check and break a caller that reads them. Running the same
+    `| getschema` we run against Kusto makes the comparison total.
+    """
+    rows = [tuple(r) for r in duckdb_kql.kql(con, f"{command} | getschema").fetchall()]
+    assert rows == [tuple(r) for r in KUSTO_SCHEMA[command]]
 
 
 @pytest.mark.parametrize(
@@ -289,9 +337,13 @@ def test_the_pipeline_filters_real_rows(con) -> None:
 
 
 def test_an_unsupported_operator_after_a_command_still_refuses(con) -> None:
-    """`getschema` is not implemented, and composing must not paper over that."""
+    """Composing must not paper over an operator we do not implement.
+
+    This used to assert `getschema` raises, which it did until it was
+    implemented — so the case is now made with one that still does not.
+    """
     with pytest.raises(duckdb_kql.KqlUnsupportedError):
-        duckdb_kql.to_sql(".show version | getschema")
+        duckdb_kql.to_sql(".show tables | evaluate bag_unpack(Folder)")
 
 
 def test_the_split_matches_the_command_before_looking_for_a_pipe() -> None:

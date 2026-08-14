@@ -447,6 +447,9 @@ def _lower_operator(node: Any) -> ir.Operator | None:
             raise _unsupported(node, "take", )
         return ir.Take(int(count.value))
 
+    if kind == "GetSchemaOperator":
+        return ir.GetSchema()
+
     if kind == "CountOperator":
         if kids:  # `count as Name`
             return ir.Count(kids[-1].getText())

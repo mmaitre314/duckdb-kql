@@ -20,12 +20,13 @@ import base64
 import datetime as dt
 import json
 import math
-import re
 import uuid
 from collections.abc import Callable, Iterator, Sequence
 from decimal import Decimal
 from enum import Enum
 from typing import Any
+
+from ..types import kusto_type
 
 __all__ = [
     "WellKnownDataSet",
@@ -65,57 +66,9 @@ class WellKnownDataSet(str, Enum):
 # DuckDB types and values -> Kusto's
 # ---------------------------------------------------------------------------
 
-#: DuckDB type name -> Kusto scalar type name. DuckDB has more integer widths
-#: than Kusto does; anything wider than 32 bits reports as ``long`` because that
-#: is the only 64-bit integer Kusto has.
-_TYPE_MAP = {
-    "BOOLEAN": "bool",
-    "TINYINT": "int",
-    "UTINYINT": "int",
-    "SMALLINT": "int",
-    "USMALLINT": "int",
-    "INTEGER": "int",
-    "UINTEGER": "long",
-    "BIGINT": "long",
-    "UBIGINT": "long",
-    "HUGEINT": "long",
-    "UHUGEINT": "long",
-    "FLOAT": "real",
-    "DOUBLE": "real",
-    "VARCHAR": "string",
-    "UUID": "guid",
-    "DATE": "datetime",
-    "TIMESTAMP": "datetime",
-    "TIMESTAMP WITH TIME ZONE": "datetime",
-    "TIMESTAMP_S": "datetime",
-    "TIMESTAMP_MS": "datetime",
-    "TIMESTAMP_NS": "datetime",
-    "TIME": "timespan",
-    "INTERVAL": "timespan",
-    "JSON": "dynamic",
-    "BLOB": "string",
-    "BIT": "string",
-}
-
-_DECIMAL = re.compile(r"^DECIMAL\(", re.IGNORECASE)
-#: Composite types have no Kusto counterpart other than dynamic, which is
-#: exactly what they are: a nested document.
-_COMPOSITE = re.compile(r"(\[\]$|^STRUCT|^MAP|^UNION|^LIST)", re.IGNORECASE)
-
-
-def kusto_type(duckdb_type: Any) -> str:
-    """Name the Kusto scalar type a DuckDB column corresponds to."""
-    name = str(duckdb_type).upper()
-    if name in _TYPE_MAP:
-        return _TYPE_MAP[name]
-    if _DECIMAL.match(name):
-        return "decimal"
-    if _COMPOSITE.search(name):
-        return "dynamic"
-    # An unmapped type still has a faithful string form, and `string` is the one
-    # answer that cannot make a value look like something it is not.
-    return "string"
-
+# The DuckDB -> Kusto type mapping lives in duckdb_kql.types, because
+# `getschema` needs the same table as a SQL expression. Two copies of it would
+# mean a `getschema` that disagreed with the column types printed beside it.
 
 #: Kusto's widest integer is a 64-bit `long`. DuckDB's UBIGINT, HUGEINT and
 #: UHUGEINT are wider, so a value can be a perfectly good DuckDB integer and

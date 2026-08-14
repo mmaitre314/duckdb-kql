@@ -90,6 +90,8 @@ def _operator_columns(
         return [op.name or c if c == op.column else c for c in cols] + (
             [op.item_index] if op.item_index else []
         )
+    if isinstance(op, ir.GetSchema):
+        return ["ColumnName", "ColumnOrdinal", "DataType", "ColumnType"]
     if isinstance(op, ir.Count):
         return [op.name]
     if isinstance(op, ir.Distinct):
