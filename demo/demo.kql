@@ -1,0 +1,3 @@
+Requests
+| where Status >= 500
+| summarize Errors = count() by Service
