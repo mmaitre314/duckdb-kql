@@ -138,10 +138,9 @@ def _serve(argv: Sequence[str]) -> int:
     try:
         serve(args.database, port=args.port, allowed_origins=origins)
     except ImportError as exc:  # pragma: no cover - depends on the install
-        print(
-            f"duckdb-kql serve: {exc}\nInstall the engine extra: pip install 'duckdb-kql[duckdb]'",
-            file=sys.stderr,
-        )
+        # `engine._require_duckdb` already names the extra to install; repeating
+        # it here would print the same instruction twice.
+        print(f"duckdb-kql serve: {exc}", file=sys.stderr)
         return EXIT_TRANSLATION_ERROR
     except OSError as exc:
         print(f"duckdb-kql serve: {exc}", file=sys.stderr)

@@ -528,7 +528,14 @@ class KustoRestServer(ThreadingHTTPServer):
         #: What a Kusto client calls it. Not the same thing: a DuckDB file at
         #: `./logs.duckdb` is the database named `logs`, and that name is what
         #: `.show databases` reports and what the client sends back to us.
-        self.database = str(con.execute("SELECT current_database()").fetchone()[0])
+        #
+        # `fetchone()` is Optional, and a scalar SELECT cannot return no row —
+        # so the check is not defensiveness, it is the type saying that a
+        # connection which has already been closed would come back empty here.
+        current = con.execute("SELECT current_database()").fetchone()
+        if current is None:  # pragma: no cover - a closed connection
+            raise ValueError("the connection reports no current database")
+        self.database = str(current[0])
         self.quiet = quiet
         self._lock = threading.Lock()
 
