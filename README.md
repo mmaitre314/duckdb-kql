@@ -57,6 +57,20 @@ duckdb-kql queries/ -o build/sql/ --check   # fails the build if a .sql is stale
 
 See [Build-time translation](https://github.com/mmaitre314/duckdb-kql/blob/main/docs/cli.md).
 
+## Query it from the Azure Data Explorer UI
+
+`duckdb-kql serve` puts a local Kusto REST endpoint in front of a DuckDB file,
+so Kusto's own tools can query it. Standard library only — no new dependency.
+
+```bash
+duckdb-kql serve analytics.duckdb     # http://127.0.0.1:31415
+```
+
+Open <https://dataexplorer.azure.com>, choose **Add connection**, and paste that
+URL. It listens on loopback only and cannot be told otherwise, because it
+answers unauthenticated queries: see
+[A local Kusto endpoint](https://github.com/mmaitre314/duckdb-kql/blob/main/docs/kusto-server.md).
+
 ## Three layers
 
 | Layer | Import | Needs | For |
@@ -167,6 +181,7 @@ approximation.
 | [Getting started](https://github.com/mmaitre314/duckdb-kql/blob/main/docs/getting-started.md) | Install, first query, the three layers |
 | [**KQL support matrix**](https://github.com/mmaitre314/duckdb-kql/blob/main/docs/kql-support.md) | Every operator and function, supported or not, each with its gotchas |
 | [Build-time CLI](https://github.com/mmaitre314/duckdb-kql/blob/main/docs/cli.md) | Translating `.kql` to `.sql` in CI, to avoid a runtime dependency |
+| [Local Kusto endpoint](https://github.com/mmaitre314/duckdb-kql/blob/main/docs/kusto-server.md) | `duckdb-kql serve` — query a DuckDB file from the Azure Data Explorer UI |
 | [API reference](https://github.com/mmaitre314/duckdb-kql/blob/main/docs/api.md) | Every public function and type |
 | [Kusto SDK compatibility](https://github.com/mmaitre314/duckdb-kql/blob/main/docs/kusto-client.md) | What Layer 2 implements, no-ops, and refuses |
 | [Azure Monitor profile](https://github.com/mmaitre314/duckdb-kql/blob/main/docs/azure-monitor-profile.md) | Coverage against a published KQL subset |

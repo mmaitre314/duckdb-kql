@@ -3,6 +3,11 @@
 Translate `.kql` to `.sql` once, in CI. What ships is plain SQL, and **nothing
 that runs it needs this package** — not the transpiler, not Python.
 
+> There is one subcommand, `duckdb-kql serve`, which does something else
+> entirely: it runs a [local Kusto REST endpoint](kusto-server.md) over a DuckDB
+> database. Everything that is not the literal word `serve` is a file to
+> translate, so nothing on this page changes.
+
 ```bash
 pip install duckdb-kql                      # antlr4 only; no database
 duckdb-kql queries/ -o build/sql/           # translate

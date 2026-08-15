@@ -64,37 +64,62 @@ KUSTO_SCHEMA: dict[str, list[tuple[str, int, str, str]]] = {
         ("InTransitionTo", 8, "System.String", "string"),
         ("SuspensionState", 9, "System.String", "string"),
     ],
+    ".show databases entities": [
+        ("DatabaseName", 0, "System.String", "string"),
+        ("EntityType", 1, "System.String", "string"),
+        ("EntityName", 2, "System.String", "string"),
+        ("DocString", 3, "System.String", "string"),
+        ("Folder", 4, "System.String", "string"),
+        ("CslInputSchema", 5, "System.String", "string"),
+        ("Content", 6, "System.String", "string"),
+        ("CslOutputSchema", 7, "System.String", "string"),
+        ("Properties", 8, "System.Object", "dynamic"),
+    ],
     ".show tables": [
         ("TableName", 0, "System.String", "string"),
         ("DatabaseName", 1, "System.String", "string"),
         ("Folder", 2, "System.String", "string"),
         ("DocString", 3, "System.String", "string"),
     ],
+    # Worth reading against `control.SCHEMA`, which records the same command's
+    # columns as its *REST envelope* declares them. They disagree: here
+    # `IsHealthy` is `System.SByte` and `Lookback` is `timespan`; there they are
+    # `Boolean` and `time`. Both are Kusto's answers — one is what a query
+    # operator sees, the other what the management endpoint announces.
+    ".show materialized-views": [
+        ("Name", 0, "System.String", "string"),
+        ("SourceTable", 1, "System.String", "string"),
+        ("Query", 2, "System.String", "string"),
+        ("MaterializedTo", 3, "System.DateTime", "datetime"),
+        ("LastRun", 4, "System.DateTime", "datetime"),
+        ("LastRunResult", 5, "System.String", "string"),
+        ("IsHealthy", 6, "System.SByte", "bool"),
+        ("IsEnabled", 7, "System.SByte", "bool"),
+        ("Status", 8, "System.String", "string"),
+        ("Folder", 9, "System.String", "string"),
+        ("DocString", 10, "System.String", "string"),
+        ("AutoUpdateSchema", 11, "System.SByte", "bool"),
+        ("EffectiveDateTime", 12, "System.DateTime", "datetime"),
+        ("LastDefinitionUpdate", 13, "System.DateTime", "datetime"),
+        ("Lookback", 14, "System.TimeSpan", "timespan"),
+        ("LookbackColumn", 15, "System.String", "string"),
+    ],
 }
 
-#: Measured on the emulator. Order is part of the shape.
+#: Measured on the emulator. Order is part of the shape. Derived from the schema
+#: above so the two cannot describe different tables.
 KUSTO_COLUMNS = {
-    ".show version": [
-        "BuildVersion",
-        "BuildTime",
-        "ServiceType",
-        "ProductVersion",
-        "ServiceOffering",
-    ],
-    ".show databases": [
-        "DatabaseName",
-        "PersistentStorage",
-        "Version",
-        "IsCurrent",
-        "DatabaseAccessMode",
-        "PrettyName",
-        "ReservedSlot1",
-        "DatabaseId",
-        "InTransitionTo",
-        "SuspensionState",
-    ],
-    ".show tables": ["TableName", "DatabaseName", "Folder", "DocString"],
+    command: [name for name, _, _, _ in columns]
+    for command, columns in KUSTO_SCHEMA.items()
 }
+
+#: Commands whose result is always empty here, and legitimately so. A
+#: materialized view is a cluster-side incremental aggregation with its own
+#: scheduler; there is nothing in a DuckDB file to schedule. The command still
+#: has to *answer* — the web UI asks for it while opening a database, and a
+#: refusal reads as a broken connection — so it returns its sixteen columns and
+#: no rows.
+ALWAYS_EMPTY = {".show materialized-views"}
 
 
 @pytest.fixture(scope="module")
@@ -114,8 +139,25 @@ def con():
 @pytest.mark.parametrize("command", SUPPORTED)
 def test_the_command_runs_through_the_public_api(con, command: str) -> None:
     """`duckdb_kql.kql(con, ".show tables")` raised KqlSyntaxError."""
-    rows = duckdb_kql.kql(con, command).fetchall()
-    assert rows, f"{command} returned nothing"
+    result = duckdb_kql.kql(con, command)
+    # A table, not an exception, is what the bug was about — and a command with
+    # nothing to report still produced one, so the shape is what to assert.
+    assert list(result.columns) == KUSTO_COLUMNS[command]
+    rows = result.fetchall()
+    if command not in ALWAYS_EMPTY:
+        assert rows, f"{command} returned nothing"
+
+
+@pytest.mark.parametrize("command", sorted(ALWAYS_EMPTY))
+def test_an_always_empty_command_answers_rather_than_refusing(con, command: str) -> None:
+    """Zero rows and the full column list — not an error.
+
+    The distinction matters to a client: an empty table says "there are none of
+    these", and a refusal says "this connection is broken".
+    """
+    result = duckdb_kql.kql(con, command)
+    assert result.fetchall() == []
+    assert list(result.columns) == KUSTO_COLUMNS[command]
 
 
 @pytest.mark.parametrize("command", SUPPORTED)

@@ -13,7 +13,14 @@ from __future__ import annotations
 
 import re
 
-__all__ = ["kusto_type", "net_type", "DUCKDB_TO_KQL", "KQL_TO_NET", "kusto_type_sql"]
+__all__ = [
+    "kusto_type",
+    "net_type",
+    "rest_datatype",
+    "DUCKDB_TO_KQL",
+    "KQL_TO_NET",
+    "kusto_type_sql",
+]
 
 #: DuckDB type name -> Kusto scalar type. DuckDB has more integer widths than
 #: Kusto does; anything wider than 32 bits reports as ``long`` because that is
@@ -90,6 +97,22 @@ def kusto_type(duckdb_type: object) -> str:
 def net_type(kql_type: str) -> str:
     """The .NET type name Kusto reports for a KQL type."""
     return KQL_TO_NET.get(kql_type, KQL_TO_NET[_FALLBACK])
+
+
+def rest_datatype(kql_type: str) -> str:
+    """The ``DataType`` a v1 REST *query* response carries for a KQL type.
+
+    The same .NET name as `getschema` reports, with the namespace dropped:
+    `System.SByte` -> `SByte`, `System.Data.SqlTypes.SqlDecimal` ->
+    `SqlDecimal`. Derived rather than tabulated a second time — measured on the
+    emulator across all ten types, and the rule holds for every one.
+
+    Query results only. A **control command** declares its own result schema
+    inside Kusto, and those declarations do not follow this rule — `.show
+    databases` labels a bool column `Boolean`, not `SByte`. They are transcribed
+    in :data:`duckdb_kql.control.SCHEMA` instead.
+    """
+    return net_type(kql_type).rsplit(".", 1)[-1]
 
 
 def kusto_type_sql(column: str) -> str:

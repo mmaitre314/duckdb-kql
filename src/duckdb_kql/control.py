@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable
+from typing import NamedTuple
 
 from .errors import KqlUnsupportedError
 
@@ -45,40 +46,128 @@ __all__ = [
     "translate_control_command",
     "split_command",
     "COLUMNS",
+    "SCHEMA",
     "SUPPORTED",
     "UNSUPPORTED_HINT",
 ]
 
-#: Commands this package implements, normalized. Anything else `.`-prefixed
-#: describes administering a cluster — ingestion, policies, schema management —
-#: and there is no cluster for it to act on.
-SUPPORTED = (".show version", ".show databases", ".show tables")
+class CommandColumn(NamedTuple):
+    """One column of a command's result, as Kusto *declares* it on the wire.
+
+    Both labels are recorded because neither is derivable from the other, and
+    neither is derivable from the KQL type. See :data:`SCHEMA`.
+    """
+
+    #: The name a caller indexes by.
+    name: str
+    #: The v1 REST ``DataType``: a .NET type name without its namespace.
+    data_type: str
+    #: The ``ColumnType``: a CSL type name. ``None`` for the commands that omit
+    #: the field entirely.
+    column_type: str | None
+
 
 #: What each command produces, measured on the emulator. Needed once a command
 #: can be piped: the operators that resolve names before the query runs — `join`
-#: renaming, `extend`'s in-place ordering — have to know them.
-COLUMNS: dict[str, tuple[str, ...]] = {
+#: renaming, `extend`'s in-place ordering — have to know the names. The two type
+#: labels are needed by the REST server, which reports a bare command's schema
+#: as Kusto declares it rather than as DuckDB happens to compute it.
+#:
+#: **The labels are per-command data, not a rule.** A control command's result
+#: schema is declared inside Kusto, and the declarations disagree with each
+#: other and with the query path. Measured on the emulator:
+#:
+#: * `.show databases`.IsCurrent is `Boolean`/`bool`, but a `bool` column in a
+#:   *query* result is `SByte`/`bool` — and `.show operations`.ShouldRetry, also
+#:   a command, is `SByte` too.
+#: * `.show materialized-views`.Lookback is `TimeSpan`/**`time`**, the legacy CSL
+#:   spelling, while `.show operations`.Duration is `TimeSpan`/`timespan`.
+#: * `.show version` and `.show database schema` omit `ColumnType` altogether.
+#:
+#: So these are transcribed, not generated. Deriving them from
+#: :func:`duckdb_kql.types.rest_datatype` would produce a self-consistent table
+#: that disagreed with Kusto on two of the five commands here.
+SCHEMA: dict[str, tuple[CommandColumn, ...]] = {
     ".show version": (
-        "BuildVersion",
-        "BuildTime",
-        "ServiceType",
-        "ProductVersion",
-        "ServiceOffering",
+        CommandColumn("BuildVersion", "String", None),
+        CommandColumn("BuildTime", "DateTime", None),
+        CommandColumn("ServiceType", "String", None),
+        CommandColumn("ProductVersion", "String", None),
+        CommandColumn("ServiceOffering", "String", None),
     ),
     ".show databases": (
-        "DatabaseName",
-        "PersistentStorage",
-        "Version",
-        "IsCurrent",
-        "DatabaseAccessMode",
-        "PrettyName",
-        "ReservedSlot1",
-        "DatabaseId",
-        "InTransitionTo",
-        "SuspensionState",
+        CommandColumn("DatabaseName", "String", "string"),
+        CommandColumn("PersistentStorage", "String", "string"),
+        CommandColumn("Version", "String", "string"),
+        CommandColumn("IsCurrent", "Boolean", "bool"),
+        CommandColumn("DatabaseAccessMode", "String", "string"),
+        CommandColumn("PrettyName", "String", "string"),
+        CommandColumn("ReservedSlot1", "Boolean", "bool"),
+        CommandColumn("DatabaseId", "Guid", "guid"),
+        CommandColumn("InTransitionTo", "String", "string"),
+        CommandColumn("SuspensionState", "String", "string"),
     ),
-    ".show tables": ("TableName", "DatabaseName", "Folder", "DocString"),
+    ".show tables": (
+        CommandColumn("TableName", "String", "string"),
+        CommandColumn("DatabaseName", "String", "string"),
+        CommandColumn("Folder", "String", "string"),
+        CommandColumn("DocString", "String", "string"),
+    ),
+    # The web UI reads this one to build its schema tree: `CslOutputSchema`
+    # carries each table's columns as `name:kqltype`, which is why the type
+    # mapping has to be right here and not merely plausible.
+    #
+    # `Properties` is `Object` on Azure Data Explorer today; the pinned emulator
+    # image still says `JObject`. The service's own answer wins — the web UI is
+    # the consumer, and it is the service the UI is written against.
+    ".show databases entities": (
+        CommandColumn("DatabaseName", "String", "string"),
+        CommandColumn("EntityType", "String", "string"),
+        CommandColumn("EntityName", "String", "string"),
+        CommandColumn("DocString", "String", "string"),
+        CommandColumn("Folder", "String", "string"),
+        CommandColumn("CslInputSchema", "String", "string"),
+        CommandColumn("Content", "String", "string"),
+        CommandColumn("CslOutputSchema", "String", "string"),
+        CommandColumn("Properties", "Object", "dynamic"),
+    ),
+    # Always empty: a materialized view is a cluster-side incremental
+    # aggregation with its own scheduler, and there is nothing here to schedule.
+    # Reported as an empty table rather than refused, because the web UI asks
+    # for it while opening a database and a refusal reads as a broken connection.
+    ".show materialized-views": (
+        CommandColumn("Name", "String", "string"),
+        CommandColumn("SourceTable", "String", "string"),
+        CommandColumn("Query", "String", "string"),
+        CommandColumn("MaterializedTo", "DateTime", "datetime"),
+        CommandColumn("LastRun", "DateTime", "datetime"),
+        CommandColumn("LastRunResult", "String", "string"),
+        CommandColumn("IsHealthy", "Boolean", "bool"),
+        CommandColumn("IsEnabled", "Boolean", "bool"),
+        CommandColumn("Status", "String", "string"),
+        CommandColumn("Folder", "String", "string"),
+        CommandColumn("DocString", "String", "string"),
+        CommandColumn("AutoUpdateSchema", "Boolean", "bool"),
+        CommandColumn("EffectiveDateTime", "DateTime", "datetime"),
+        CommandColumn("LastDefinitionUpdate", "DateTime", "datetime"),
+        CommandColumn("Lookback", "TimeSpan", "time"),
+        CommandColumn("LookbackColumn", "String", "string"),
+    ),
 }
+
+#: Just the names, which is all the pipe machinery needs. Derived so the two
+#: cannot disagree about a command's shape.
+COLUMNS: dict[str, tuple[str, ...]] = {
+    command: tuple(column.name for column in columns) for command, columns in SCHEMA.items()
+}
+
+#: Commands this package implements, normalized. Anything else `.`-prefixed
+#: describes administering a cluster — ingestion, policies, schema management —
+#: and there is no cluster for it to act on.
+#:
+#: Derived, because a command listed here without a schema would be refused by
+#: the translator and announced as supported by the error message.
+SUPPORTED: tuple[str, ...] = tuple(SCHEMA)
 
 #: Said once, so Layer 0's KqlUnsupportedError and Layer 2's
 #: KustoUnsupportedError cannot drift into describing different sets.
@@ -156,9 +245,7 @@ def translate_control_command(text: str) -> str:
         )
     build = _COMMANDS.get(command)
     if build is None:
-        raise KqlUnsupportedError(
-            f"control command {text.strip()!r}", hint=UNSUPPORTED_HINT
-        )
+        raise KqlUnsupportedError(f"control command {text.strip()!r}", hint=UNSUPPORTED_HINT)
     return build()
 
 
@@ -230,9 +317,71 @@ FROM information_schema.tables
 WHERE table_catalog = current_database()
 ORDER BY "TableName\""""
 
+
+def _entities_sql() -> str:
+    """`.show databases entities` — one row per table, with its column list.
+
+    `CslOutputSchema` is the load-bearing column: `C0:long, C1:datetime`, in KQL
+    type names. The Azure Data Explorer web UI reads it to draw the schema tree,
+    so a wrong type here is visible in the product rather than buried.
+    """
+    from .types import kusto_type_sql
+
+    column_list = (
+        "SELECT string_agg(c.column_name || ':' || "
+        f"{kusto_type_sql('c.data_type')}, ', ' ORDER BY c.ordinal_position) "
+        "FROM information_schema.columns c "
+        "WHERE c.table_catalog = t.table_catalog AND c.table_schema = t.table_schema "
+        "AND c.table_name = t.table_name"
+    )
+    return f"""\
+SELECT t.table_catalog AS "DatabaseName",
+       'Table' AS "EntityType",
+       t.table_name AS "EntityName",
+       '' AS "DocString",
+       '' AS "Folder",
+       '' AS "CslInputSchema",
+       '' AS "Content",
+       coalesce(({column_list}), '') AS "CslOutputSchema",
+       CAST('{{"column_docs":{{}}}}' AS JSON) AS "Properties"
+FROM information_schema.tables t
+WHERE t.table_catalog = current_database()
+ORDER BY "EntityName"
+"""
+
+
+def _materialized_views_sql() -> str:
+    """`.show materialized-views` — the sixteen columns, and never a row.
+
+    Typed by casting rather than left to inference: an empty result still has to
+    report `IsHealthy` as a bool and `Lookback` as a timespan, or a client that
+    reads the schema of an empty table gets a different answer from Kusto's.
+    """
+    return """\
+SELECT CAST(NULL AS VARCHAR) AS "Name",
+       CAST(NULL AS VARCHAR) AS "SourceTable",
+       CAST(NULL AS VARCHAR) AS "Query",
+       CAST(NULL AS TIMESTAMP) AS "MaterializedTo",
+       CAST(NULL AS TIMESTAMP) AS "LastRun",
+       CAST(NULL AS VARCHAR) AS "LastRunResult",
+       CAST(NULL AS BOOLEAN) AS "IsHealthy",
+       CAST(NULL AS BOOLEAN) AS "IsEnabled",
+       CAST(NULL AS VARCHAR) AS "Status",
+       CAST(NULL AS VARCHAR) AS "Folder",
+       CAST(NULL AS VARCHAR) AS "DocString",
+       CAST(NULL AS BOOLEAN) AS "AutoUpdateSchema",
+       CAST(NULL AS TIMESTAMP) AS "EffectiveDateTime",
+       CAST(NULL AS TIMESTAMP) AS "LastDefinitionUpdate",
+       CAST(NULL AS INTERVAL) AS "Lookback",
+       CAST(NULL AS VARCHAR) AS "LookbackColumn"
+WHERE FALSE"""
+
+
 #: Normalized command -> the function that produces its SQL.
 _COMMANDS: dict[str, Callable[[], str]] = {
     ".show version": _version_sql,
     ".show databases": _databases_sql,
+    ".show databases entities": _entities_sql,
     ".show tables": _tables_sql,
+    ".show materialized-views": _materialized_views_sql,
 }

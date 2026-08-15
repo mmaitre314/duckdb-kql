@@ -5,8 +5,8 @@ your queries in CI, commit or ship the ``.sql``, and the thing that runs them
 needs nothing from this package — not even DuckDB's Python bindings. A Go
 service, a dbt model, a psql script and a notebook can all read the same file.
 
-It is Layer 0 only: no database is opened and ``duckdb`` is never imported, so
-``pip install duckdb-kql`` alone is enough to run it.
+Translation is Layer 0 only: no database is opened and ``duckdb`` is never
+imported, so ``pip install duckdb-kql`` alone is enough to run it.
 
 ::
 
@@ -16,6 +16,15 @@ It is Layer 0 only: no database is opened and ``duckdb`` is never imported, so
 The ``--check`` mode is the one that belongs in CI: it regenerates in memory and
 compares, so a ``.kql`` edited without regenerating its ``.sql`` fails the build
 instead of shipping a stale query.
+
+There is one subcommand, ``serve``, which is a different job entirely — it runs
+a local Kusto-compatible HTTP endpoint over a DuckDB database so that Kusto
+tools, including the Azure Data Explorer web UI, can query it::
+
+    duckdb-kql serve logs.duckdb
+
+It needs the ``duckdb`` extra. Everything that is not the literal word ``serve``
+is a file to translate, so the interface above is unchanged.
 """
 
 from __future__ import annotations
@@ -31,6 +40,10 @@ from typing import Any
 from . import __version__, to_sql
 from .errors import KqlError, KqlSyntaxError
 
+# Layer 0: `server` is stdlib-only at import time and reaches for duckdb only
+# once a server is actually built, so naming its defaults here costs nothing.
+from .server import ADX_ORIGINS, DEFAULT_PORT
+
 __all__ = ["main"]
 
 #: Exit codes. Distinct so a CI step can tell "your query is wrong" from "your
@@ -43,6 +56,13 @@ EXIT_STALE = 3
 
 def main(argv: Sequence[str] | None = None) -> int:
     """Entry point. Returns a process exit code rather than raising."""
+    argv = list(sys.argv[1:] if argv is None else argv)
+    # Dispatched by hand rather than with argparse subparsers, because
+    # subparsers would make the existing form — a bare list of files — a
+    # subcommand too, and every documented invocation would have to change.
+    if argv and argv[0] == "serve":
+        return _serve(argv[1:])
+
     args = _parser().parse_args(argv)
 
     try:
@@ -102,6 +122,75 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         return EXIT_STALE
     return EXIT_OK
+
+
+# ---------------------------------------------------------------------------
+# serve
+# ---------------------------------------------------------------------------
+
+
+def _serve(argv: Sequence[str]) -> int:
+    """``duckdb-kql serve`` — a local Kusto endpoint over a DuckDB database."""
+    args = _serve_parser().parse_args(argv)
+    from .server import serve  # noqa: PLC0415
+
+    origins = tuple(args.allow_origin) if args.allow_origin else ADX_ORIGINS
+    try:
+        serve(args.database, port=args.port, allowed_origins=origins)
+    except ImportError as exc:  # pragma: no cover - depends on the install
+        print(
+            f"duckdb-kql serve: {exc}\nInstall the engine extra: pip install 'duckdb-kql[duckdb]'",
+            file=sys.stderr,
+        )
+        return EXIT_TRANSLATION_ERROR
+    except OSError as exc:
+        print(f"duckdb-kql serve: {exc}", file=sys.stderr)
+        return EXIT_TRANSLATION_ERROR
+    return EXIT_OK
+
+
+def _serve_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="duckdb-kql serve",
+        description=(
+            "Serve a DuckDB database over the Kusto REST API, so Kusto tools "
+            "can query it. Open https://dataexplorer.azure.com, choose Add "
+            "connection, and give it the URL this prints."
+        ),
+        epilog=(
+            "Listens on 127.0.0.1 only and cannot be made to listen anywhere "
+            "else: it answers unauthenticated queries, so reaching it has to "
+            "mean already being on this machine."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "database",
+        nargs="?",
+        default=":memory:",
+        metavar="DATABASE",
+        help="DuckDB database file to serve. Omit for an empty in-memory one.",
+    )
+    parser.add_argument(
+        "-p",
+        "--port",
+        type=int,
+        default=DEFAULT_PORT,
+        metavar="PORT",
+        help=f"TCP port to listen on (default: {DEFAULT_PORT})",
+    )
+    parser.add_argument(
+        "--allow-origin",
+        action="append",
+        metavar="ORIGIN",
+        help=(
+            "additionally allow a browser origin to make cross-origin requests. "
+            "Repeatable. Replaces the Azure Data Explorer default list, and is a "
+            "decision about who may read this database from another browser tab."
+        ),
+    )
+    parser.add_argument("--version", action="version", version=f"duckdb-kql {__version__}")
+    return parser
 
 
 # ---------------------------------------------------------------------------

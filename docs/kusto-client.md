@@ -42,6 +42,13 @@ safe one.
 
 Generated from `OPTION_SUPPORT`, which is the source of truth.
 
+This table is the *Python API's* policy: `set_option` raises at the line that
+asks for something impossible, which is the right answer for a caller who can
+change that line. [`duckdb-kql serve`](kusto-server.md#request-options) judges
+`queryconsistency` and `query_language` by their value instead, because there
+the caller is a web UI that sends them on every request and cannot be edited.
+Neither ever accepts an option and ignores it.
+
 | Option | Support | Why |
 |---|---|---|
 | `servertimeout` | **Implemented** | Enforced by interrupting the DuckDB query when the deadline passes. |

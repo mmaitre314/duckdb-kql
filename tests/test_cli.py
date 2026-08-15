@@ -314,3 +314,56 @@ def test_the_console_script_is_declared() -> None:
 
     scripts = read_pyproject()["project"]["scripts"]
     assert scripts["duckdb-kql"] == "duckdb_kql.cli:main"
+
+
+# ---------------------------------------------------------------------------
+# The `serve` subcommand
+# ---------------------------------------------------------------------------
+
+
+def test_serve_is_the_only_word_that_is_not_a_filename(project: Path) -> None:
+    """Adding a subcommand must not turn the documented form into one.
+
+    `duckdb-kql queries/ -o out/` has to keep working exactly as before, which
+    is why the dispatch is a single literal rather than argparse subparsers.
+    """
+    out = project / "out"
+    assert main([str(project / "queries"), "-o", str(out)]) == EXIT_OK
+    assert (out / "count.sql").is_file()
+
+
+def test_a_kql_file_called_serve_is_still_translated(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Only the bare word dispatches; `serve.kql` is a file like any other."""
+    query = tmp_path / "serve.kql"
+    query.write_text(SIMPLE, encoding="utf-8")
+    assert main([str(query)]) == EXIT_OK
+    assert "SELECT" in capsys.readouterr().out
+
+
+def test_serve_help_describes_the_local_only_guarantee(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A user deciding whether this is safe to run should not have to read code."""
+    with pytest.raises(SystemExit) as exit_code:
+        main(["serve", "--help"])
+    assert exit_code.value.code == 0
+    printed = capsys.readouterr().out
+    assert "127.0.0.1" in printed
+    assert "31415" in printed
+
+
+def test_serve_defaults_to_an_in_memory_database() -> None:
+    from duckdb_kql.cli import _serve_parser  # noqa: PLC0415
+
+    args = _serve_parser().parse_args([])
+    assert args.database == ":memory:"
+    assert args.port == 31415
+
+
+def test_serve_takes_a_port_override() -> None:
+    from duckdb_kql.cli import _serve_parser  # noqa: PLC0415
+
+    assert _serve_parser().parse_args(["--port", "9000"]).port == 9000
+    assert _serve_parser().parse_args(["-p", "9000"]).port == 9000
