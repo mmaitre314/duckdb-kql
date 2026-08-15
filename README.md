@@ -52,7 +52,7 @@ Translate at build time and the output has no dependency on this package at all
 — not even Python. Only your CI machine installs it.
 
 ```bash
-duckdb-kql queries/ -o build/sql/ --check   # fails the build if a .sql is stale
+duckdb-kql translate queries/ -o build/sql/ --check   # fails the build if a .sql is stale
 ```
 
 See [Build-time translation](https://github.com/mmaitre314/duckdb-kql/blob/main/docs/cli.md).

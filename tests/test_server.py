@@ -109,9 +109,17 @@ def test_it_binds_to_loopback_only(server) -> None:
 
 def test_the_cli_cannot_ask_for_a_different_bind_address() -> None:
     """`--host` must not exist. A flag is all it would take to undo the above."""
-    from duckdb_kql.cli import _serve_parser
+    import argparse  # noqa: PLC0415
 
-    flags = {option for action in _serve_parser()._actions for option in action.option_strings}
+    from duckdb_kql.cli import _parser  # noqa: PLC0415
+
+    (subparsers,) = [
+        action
+        for action in _parser()._actions
+        if isinstance(action, argparse._SubParsersAction)
+    ]
+    serve = subparsers.choices["serve"]
+    flags = {option for action in serve._actions for option in action.option_strings}
     assert not flags & {"--host", "--bind", "--interface", "--address"}
 
 

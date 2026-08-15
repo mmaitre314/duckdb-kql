@@ -1,18 +1,17 @@
-# Build-time translation (`duckdb-kql`)
+# Build-time translation (`duckdb-kql translate`)
 
 Translate `.kql` to `.sql` once, in CI. What ships is plain SQL, and **nothing
 that runs it needs this package** — not the transpiler, not Python.
 
-> There is one subcommand, `duckdb-kql serve`, which does something else
-> entirely: it runs a [local Kusto REST endpoint](kusto-server.md) over a DuckDB
-> database. Everything that is not the literal word `serve` is a file to
-> translate, so nothing on this page changes.
-
 ```bash
-pip install duckdb-kql                      # antlr4 only; no database
-duckdb-kql queries/ -o build/sql/           # translate
-duckdb-kql queries/ -o build/sql/ --check   # fail the build if stale
+pip install duckdb-kql                                # antlr4 only; no database
+duckdb-kql translate queries/ -o build/sql/           # translate
+duckdb-kql translate queries/ -o build/sql/ --check   # fail the build if stale
 ```
+
+> `translate` is one of two subcommands. The other,
+> [`duckdb-kql serve`](kusto-server.md), runs a local Kusto REST endpoint over a
+> DuckDB database — a different job with different dependencies.
 
 - [Why](#why)
 - [Usage](#usage)
@@ -41,7 +40,7 @@ build time means:
 ## Usage
 
 ```
-duckdb-kql FILE... [-o PATH] [--check] [--schema FILE] [--no-header] [-v]
+duckdb-kql translate FILE... [-o PATH] [--check] [--schema FILE] [--no-header] [-v]
 ```
 
 | | |
@@ -54,14 +53,20 @@ duckdb-kql FILE... [-o PATH] [--check] [--schema FILE] [--no-header] [-v]
 | `-v, --verbose` | Report each file written, on stderr. |
 
 ```bash
-duckdb-kql queries/errors.kql                        # to stdout
-duckdb-kql queries/errors.kql -o build/errors.sql    # to one file
-duckdb-kql queries/ -o build/                        # a directory of each
-echo 'print x = 1' | duckdb-kql -                    # from stdin
+duckdb-kql translate queries/errors.kql                     # to stdout
+duckdb-kql translate queries/errors.kql -o build/errors.sql # to one file
+duckdb-kql translate queries/ -o build/                     # a directory of each
+echo 'print x = 1' | duckdb-kql translate -                 # from stdin
 ```
 
-The command is also `python -m duckdb_kql`, for CI jobs where the console script
-is not on `PATH`.
+The command is also `python -m duckdb_kql translate`, for CI jobs where the
+console script is not on `PATH`.
+
+The verb is required: a bare `duckdb-kql queries/` is a usage error, not a
+translation. It used to be the latter, and reading well was the whole argument
+for it — but a filename in the verb slot is exactly the ambiguity a subcommand
+removes, and the alternative is a second verb that silently collides with a file
+of the same name.
 
 ## The generated header
 
@@ -128,7 +133,7 @@ Commit the `.sql` and let `--check` prove it matches:
 
 ```yaml
 - run: pip install duckdb-kql
-- run: duckdb-kql queries/ -o sql/ --check
+- run: duckdb-kql translate queries/ -o sql/ --check
 ```
 
 An edited `.kql` whose `.sql` was not regenerated fails with exit 3 and a list
@@ -140,7 +145,7 @@ If you would rather not commit the output, translate into the build directory
 and skip `--check`:
 
 ```yaml
-- run: pip install duckdb-kql && duckdb-kql queries/ -o build/sql/
+- run: pip install duckdb-kql && duckdb-kql translate queries/ -o build/sql/
 ```
 
 Errors are reported as `file:line:column: error: …`, which GitHub Actions and
@@ -160,7 +165,7 @@ time there is no connection, so pass a JSON file:
 ```
 
 ```bash
-duckdb-kql queries/ -o build/sql/ --schema schema.json
+duckdb-kql translate queries/ -o build/sql/ --schema schema.json
 ```
 
 Everything else translates schema-free. A `join` without a schema fails with a

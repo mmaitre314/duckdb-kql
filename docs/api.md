@@ -277,7 +277,7 @@ translates `.kql` files to `.sql` so the output can be run without this package
 installed at all. `--check` makes a stale generated file fail CI.
 
 ```bash
-duckdb-kql queries/ -o build/sql/ --check
+duckdb-kql translate queries/ -o build/sql/ --check
 ```
 
 Full reference, including the generated header and how to bind the placeholders

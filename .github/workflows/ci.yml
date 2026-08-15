@@ -101,11 +101,11 @@ jobs:
         run: |
           mkdir -p /tmp/q
           printf 'StormEvents | where State == "TEXAS" | count\n' > /tmp/q/count.kql
-          duckdb-kql /tmp/q -o /tmp/sql/
+          duckdb-kql translate /tmp/q -o /tmp/sql/
           grep -q "SET TimeZone='UTC'" /tmp/sql/count.sql
-          duckdb-kql /tmp/q -o /tmp/sql/ --check
+          duckdb-kql translate /tmp/q -o /tmp/sql/ --check
           printf '| take 5\n' >> /tmp/q/count.kql
-          if duckdb-kql /tmp/q -o /tmp/sql/ --check; then
+          if duckdb-kql translate /tmp/q -o /tmp/sql/ --check; then
             echo "::error::--check passed on a stale file"; exit 1
           fi
           echo "CLI works on antlr4 alone, and --check catches drift"

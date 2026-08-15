@@ -1,30 +1,31 @@
-"""``duckdb-kql`` — translate ``.kql`` files to ``.sql`` at build time.
-
-The point of this command is that the *output* has no dependencies. Translate
-your queries in CI, commit or ship the ``.sql``, and the thing that runs them
-needs nothing from this package — not even DuckDB's Python bindings. A Go
-service, a dbt model, a psql script and a notebook can all read the same file.
-
-Translation is Layer 0 only: no database is opened and ``duckdb`` is never
-imported, so ``pip install duckdb-kql`` alone is enough to run it.
+"""``duckdb-kql`` — the command line, one subcommand per job.
 
 ::
 
-    duckdb-kql queries/*.kql -o build/sql/     # translate
-    duckdb-kql queries/*.kql -o build/sql/ --check   # ... and fail if stale
+    duckdb-kql translate queries/ -o build/sql/           # KQL files -> SQL files
+    duckdb-kql translate queries/ -o build/sql/ --check   # ... and fail if stale
+    duckdb-kql serve logs.duckdb                          # a local Kusto endpoint
 
-The ``--check`` mode is the one that belongs in CI: it regenerates in memory and
-compares, so a ``.kql`` edited without regenerating its ``.sql`` fails the build
-instead of shipping a stale query.
+**translate** is the build-time path, and the point of it is that the *output*
+has no dependencies. Translate your queries in CI, commit or ship the ``.sql``,
+and the thing that runs them needs nothing from this package — not even DuckDB's
+Python bindings. A Go service, a dbt model, a psql script and a notebook can all
+read the same file. ``--check`` is the mode that belongs in CI: it regenerates in
+memory and compares, so a ``.kql`` edited without regenerating its ``.sql`` fails
+the build instead of shipping a stale query.
 
-There is one subcommand, ``serve``, which is a different job entirely — it runs
-a local Kusto-compatible HTTP endpoint over a DuckDB database so that Kusto
-tools, including the Azure Data Explorer web UI, can query it::
+It is Layer 0 only — no database is opened and ``duckdb`` is never imported, so
+``pip install duckdb-kql`` alone is enough to run it.
 
-    duckdb-kql serve logs.duckdb
+**serve** is a different job entirely: a local Kusto-compatible HTTP endpoint
+over a DuckDB database, so Kusto tools — including the Azure Data Explorer web
+UI — can query it. It needs the ``duckdb`` extra.
 
-It needs the ``duckdb`` extra. Everything that is not the literal word ``serve``
-is a file to translate, so the interface above is unchanged.
+Every subcommand is explicit. An earlier version took a bare list of files
+(``duckdb-kql queries/ -o build/``), which read well while translation was the
+only thing this command did, but leaves no room for a second verb: any new one
+would be ambiguous with a file of the same name, and the ambiguity would be
+silent. Naming the verb costs one word and keeps the space open.
 """
 
 from __future__ import annotations
@@ -33,9 +34,9 @@ import argparse
 import datetime as dt
 import json
 import sys
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from . import __version__, to_sql
 from .errors import KqlError, KqlSyntaxError
@@ -56,15 +57,17 @@ EXIT_STALE = 3
 
 def main(argv: Sequence[str] | None = None) -> int:
     """Entry point. Returns a process exit code rather than raising."""
-    argv = list(sys.argv[1:] if argv is None else argv)
-    # Dispatched by hand rather than with argparse subparsers, because
-    # subparsers would make the existing form — a bare list of files — a
-    # subcommand too, and every documented invocation would have to change.
-    if argv and argv[0] == "serve":
-        return _serve(argv[1:])
-
     args = _parser().parse_args(argv)
+    return cast("Callable[[argparse.Namespace], int]", args.run)(args)
 
+
+# ---------------------------------------------------------------------------
+# translate
+# ---------------------------------------------------------------------------
+
+
+def _translate_command(args: argparse.Namespace) -> int:
+    """``duckdb-kql translate`` — KQL files in, SQL files out."""
     try:
         schema = _load_schema(args.schema)
     except (OSError, ValueError) as exc:
@@ -129,9 +132,10 @@ def main(argv: Sequence[str] | None = None) -> int:
 # ---------------------------------------------------------------------------
 
 
-def _serve(argv: Sequence[str]) -> int:
+def _serve_command(args: argparse.Namespace) -> int:
     """``duckdb-kql serve`` — a local Kusto endpoint over a DuckDB database."""
-    args = _serve_parser().parse_args(argv)
+    # Imported here, not at module scope: this is the only subcommand that needs
+    # a database, and `translate` is documented to run without one installed.
     from .server import serve  # noqa: PLC0415
 
     origins = tuple(args.allow_origin) if args.allow_origin else ADX_ORIGINS
@@ -148,48 +152,6 @@ def _serve(argv: Sequence[str]) -> int:
     return EXIT_OK
 
 
-def _serve_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        prog="duckdb-kql serve",
-        description=(
-            "Serve a DuckDB database over the Kusto REST API, so Kusto tools "
-            "can query it. Open https://dataexplorer.azure.com, choose Add "
-            "connection, and give it the URL this prints."
-        ),
-        epilog=(
-            "Listens on 127.0.0.1 only and cannot be made to listen anywhere "
-            "else: it answers unauthenticated queries, so reaching it has to "
-            "mean already being on this machine."
-        ),
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-    parser.add_argument(
-        "database",
-        nargs="?",
-        default=":memory:",
-        metavar="DATABASE",
-        help="DuckDB database file to serve. Omit for an empty in-memory one.",
-    )
-    parser.add_argument(
-        "-p",
-        "--port",
-        type=int,
-        default=DEFAULT_PORT,
-        metavar="PORT",
-        help=f"TCP port to listen on (default: {DEFAULT_PORT})",
-    )
-    parser.add_argument(
-        "--allow-origin",
-        action="append",
-        metavar="ORIGIN",
-        help=(
-            "additionally allow a browser origin to make cross-origin requests. "
-            "Repeatable. Replaces the Azure Data Explorer default list, and is a "
-            "decision about who may read this database from another browser tab."
-        ),
-    )
-    parser.add_argument("--version", action="version", version=f"duckdb-kql {__version__}")
-    return parser
 
 
 # ---------------------------------------------------------------------------
@@ -360,8 +322,34 @@ def _load_schema(path: str | None) -> dict[str, list[str]] | None:
 
 
 def _parser() -> argparse.ArgumentParser:
+    """The whole command line. Each subparser stores its handler in ``run``.
+
+    Dispatching through ``set_defaults(run=...)`` rather than a chain of
+    ``if args.command == ...`` means a new subcommand is added in exactly one
+    place, and cannot be registered without being wired up.
+    """
     parser = argparse.ArgumentParser(
         prog="duckdb-kql",
+        description=(
+            "Run KQL on DuckDB. `translate` turns .kql files into .sql at build "
+            "time; `serve` puts a local Kusto REST endpoint in front of a DuckDB "
+            "database."
+        ),
+        epilog=(
+            "exit codes: 0 ok; 1 a query failed to translate, or the server "
+            "could not start; 2 bad usage; 3 --check found a missing or stale "
+            "output"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument("--version", action="version", version=f"duckdb-kql {__version__}")
+    # `required` so a bare `duckdb-kql` prints usage rather than a traceback
+    # about a missing `run` attribute.
+    subcommands = parser.add_subparsers(dest="command", metavar="COMMAND", required=True)
+
+    translate = subcommands.add_parser(
+        "translate",
+        help="translate .kql files to .sql",
         description=(
             "Translate KQL files to DuckDB SQL. The generated SQL has no "
             "dependency on this package, so queries can be translated once at "
@@ -373,13 +361,14 @@ def _parser() -> argparse.ArgumentParser:
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument(
+    translate.set_defaults(run=_translate_command)
+    translate.add_argument(
         "files",
         nargs="+",
         metavar="FILE",
         help="KQL files or directories to translate; '-' reads stdin",
     )
-    parser.add_argument(
+    translate.add_argument(
         "-o",
         "--output",
         metavar="PATH",
@@ -388,7 +377,7 @@ def _parser() -> argparse.ArgumentParser:
             "stdout."
         ),
     )
-    parser.add_argument(
+    translate.add_argument(
         "--check",
         action="store_true",
         help=(
@@ -396,7 +385,7 @@ def _parser() -> argparse.ArgumentParser:
             "in CI so an edited .kql cannot ship with a stale .sql."
         ),
     )
-    parser.add_argument(
+    translate.add_argument(
         "--schema",
         metavar="FILE",
         help=(
@@ -404,18 +393,59 @@ def _parser() -> argparse.ArgumentParser:
             "Only `join` needs it."
         ),
     )
-    parser.add_argument(
+    translate.add_argument(
         "--no-header",
         action="store_true",
         help="omit the generated-file comment block",
     )
-    parser.add_argument(
+    translate.add_argument(
         "-v",
         "--verbose",
         action="store_true",
         help="report each file written, on stderr",
     )
-    parser.add_argument("--version", action="version", version=f"duckdb-kql {__version__}")
+
+    serve = subcommands.add_parser(
+        "serve",
+        help="serve a DuckDB database over the Kusto REST API",
+        description=(
+            "Serve a DuckDB database over the Kusto REST API, so Kusto tools "
+            "can query it. Open https://dataexplorer.azure.com, choose Add "
+            "connection, and give it the URL this prints."
+        ),
+        epilog=(
+            "Listens on 127.0.0.1 only and cannot be made to listen anywhere "
+            "else: it answers unauthenticated queries, so reaching it has to "
+            "mean already being on this machine."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    serve.set_defaults(run=_serve_command)
+    serve.add_argument(
+        "database",
+        nargs="?",
+        default=":memory:",
+        metavar="DATABASE",
+        help="DuckDB database file to serve. Omit for an empty in-memory one.",
+    )
+    serve.add_argument(
+        "-p",
+        "--port",
+        type=int,
+        default=DEFAULT_PORT,
+        metavar="PORT",
+        help=f"TCP port to listen on (default: {DEFAULT_PORT})",
+    )
+    serve.add_argument(
+        "--allow-origin",
+        action="append",
+        metavar="ORIGIN",
+        help=(
+            "additionally allow a browser origin to make cross-origin requests. "
+            "Repeatable. Replaces the Azure Data Explorer default list, and is a "
+            "decision about who may read this database from another browser tab."
+        ),
+    )
     return parser
 
 

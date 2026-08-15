@@ -169,7 +169,7 @@ There is a command for exactly this. Translate your `.kql` files to `.sql` in
 CI, ship the SQL, and nothing at runtime needs this package:
 
 ```bash
-duckdb-kql queries/ -o build/sql/ --check
+duckdb-kql translate queries/ -o build/sql/ --check
 ```
 
 See [Build-time translation](cli.md).
