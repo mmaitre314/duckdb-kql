@@ -19,19 +19,14 @@
   </picture>
 </p>
 
-[![CI](https://github.com/mmaitre314/duckdb-kql/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/mmaitre314/duckdb-kql/actions/workflows/ci.yml)
-[![Oracle](https://github.com/mmaitre314/duckdb-kql/actions/workflows/oracle.yml/badge.svg?branch=main)](https://github.com/mmaitre314/duckdb-kql/actions/workflows/oracle.yml)
-[![PyPI](https://img.shields.io/pypi/v/duckdb-kql.svg)](https://pypi.org/project/duckdb-kql/)
-[![Python versions](https://img.shields.io/pypi/pyversions/duckdb-kql.svg)](https://pypi.org/project/duckdb-kql/)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/mmaitre314/duckdb-kql/blob/main/LICENSE)
-[![Typed](https://img.shields.io/badge/types-py.typed-blue.svg)](https://github.com/mmaitre314/duckdb-kql/blob/main/docs/api.md#typing)
+<p align="center">
+  <a href="https://github.com/mmaitre314/duckdb-kql/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/mmaitre314/duckdb-kql/actions/workflows/ci.yml/badge.svg?branch=main"></a>
+  <a href="https://pypi.org/project/duckdb-kql/"><img alt="PyPI" src="https://img.shields.io/pypi/v/duckdb-kql.svg"></a>
+  <a href="https://pypi.org/project/duckdb-kql/"><img alt="Python versions" src="https://img.shields.io/pypi/pyversions/duckdb-kql.svg"></a>
+</p>
 
-Run [Kusto KQL](https://learn.microsoft.com/kusto/query/) queries on
-[DuckDB](https://duckdb.org), from Python. Pure Python, no server, no JVM.
-
-> **Status: pre-alpha.** The API is settling but not frozen. Coverage is real
-> and measured — see [Coverage](#coverage) — and anything outside it raises
-> rather than guessing.
+Run [Kusto Query Language](https://learn.microsoft.com/kusto/query/) (KQL) queries on
+[DuckDB](https://duckdb.org) in Python.
 
 ```python
 import duckdb_kql
@@ -39,7 +34,7 @@ import duckdb_kql
 con = duckdb_kql.connect()
 con.sql("CREATE TABLE Logs AS SELECT * FROM 'logs.parquet'")
 
-df = duckdb_kql.df(con, """
+duckdb_kql.kql(con, """
     Logs
     | where Timestamp > ago(1d) and Level == "Error"
     | summarize Count = count() by bin(Timestamp, 1h), Component
