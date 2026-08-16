@@ -302,6 +302,25 @@ class RangeSource(Source):
 
 
 @dataclass(frozen=True)
+class RenderedAggregate(Expr):
+    """An aggregate call already translated to SQL, standing in its own place.
+
+    `summarize Revenue = round(sum(Total), 2)` is a **scalar expression over an
+    aggregate**, and SQL writes it the same way. So the translation is: render
+    the aggregates, put each back where it stood, and render the surrounding
+    expression by the ordinary path — which is what keeps the null semantics,
+    the operator table and the type sniffing consistent between an expression
+    that happens to contain an aggregate and one that does not.
+
+    This node is what "put each back" means. It is produced only by the
+    summarize translator and never by lowering, so it cannot become a general
+    escape hatch for hand-written SQL.
+    """
+
+    sql: str
+
+
+@dataclass(frozen=True)
 class InList(Expr):
     """``x in (a, b, ...)`` and its negated / case-insensitive variants."""
 

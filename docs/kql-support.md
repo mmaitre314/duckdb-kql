@@ -44,7 +44,7 @@ returns an approximate answer.
 | `project-away` | Expands to an explicit column list, so a later `*` still behaves. |
 | `project-rename` | Keeps the renamed column's position. |
 | `extend` | Redefining an existing column **replaces** it rather than adding a second one. |
-| `summarize` | Auto-generated column names follow KQL (`count_`, `avg_X`); group keys come first in source order, and a null key forms its own group (R12). |
+| `summarize` | Any scalar expression over aggregates, not just a bare call — `round(sum(x), 2)`, `sum(x) / count()`, `strcat('n=', tostring(count()))`. Auto-generated names follow KQL: the name comes from the *aggregate*, so `round(sum(y), 2)` is `sum_y`, and an expression whose first argument is not an aggregate is `Column1`. Group keys come first in source order, and a null key forms its own group (R12). A column outside an aggregate is refused, as Kusto refuses it — even a `by` key. |
 | `join` | Needs the input schema to reproduce KQL's column renaming — `duckdb_kql.kql()` supplies it; `to_sql()` needs `schema=`. |
 | `mv-expand` | One column at a time. Multi-column `mv-expand` (zipped expansion) is not supported. |
 | `distinct` | Column list only. `distinct *` works but expands to every column of a wide table. |
@@ -345,7 +345,7 @@ Not supported: `arg_max`, `arg_min`, `binary_all_*`, `buildschema`,
 | `log` | **Natural** logarithm, mapped to SQL's `ln`. SQL's own `log()` is base-10 in most dialects, so the naive mapping is off by a factor of `ln(10)`. |
 | `notnull` | Null-aware: `isempty` (null **or** empty string) is not the same as `isnull`, and arithmetic propagates null. |
 | `pow` | — |
-| `round` | Single-argument form only. KQL's two-argument `round(x, precision)` is not supported. |
+| `round` | Both arities. The value is cast to DOUBLE first: DuckDB's two-argument `round` returns DECIMAL and rounds the decimal value, so `round(1.005, 2)` is `1.01` there and `1.0` in Kusto, which rounds the double `1.005` actually is. |
 | `sign` | — |
 | `sqrt` | — |
 

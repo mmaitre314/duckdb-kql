@@ -492,6 +492,26 @@ KQL↔DuckDB semantic gaps** and should grow as we find more.
   (rather than a literal or a datetime-returning call) still renders as DuckDB
   spells it. Fixing it needs column types carried across pipeline stages;
   `reverse-function-01` is the recorded divergence.
+- **`tolong` / `toint` truncate toward zero**; a SQL cast rounds half away from
+  zero. `tolong(1.7)` is `1` in Kusto and was `2` here — a silent wrong answer
+  for every non-integral value, and the reason `tolong(avg(x))` came back one
+  higher than the engine's. Measured across 17 probes. The mapping tries
+  `trunc()` through DOUBLE and falls back to a plain cast, because the DOUBLE
+  round trip loses precision above 2^53 and would turn `tolong(2^63-1)` into
+  null. **Open —** a *string* that is not an integer literal should be null
+  (`tolong('12.7')` is null in Kusto); both the old mapping and the new one
+  parse it.
+- **`round(x, precision)` rounds the double**, not a decimal. DuckDB's
+  two-argument `round` returns DECIMAL, so `round(1.005, 2)` is `1.01` there and
+  `1.0` in Kusto — which rounds the double `1.00499999…` that `1.005` really is.
+  Casting to DOUBLE first makes the two agree on all six probed cases, including
+  a negative precision.
+- **`summarize` takes any scalar expression over aggregates**, and its
+  auto-generated name comes from the *aggregate*: `round(sum(y), 2)` is `sum_y`,
+  `tostring(count())` is `count_`. The rule is positional — follow first
+  arguments — so `strcat('n=', tostring(count()))` is `Column1`. Kusto **refuses**
+  a column outside an aggregate even when it is a `by` key, which plain SQL would
+  accept; refusing it here keeps a query that works from failing in production.
 - Unnamed `project`/`extend` columns are numbered from **one** (`Column1`).
 
 **Sources, membership, and visualization — implemented, pinned by

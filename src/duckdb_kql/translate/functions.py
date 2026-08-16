@@ -158,8 +158,20 @@ SCALAR_FUNCTIONS: dict[str, FunctionSpec] = {
         _f("isfinite", "native", "isfinite({0})", (1,)),
         _f("isinf", "native", "isinf({0})", (1,)),
         # --- conversions: null on failure, never an error (R1) --------------
-        _f("toint", "template", "TRY_CAST({0} AS INTEGER)", (1,), ("R1",)),
-        _f("tolong", "template", "TRY_CAST({0} AS BIGINT)", (1,), ("R1",)),
+        # KQL **truncates toward zero**; a SQL cast rounds. `tolong(1.7)` is 1
+        # in Kusto and was 2 here — a silent wrong answer for every
+        # non-integral value, and the reason `tolong(avg(x))` disagreed with
+        # the engine by one. Measured across 17 probes.
+        #
+        # The fallback cast is not belt-and-braces: routing through DOUBLE
+        # loses precision above 2^53, so `tolong(9223372036854775807)` comes
+        # back NULL from the first branch and the plain cast answers it.
+        _f("toint", "template",
+           "coalesce(TRY_CAST(trunc(TRY_CAST({0} AS DOUBLE)) AS INTEGER), "
+           "TRY_CAST({0} AS INTEGER))", (1,), ("R1",)),
+        _f("tolong", "template",
+           "coalesce(TRY_CAST(trunc(TRY_CAST({0} AS DOUBLE)) AS BIGINT), "
+           "TRY_CAST({0} AS BIGINT))", (1,), ("R1",)),
         _f("todouble", "template", "TRY_CAST({0} AS DOUBLE)", (1,), ("R1",)),
         _f("toreal", "template", "TRY_CAST({0} AS DOUBLE)", (1,), ("R1",)),
         _f("tostring", "template", "CAST({0} AS VARCHAR)", (1,), ("R1",)),
@@ -225,7 +237,10 @@ SCALAR_FUNCTIONS: dict[str, FunctionSpec] = {
         _f("sqrt", "native", "sqrt({0})", (1,)),
         _f("pow", "native", "power({0}, {1})", (2,)),
         _f("sign", "native", "sign({0})", (1,)),
-        _f("round", "native", "round({0})", (1,)),
+        # Rendered by translate._render_round: two arities, and both need a
+        # DOUBLE cast to match Kusto. Registered so `round` is a known
+        # scalar function and reports its arities.
+        _f("round", "template", "round(CAST({0} AS DOUBLE))", (1, 2)),
         _f("gamma", "native", "gamma({0})", (1,)),
         _f("exp2", "template", "pow(CAST(2 AS DOUBLE), {0})", (1,)),
         _f("exp10", "template", "pow(CAST(10 AS DOUBLE), {0})", (1,)),

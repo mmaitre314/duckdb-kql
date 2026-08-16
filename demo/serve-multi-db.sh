@@ -51,7 +51,7 @@ read -r -d '' QUERY <<'KQL' || true
 database("Sales").Orders
 | where Status == "shipped"
 | join kind=inner (database("Customers").Customers) on CustomerId
-| summarize Revenue = sum(Total), Orders = count() by Region, Tier
+| summarize Revenue = round(sum(Total), 2), Orders = count() by Region, Tier
 | sort by Revenue desc
 | take 5
 KQL

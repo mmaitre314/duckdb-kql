@@ -31,7 +31,7 @@ CORPUS = Path(os.environ.get("DUCKDB_KQL_CORPUS", "tests/cases/docs/docs-corpus.
 pytestmark = pytest.mark.skipif(not CORPUS.is_file(), reason=f"no corpus at {CORPUS}")
 
 #: Cases that translate AND match ground truth. May only go UP.
-BASELINE_PASSING = 246
+BASELINE_PASSING = 253
 
 #: Cases we translate but knowingly get wrong, with the reason. This is an
 #: **admission of a bug**, not a waiver: each entry is a real KQL↔DuckDB gap

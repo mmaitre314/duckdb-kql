@@ -10,6 +10,7 @@ Every rule marked ``Rn`` below is a semantic invariant from ``TRANSLATION.md``
 
 from __future__ import annotations
 
+import dataclasses
 from typing import TYPE_CHECKING, Any
 
 from .. import ir
@@ -151,6 +152,10 @@ def render_expr(node: ir.Expr) -> str:
 
     if isinstance(node, ir.ColumnRef):
         return quote_ident(node.name)
+
+    if isinstance(node, ir.RenderedAggregate):
+        # Already SQL — see render_aggregate. Parenthesised at construction.
+        return node.sql
 
     if isinstance(node, ir.UnaryOp):
         if node.op == "-":
@@ -679,6 +684,23 @@ def _argument_name(expr: ir.Expr) -> str | None:
     return None
 
 
+def _wrapped_aggregate(expr: ir.Expr) -> ir.FunctionCall | None:
+    """The aggregate a scalar call wraps, following **first arguments only**.
+
+    `round(sum(y), 2)` -> `sum(y)`; `round(round(sum(y),1),2)` -> `sum(y)`;
+    `strcat('n=', tostring(count()))` -> ``None``, because the first argument is
+    a literal and the name falls back to `Column1`. Every one of those is what
+    the emulator returns — the rule is positional, not a search.
+    """
+    while isinstance(expr, ir.FunctionCall):
+        if lookup_aggregate(expr.name) is not None:
+            return expr
+        if not expr.args:
+            return None
+        expr = expr.args[0]
+    return None
+
+
 def aggregate_name(named: ir.NamedExpr) -> str:
     """KQL's auto-generated name for one summarize aggregate (R12).
 
@@ -700,11 +722,20 @@ def aggregate_name(named: ir.NamedExpr) -> str:
 
     expr = named.expr
     if not isinstance(expr, ir.FunctionCall):
-        return _argument_name(expr) or "Column1"
+        # A binary or unary expression over aggregates is `Column1`, whatever it
+        # contains: `sum(x) + max(x)`, `count() * 2` and `-sum(x)` all measure
+        # as `Column1` on the emulator.
+        return "Column1"
 
     spec = lookup_aggregate(expr.name)
     if spec is None:
-        return _argument_name(expr) or "Column1"
+        # A scalar function wrapping an aggregate takes the *aggregate's* name,
+        # not the function's: `round(sum(y), 2)` is `sum_y` and
+        # `tostring(count())` is `count_`. Measured, and not the obvious guess.
+        inner = _wrapped_aggregate(expr)
+        if inner is not None:
+            return aggregate_name(ir.NamedExpr(inner))
+        return "Column1"
 
     if spec.name_is_argument:
         if not expr.args:
@@ -733,25 +764,136 @@ def group_key_name(named: ir.NamedExpr, position: int) -> str:
     return _argument_name(named.expr) or f"Column{position + 1}"
 
 
-def render_aggregate(named: ir.NamedExpr) -> str:
-    expr = named.expr
-    if not isinstance(expr, ir.FunctionCall):
-        # `summarize x` is not valid KQL; refuse rather than emit a bare column
-        # that DuckDB would reject with a confusing group-by error.
-        raise KqlUnsupportedError(
-            "summarize", hint="each aggregate must be an aggregate function call"
-        )
+def _render_aggregate_call(expr: ir.FunctionCall) -> str:
+    """One aggregate call, `sum(x)` -> `sum("x")`.
+
+    The nesting check lives here because this is the only place an aggregate is
+    rendered — putting it in the caller left the plain `summarize sum(sum(x))`
+    path uncovered, and the refusal came back from DuckDB at execution instead.
+    """
     spec = lookup_aggregate(expr.name)
-    if spec is None:
+    if spec is None:  # pragma: no cover - callers check first
+        raise KqlUnsupportedError(f"aggregate:{expr.name}")
+    nested = next(filter(None, (_nested_aggregate(a) for a in expr.args)), None)
+    if nested is not None:
         raise KqlUnsupportedError(
-            f"aggregate:{expr.name}",
-            hint="no DuckDB mapping in this wave; see translate/functions.py",
+            f"aggregate:{nested}",
+            hint=f"{expr.name}() cannot contain another aggregate; Kusto "
+            "refuses this too",
         )
     args = [render_expr(a) for a in expr.args]
     try:
         return spec.render(args)
     except ValueError as e:
         raise KqlUnsupportedError(f"aggregate:{expr.name}", hint=str(e)) from None
+
+
+def _is_aggregate_call(expr: ir.Expr) -> bool:
+    return isinstance(expr, ir.FunctionCall) and lookup_aggregate(expr.name) is not None
+
+
+def _nested_aggregate(expr: ir.Expr) -> str | None:
+    """The name of an aggregate anywhere inside *expr*, if there is one."""
+    if isinstance(expr, ir.FunctionCall):
+        if lookup_aggregate(expr.name) is not None:
+            return expr.name
+        return next(filter(None, (_nested_aggregate(a) for a in expr.args)), None)
+    if isinstance(expr, ir.BinaryOp):
+        return _nested_aggregate(expr.left) or _nested_aggregate(expr.right)
+    if isinstance(expr, ir.UnaryOp):
+        return _nested_aggregate(expr.operand)
+    return None
+
+
+def _lift_aggregates(expr: ir.Expr, *, depth: int = 0) -> tuple[ir.Expr, int]:
+    """Replace every aggregate call in *expr* with its SQL. Returns the count.
+
+    Also enforces the two rules Kusto enforces, both measured on the emulator:
+
+    * **An aggregate may not contain another.** `sum(sum(x))` is refused there
+      and here; SQL would reject it too, but with a message about nesting rather
+      than about KQL.
+    * **A column may not appear outside an aggregate.** `sum(x) + x` and
+      `strcat(g, tostring(count()))` are refused by Kusto *even when `g` is a
+      grouping key* — and that second one is why this check is not left to
+      DuckDB, which would happily accept a grouped column and return a result
+      the real engine never would.
+    """
+    if isinstance(expr, ir.FunctionCall) and lookup_aggregate(expr.name) is not None:
+        if depth > 0:
+            raise KqlUnsupportedError(
+                f"aggregate:{expr.name}",
+                hint="an aggregate cannot contain another aggregate; Kusto "
+                "refuses this too",
+            )
+        # Not recursed into: inside an aggregate a column is exactly where it
+        # belongs, so the rule below does not apply. Nesting is checked by
+        # _render_aggregate_call.
+        return ir.RenderedAggregate(f"({_render_aggregate_call(expr)})"), 1
+
+    if isinstance(expr, ir.ColumnRef):
+        raise KqlUnsupportedError(
+            f"summarize: column {expr.name!r} outside an aggregate",
+            hint="every column in a summarize expression must be inside an "
+            "aggregate function. Kusto refuses this even for a `by` key, so "
+            "translating it would accept a query the real engine rejects",
+        )
+
+    if isinstance(expr, ir.FunctionCall):
+        lifted, total = [], 0
+        for arg in expr.args:
+            new, found = _lift_aggregates(arg, depth=depth)
+            lifted.append(new)
+            total += found
+        return dataclasses.replace(expr, args=tuple(lifted)), total
+
+    if isinstance(expr, ir.BinaryOp):
+        left, a = _lift_aggregates(expr.left, depth=depth)
+        right, b = _lift_aggregates(expr.right, depth=depth)
+        return dataclasses.replace(expr, left=left, right=right), a + b
+
+    if isinstance(expr, ir.UnaryOp):
+        operand, found = _lift_aggregates(expr.operand, depth=depth)
+        return dataclasses.replace(expr, operand=operand), found
+
+    return expr, 0
+
+
+def render_aggregate(named: ir.NamedExpr) -> str:
+    """One `summarize` output expression.
+
+    Usually a bare aggregate call, but KQL allows any scalar expression over
+    aggregates — `round(sum(Total), 2)`, `sum(x) / count()`,
+    `strcat('n=', tostring(count()))` — and so does SQL, which is what makes
+    this a matter of rendering the pieces in place rather than a new feature.
+    """
+    expr = named.expr
+
+    if isinstance(expr, ir.FunctionCall) and lookup_aggregate(expr.name) is not None:
+        return _render_aggregate_call(expr)
+
+    if isinstance(expr, ir.FunctionCall) and lookup(expr.name) is None:
+        # Neither a known aggregate nor a known scalar function. In summarize
+        # position the overwhelmingly likely reading is an aggregate we have not
+        # implemented, and saying so beats a message about its arguments.
+        raise KqlUnsupportedError(
+            f"aggregate:{expr.name}",
+            hint="no DuckDB mapping in this wave; see translate/functions.py",
+        )
+
+    if not isinstance(expr, (ir.FunctionCall, ir.BinaryOp, ir.UnaryOp)):
+        # `summarize x` is not valid KQL; refuse rather than emit a bare column
+        # that DuckDB would reject with a confusing group-by error.
+        raise KqlUnsupportedError(
+            "summarize", hint="each aggregate must be an aggregate function call"
+        )
+
+    lifted, found = _lift_aggregates(expr)
+    if not found:
+        raise KqlUnsupportedError(
+            "summarize", hint="each expression must contain an aggregate function"
+        )
+    return render_expr(lifted)
 
 
 def render_summarize(op: ir.Summarize, prev: str) -> str:
@@ -1305,8 +1447,32 @@ def _render_datetime_part(node: ir.FunctionCall) -> str:
     return f"CAST(date_part('{part}', {render_expr(node.args[1])}) AS BIGINT)"
 
 
+def _render_round(node: ir.FunctionCall) -> str:
+    """``round(x)`` and ``round(x, precision)``.
+
+    Both cast to DOUBLE first, and that cast is the whole point. DuckDB's
+    two-argument ``round`` returns DECIMAL and rounds the *decimal* value, so
+    ``round(1.005, 2)`` is ``1.01`` there and ``1.0`` in Kusto — which rounds
+    the double ``1.00499999…`` that ``1.005`` actually is. Measured across six
+    cases, including a negative precision (``round(12345, -2)`` is ``12300.0``,
+    a real, not the integer DuckDB's own ``round`` returns).
+    """
+    if len(node.args) not in (1, 2):
+        raise KqlUnsupportedError(
+            "function:round", hint="round() takes (1, 2) argument(s)"
+        )
+    value = f"CAST({render_expr(node.args[0])} AS DOUBLE)"
+    if len(node.args) == 1:
+        return f"round({value})"
+    # DuckDB overloads `round` on an **INTEGER** precision only, and a KQL
+    # integer literal renders as BIGINT (§2), so without this cast the pair
+    # matches no overload and the query fails to bind.
+    return f"round({value}, CAST({render_expr(node.args[1])} AS INTEGER))"
+
+
 _SPECIAL_FORMS = {
     "case": _render_case,
+    "round": _render_round,
     "countof": _render_countof,
     "zip": _render_zip,
     "make_datetime": _render_make_datetime,

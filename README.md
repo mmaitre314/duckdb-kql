@@ -146,7 +146,7 @@ Measured against the real KQL engine (the Kusto Emulator), not asserted.
 
 | | |
 |---|---|
-| Doc-corpus cases matching ground truth | **245** of 1036 (0 mismatches) |
+| Doc-corpus cases matching ground truth | **253** of 1036 (0 mismatches) |
 | [Azure Monitor's published KQL subset](https://github.com/mmaitre314/duckdb-kql/blob/main/docs/azure-monitor-profile.md) | **114 / 119 (96%)** |
 | Tabular operators | **16 / 41** |
 | Scalar functions / aggregates / binary operators | **110 / 19 / 33** |
