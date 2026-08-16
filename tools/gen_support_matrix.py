@@ -201,6 +201,7 @@ OPERATORS: list[tuple[str, str, str]] = [
 
 SOURCES: list[tuple[str, str, str]] = [
     ("table reference", "T", "A KQL table name is a DuckDB table, view, or registered relation. Case-**sensitive**."),
+    ("keyword and escaped names", "T | project ['my col'], id", "Most KQL keywords are legal names (`id`, `count`, `by`, `range`), and `['...']` names anything a bare identifier cannot — including a table, which is the only way to reference one called `count`. Escaped names are unescaped once: `['my col']` is the column `my col`."),
     ("`database()`", 'database("Sales").Orders', 'A cross-database reference, spelled `"Sales"."Orders"` in DuckDB. Attach the file first — `duckdb-kql serve --init` does it for a whole server. Joins may cross databases. `cluster(...)` is refused: there is none, and reading it as local would answer a question about somewhere else with data from here.'),
     ("`print`", "print x = 1", "Unnamed columns are `print_0`, `print_1`, … as in KQL."),
     ("`datatable`", "datatable (a: long) [1, 2]", "Values are read row-major and must divide evenly by the column count, as in KQL."),
@@ -401,6 +402,17 @@ DIVERGENCES: list[tuple[str, str]] = [
         "bytes with `\\x` escapes. DuckDB has no UTF-8 validity predicate to "
         "switch on, and sniffing for `\\x` in the output would misfire on a "
         "legitimate backslash. Valid UTF-8 — the case that matters — is correct.",
+    ),
+    (
+        "`reverse()` of a datetime or timespan **column**",
+        "KQL reverses the value's .NET string form, so the rendering has to be "
+        "KQL's — `2017-10-15T12:00:00.0000000Z`, not DuckDB's "
+        "`2017-10-15 12:00:00`. The spelling is picked from what can be inferred "
+        "statically, so a literal or a datetime-returning call is right and a "
+        "bare column arriving from an earlier `print` is not. Every other type "
+        "is correct. Casting unconditionally instead would agree for numbers and "
+        "disagree for datetimes, which is the same bug with a wider blast "
+        "radius; the fix is column types carried across pipeline stages.",
     ),
 ]
 

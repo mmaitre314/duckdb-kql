@@ -47,6 +47,17 @@ KNOWN_DIVERGENCES: dict[str, str] = {
         "sniffing for '\\x' in the output would misfire on a legitimate "
         "backslash. Valid UTF-8 — the case that matters — is correct."
     ),
+    "reverse-function-01": (
+        "reverse() of a datetime *column*. KQL reverses the value's .NET string "
+        "form, so the rendering has to be KQL's — and this picks it from what "
+        "can be inferred statically. A datetime literal or a datetime-returning "
+        "call is rendered right; a bare column reaching reverse() through an "
+        "earlier `print` is not, because column types are not carried across "
+        "pipeline stages. Every other type in the case matches, and so does a "
+        "datetime whose type is visible. Drained by type inference, not by a "
+        "wider cast: casting unconditionally would agree for numbers and "
+        "disagree for datetimes, which is this same bug wearing a bigger hat."
+    ),
 }
 
 

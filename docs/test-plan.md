@@ -481,6 +481,17 @@ KQL↔DuckDB semantic gaps** and should grow as we find more.
   `hash_xxhash64()` are xxhash64 and **refuse** — DuckDB's own `hash()` is a
   *different* function, so mapping to it would return plausible-looking wrong
   digests, the worst possible outcome for a hash. First UDF candidate.
+- **`reverse` reverses the value's string form, whatever the type.**
+  `reverse(12345)` is `'54321'`, `reverse(3h)` is `'00:00:30'`, and
+  `reverse(datetime(2017-10-15 12:00))` is `'Z0000000.00:00:21T51-01-7102'` —
+  the .NET rendering above, backwards. DuckDB's `reverse` takes VARCHAR only, so
+  it goes through the same KQL-spelling helper as the hash functions rather than
+  a plain cast, which would agree for numbers and disagree for datetimes.
+  **Open —** the spelling is chosen from what the translator can infer
+  statically, so a datetime or timespan reaching `reverse` as a bare *column*
+  (rather than a literal or a datetime-returning call) still renders as DuckDB
+  spells it. Fixing it needs column types carried across pipeline stages;
+  `reverse-function-01` is the recorded divergence.
 - Unnamed `project`/`extend` columns are numbered from **one** (`Column1`).
 
 **Sources, membership, and visualization — implemented, pinned by

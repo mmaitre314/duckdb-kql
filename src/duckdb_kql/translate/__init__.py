@@ -193,6 +193,20 @@ def render_expr(node: ir.Expr) -> str:
             return render_bin(node)
         if node.name.lower() == "tostring" and len(node.args) == 1:
             return render_kql_tostring(node.args[0])
+        if node.name.lower() == "reverse" and len(node.args) == 1:
+            # KQL's `reverse` reverses the value's **string form** whatever its
+            # type — `reverse(12345)` is `'54321'`, `reverse(3h)` is
+            # `'00:00:30'`. DuckDB's `reverse` takes VARCHAR only, so a bare
+            # mapping produced SQL that would not bind for anything else.
+            # (Do not start a comment line with `type:` — mypy reads it as a
+            # PEP 484 type comment and reports a syntax error here.)
+            #
+            # A plain CAST is not enough either — it agrees with KQL for
+            # numbers and disagrees for datetimes, where KQL prints seven
+            # fractional digits and a `Z`. Reversing the wrong rendering is a
+            # wrong answer that still looks like a reversed string, so this goes
+            # through the same KQL-spelling helper the hash functions use.
+            return f"reverse({render_kql_tostring(node.args[0])})"
         special = _SPECIAL_FORMS.get(node.name.lower())
         if special is not None:
             return special(node)

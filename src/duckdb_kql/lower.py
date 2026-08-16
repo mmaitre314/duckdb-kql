@@ -69,6 +69,55 @@ def _rule_children(node: Any) -> list[Any]:
     return [c for c in _children(node) if type(c).__name__.endswith("Context")]
 
 
+#: The three shapes a *name* takes in the grammar.
+#:
+#: `identifierOrKeywordOrEscapedName: identifierName | keywordName | escapedName`
+#: — so most of KQL's keywords are legal names, and the parser only builds one of
+#: these where a name is allowed. Seeing one means the grammar has already
+#: decided it is a name, which is what makes reading it as one safe.
+#:
+#: Before this, a column called `id`, `count`, `by` or `range` reached the
+#: lowerer as `KeywordName` and was reported as an unsupported *construct* — a
+#: message about the language when the problem was one column's name. Kusto
+#: accepts all of them, and `['...']` exists precisely to name things a plain
+#: identifier cannot.
+_NAME_KINDS = ("IdentifierName", "KeywordName", "EscapedName")
+
+
+def _name_text(node: Any) -> str | None:
+    """The name a node spells, or ``None`` if it does not spell one."""
+    kind = _cls(node)
+    if kind in ("IdentifierName", "KeywordName"):
+        text: str = node.getText()
+        return text
+    if kind == "EscapedName":
+        # `['my column']` — the name is the string's *value*, not its source
+        # text, so quoting and escaping are resolved in exactly one place. Using
+        # getText() here would produce a column literally called `['my column']`.
+        literals = _find_all(node, "StringLiteralExpression")
+        return _literal_string(literals[0]) if literals else None
+    return None
+
+
+def _find_name_nodes(node: Any) -> list[Any]:
+    """Every name node under *node*, in source order, without descending into one.
+
+    Deliberately **not** a blanket replacement for searching `IdentifierName`:
+    a function name is a `KeywordName` too — `summarize ... by bin(t, 1h)` has
+    one — so this is only used where the grammar allows nothing but names.
+    """
+    if _cls(node) in _NAME_KINDS:
+        return [node]
+    found: list[Any] = []
+    for child in _rule_children(node):
+        found.extend(_find_name_nodes(child))
+    return found
+
+
+def _find_names(node: Any) -> list[str]:
+    return [text for n in _find_name_nodes(node) if (text := _name_text(n)) is not None]
+
+
 def _collapse(node: Any) -> Any:
     """Skip pass-through rules that wrap exactly one child rule.
 
@@ -93,8 +142,10 @@ def _lower_expr(node: Any) -> ir.Expr:
     node = _collapse(node)
     kind = _cls(node)
 
-    if kind == "IdentifierName":
-        return ir.ColumnRef(node.getText())
+    if kind in _NAME_KINDS:
+        name = _name_text(node)
+        if name is not None:
+            return ir.ColumnRef(name)
 
     if kind in ("LongLiteralExpression", "IntLiteralExpression"):
         return _typed_literal(node, "long" if kind[0] == "L" else "int", int)
@@ -363,8 +414,8 @@ def _lower_named(node: Any) -> ir.NamedExpr:
     if _cls(node) in ("NamedExpression", "ArgumentExpression"):
         kids = _rule_children(node)
         if len(kids) == 2 and _cls(kids[0]) == "NamedExpressionNameClause":
-            names = _find_all(kids[0], "IdentifierName")
-            name = names[0].getText() if names else kids[0].getText().rstrip("= ")
+            names = _find_names(kids[0])
+            name = names[0] if names else kids[0].getText().rstrip("= ")
             return ir.NamedExpr(_lower_expr(kids[1]), name)
         if len(kids) == 1:
             return ir.NamedExpr(_lower_expr(kids[0]))
@@ -380,8 +431,10 @@ def _lower_source(node: Any) -> ir.Source:
     node = _collapse(node)
     kind = _cls(node)
 
-    if kind == "IdentifierName":
-        return ir.TableRef(node.getText())
+    if kind in _NAME_KINDS:
+        name = _name_text(node)
+        if name is not None:
+            return ir.TableRef(name)
 
     if kind == "FunctionCallOrPathPathExpression":
         qualified = _lower_qualified_table(node)
@@ -392,8 +445,9 @@ def _lower_source(node: Any) -> ir.Source:
         kids = _rule_children(node)
         if len(kids) != 4:
             raise _unsupported(node, "range")
+        names = _find_names(kids[0])
         return ir.RangeSource(
-            kids[0].getText(),
+            names[0] if names else kids[0].getText(),
             _lower_expr(kids[1]),
             _lower_expr(kids[2]),
             _lower_expr(kids[3]),
@@ -403,7 +457,9 @@ def _lower_source(node: Any) -> ir.Source:
         cols, values = [], []
         for decl in _find_all(node, "RowSchemaColumnDeclaration"):
             parts = _rule_children(decl)
-            cols.append((parts[0].getText(), parts[1].getText().lower()))
+            names = _find_names(parts[0])
+            cols.append((names[0] if names else parts[0].getText(),
+                         parts[1].getText().lower()))
         for child in _rule_children(node):
             # Values are everything outside the schema declaration.
             if _cls(child).startswith("RowSchema"):
@@ -458,10 +514,10 @@ def _lower_qualified_table(node: Any) -> ir.TableRef | None:
         return None
 
     # Exactly one `.Name` after it. `database("X").Y.Z` is not a table.
-    names = [n for op in operations for n in _find_all(op, "IdentifierOrKeywordOrEscapedName")]
+    names = [n for op in operations for n in _find_names(op)]
     if len(names) != 1:
         return None
-    return ir.TableRef(names[0].getText(), database=database)
+    return ir.TableRef(names[0], database=database)
 
 
 def _literal_string(node: Any) -> str | None:
@@ -512,7 +568,8 @@ def _lower_operator(node: Any) -> ir.Operator | None:
 
     if kind == "CountOperator":
         if kids:  # `count as Name`
-            return ir.Count(kids[-1].getText())
+            names = _find_names(kids[-1])
+            return ir.Count(names[0] if names else kids[-1].getText())
         return ir.Count()
 
     if kind in ("MvexpandOperator", "MvExpandOperator"):
@@ -525,7 +582,7 @@ def _lower_operator(node: Any) -> ir.Operator | None:
         return None
 
     if kind == "ProjectAwayOperator":
-        names = [c.getText() for c in _find_all(node, "IdentifierName")]
+        names = _find_names(node)
         if not names:
             raise _unsupported(node, "project-away")
         return ir.ProjectAway(tuple(names))
@@ -566,9 +623,11 @@ def _lower_operator(node: Any) -> ir.Operator | None:
                 raise _unsupported(node, "distinct *")
             # The column list arrives as a single wrapper node, so taking its
             # raw text yields one bogus column literally named "State,EventType".
-            inner = _find_all(k, "IdentifierName") or _rule_children(k)
-            if inner:
-                distinct_on.extend(c.getText() for c in inner)
+            found = _find_names(k)
+            if found:
+                distinct_on.extend(found)
+            elif children := _rule_children(k):
+                distinct_on.extend(c.getText() for c in children)
             else:
                 distinct_on.append(k.getText())
         return ir.Distinct(tuple(distinct_on))
@@ -929,8 +988,9 @@ def _is_tabular_value(node: Any, scalars: Scalars) -> bool:
     kind = _cls(node)
     if kind in _TABULAR_VALUE:
         return True
-    if kind == "IdentifierName":
-        return node.getText() not in scalars
+    if kind in _NAME_KINDS:
+        name = _name_text(node)
+        return name is not None and name not in scalars
     return False
 
 
@@ -1015,6 +1075,16 @@ def _substitute_query(query: ir.Query, scalars: Scalars) -> ir.Query:
             source,
             expressions=tuple(_substitute(e, scalars) for e in source.expressions),
         )
+    elif isinstance(source, ir.RangeSource):
+        # `let n = 20; range y from 0 to n step 5`. Without this the bound stays
+        # an unbound column reference and DuckDB rejects the query — a loud
+        # failure, but for a query Kusto runs.
+        source = dataclasses.replace(
+            source,
+            start=_substitute(source.start, scalars),
+            stop=_substitute(source.stop, scalars),
+            step=_substitute(source.step, scalars),
+        )
     return ir.Query(
         source,
         [_substitute_operator(op, scalars) for op in query.operators],
@@ -1069,7 +1139,8 @@ def _lower_lets(
         kids = _rule_children(decl)
         if len(kids) < 2:
             raise _unsupported(decl, "let")
-        name = kids[0].getText()
+        let_names = _find_names(kids[0])
+        name = let_names[0] if let_names else kids[0].getText()
         value = _collapse(kids[-1])
 
         if kind == "LetMaterializeDeclaration":
@@ -1194,10 +1265,10 @@ def _lower_path(node: Any) -> ir.Expr:
         inner = _collapse(op)
         cls = _cls(inner)
         if cls == "FunctionCallOrPathPathOperation":
-            names = _find_all(inner, "IdentifierName")
+            names = _find_names(inner)
             if not names:
                 raise _unsupported(inner, "path step")
-            steps.append(ir.PathStep(name=names[0].getText()))
+            steps.append(ir.PathStep(name=names[0]))
         elif cls == "FunctionCallOrPathElementOperation":
             exprs = _rule_children(inner)
             if not exprs:
