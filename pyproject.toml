@@ -31,6 +31,7 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Database",
     "Topic :: Database :: Front-Ends",
     "Topic :: Software Development :: Compilers",
@@ -167,7 +168,7 @@ files = ["src/duckdb_kql"]
 # way, and the next dependency to adopt the syntax would do it again. Letting
 # each interpreter check against itself is more robust *and* better coverage:
 # CI runs the floor and the ceiling, so 3.10-incompatible code fails on the
-# 3.10 lane while the newest semantics are exercised on the 3.13 one.
+# 3.10 lane while the newest semantics are exercised on the newest one.
 disallow_untyped_defs = true
 disallow_incomplete_defs = true
 disallow_untyped_calls = true

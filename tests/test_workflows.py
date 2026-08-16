@@ -52,9 +52,10 @@ def test_ci_runs_on_pushes_to_main() -> None:
 def test_the_ci_matrix_spans_the_supported_range() -> None:
     """The lanes must be the floor and the ceiling of what we claim to support.
 
-    Claiming 3.10–3.13 and testing 3.10–3.11 is how a 3.13-only failure reaches
-    ``main``: numpy 2.5 ships stubs using PEP 695 syntax and only resolves on
-    the newer interpreters, so it broke a lane nobody had run locally.
+    Claiming a version and never running it is how a version-specific failure
+    reaches ``main``: numpy 2.5 ships stubs using PEP 695 syntax that only
+    resolves on the newer interpreters, and it broke a lane nobody had run
+    locally. So adding a classifier without adding the lane fails here.
     """
     from conftest import read_pyproject  # noqa: PLC0415
 
