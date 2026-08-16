@@ -42,31 +42,22 @@ duckdb_kql.kql(con, """
 """)
 ```
 
-**New here? Start with [Getting started](https://github.com/mmaitre314/duckdb-kql/blob/main/docs/getting-started.md).**
+See [Getting started](https://github.com/mmaitre314/duckdb-kql/blob/main/docs/getting-started.md).
 
 ## Install
 
-Install only the layer you need — each adds one dependency.
+APIs are split into 3 layers to control features and dependencies. Install based on needs.
+
+Layer | Install | Scenario | Dependencies
+--|--|--|--
+0 | `pip install duckdb-kql` | Translate KQL queries to SQL | antlr4 only
+1 | `pip install duckdb-kql[duckdb]` | Run KQL queries | adds duckdb
+2 | `pip install duckdb-kql[kusto]` | Run KQL queries via Kusto SDK APIs | adds pandas
+
+To remove runtime dependencies, translate KQL queries to SQL at build time using the CLI.
 
 ```bash
-pip install duckdb-kql              # translate KQL to SQL         (antlr4 only)
-pip install 'duckdb-kql[duckdb]'    # ... and run it               (+ duckdb)
-pip install 'duckdb-kql[kusto]'     # ... via the Kusto SDK API    (+ pandas)
-pip install 'duckdb-kql[all]'       # everything
-```
-
-Python 3.10 or newer. Fully typed — the package ships `py.typed`, so your type
-checker sees real types across all three layers ([details][typing]).
-
-[typing]: https://github.com/mmaitre314/duckdb-kql/blob/main/docs/api.md#typing
-
-## No-runtime-dependency option
-
-Translate at build time and the output has no dependency on this package at all
-— not even Python. Only your CI machine installs it.
-
-```bash
-duckdb-kql translate queries/ -o build/sql/ --check   # fails the build if a .sql is stale
+duckdb-kql translate -o query.sql query.kql
 ```
 
 See [Build-time translation](https://github.com/mmaitre314/duckdb-kql/blob/main/docs/cli.md).
@@ -190,16 +181,16 @@ approximation.
 
 ## Documentation
 
-| Document | What it covers |
+| Document | Topics |
 |---|---|
 | [Getting started](https://github.com/mmaitre314/duckdb-kql/blob/main/docs/getting-started.md) | Install, first query, the three layers |
-| [**KQL support matrix**](https://github.com/mmaitre314/duckdb-kql/blob/main/docs/kql-support.md) | Every operator and function, supported or not, each with its gotchas |
+| [KQL support matrix](https://github.com/mmaitre314/duckdb-kql/blob/main/docs/kql-support.md) | Every operator and function, supported or not, each with its gotchas |
 | [Build-time CLI](https://github.com/mmaitre314/duckdb-kql/blob/main/docs/cli.md) | Translating `.kql` to `.sql` in CI, to avoid a runtime dependency |
 | [Local Kusto endpoint](https://github.com/mmaitre314/duckdb-kql/blob/main/docs/kusto-server.md) | `duckdb-kql serve` — query a DuckDB file from the Azure Data Explorer UI |
 | [API reference](https://github.com/mmaitre314/duckdb-kql/blob/main/docs/api.md) | Every public function and type |
 | [Kusto SDK compatibility](https://github.com/mmaitre314/duckdb-kql/blob/main/docs/kusto-client.md) | What Layer 2 implements, no-ops, and refuses |
 | [Azure Monitor profile](https://github.com/mmaitre314/duckdb-kql/blob/main/docs/azure-monitor-profile.md) | Coverage against a published KQL subset |
-| [`docs/TRANSLATION.md`](https://github.com/mmaitre314/duckdb-kql/blob/main/docs/TRANSLATION.md) | **Normative** KQL→DuckDB mapping spec (R1–R12) |
+| [`docs/TRANSLATION.md`](https://github.com/mmaitre314/duckdb-kql/blob/main/docs/TRANSLATION.md) | Normative KQL→DuckDB mapping spec (R1–R12) |
 | [`docs/implementation-plan.md`](https://github.com/mmaitre314/duckdb-kql/blob/main/docs/implementation-plan.md) | Architecture and milestones |
 | [`docs/test-plan.md`](https://github.com/mmaitre314/duckdb-kql/blob/main/docs/test-plan.md) | Corpus harvesting, oracle, divergence catalog |
 | [`docs/kql-on-duckdb-landscape.md`](https://github.com/mmaitre314/duckdb-kql/blob/main/docs/kql-on-duckdb-landscape.md) | Survey of existing KQL-on-DuckDB work |
