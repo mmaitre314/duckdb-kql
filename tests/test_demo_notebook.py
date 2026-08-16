@@ -122,6 +122,45 @@ def test_every_cell_was_actually_run(path: Path) -> None:
     )
 
 
+#: Commands that do not return on their own. A notebook is executed by a
+#: machine, and a cell waiting for Ctrl-C waits forever.
+_BLOCKING = ("duckdb-kql serve", "duckdb_kql.server.serve(", "serve_forever()")
+
+
+@pytest.mark.parametrize("path", NOTEBOOKS, ids=str)
+def test_no_cell_runs_a_command_that_never_returns(path: Path) -> None:
+    """`!duckdb-kql serve` renders beautifully and hangs the build.
+
+    It ran fine by hand — the author pressed Ctrl-C, and the interrupt is right
+    there in the saved output. Under nbclient nobody presses anything, so it
+    burned the full 600s timeout on both lanes before failing. This catches it
+    in milliseconds instead, and says what to do about it.
+
+    `serve_forever()` on a thread is fine and is what the notebook does; what is
+    banned is blocking the *cell*.
+    """
+    offenders = []
+    for i, cell in enumerate(_notebook(path).cells):
+        if cell.cell_type != "code":
+            continue
+        for line in cell.source.splitlines():
+            stripped = line.strip()
+            # A `!` escape blocks the cell; the same text inside a
+            # `threading.Thread(target=...)` does not.
+            blocking_shell = stripped.startswith("!") and any(
+                b in stripped for b in _BLOCKING
+            )
+            blocking_call = "serve_forever()" in stripped and "Thread" not in stripped
+            if blocking_shell or blocking_call:
+                offenders.append(f"cell {i}: {stripped}")
+    assert not offenders, (
+        "these cells never return, so executing the notebook hangs:\n  "
+        + "\n  ".join(offenders)
+        + "\nStart the server on a daemon thread, query it, then call "
+        "shutdown() — see the 'KQL local HTTP server' cell."
+    )
+
+
 @pytest.mark.skipif(
     importlib.util.find_spec("nbclient") is None
     or importlib.util.find_spec("ipykernel") is None,
@@ -141,7 +180,10 @@ def test_the_notebook_still_runs(path: Path) -> None:
     nb = _notebook(path)
     client = NotebookClient(
         nb,
-        timeout=600,
+        # Generous for a demo whose slowest cell is a 2000-row insert, and short
+        # enough that a hung cell is a two-minute failure rather than an
+        # eleven-minute one. The check above should catch the usual cause first.
+        timeout=120,
         kernel_name="python3",
         resources={"metadata": {"path": str(path.parent)}},
     )
