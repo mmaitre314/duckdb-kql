@@ -1,4 +1,23 @@
-# duckdb-kql
+<!--
+  The wordmark stands in for the `# duckdb-kql` heading this file used to open
+  with. Two things about the markup are load-bearing, both verified rather than
+  assumed — see tests/test_readme_logo.py:
+
+  * **Absolute raw.githubusercontent URLs, not relative paths.** PyPI renders
+    this file on its own domain and does not resolve repository-relative paths,
+    so `docs/assets/...` would be a broken image there. GitHub resolves absolute
+    raw URLs perfectly well, so one form serves both.
+  * **`<picture>` for dark mode.** GitHub honours `prefers-color-scheme` inside
+    it; PyPI's sanitizer (readme_renderer + bleach) drops `<source>` and keeps
+    the `<img>`, so PyPI simply gets the light wordmark. The `alt` text is the
+    project name so the heading survives even if the image does not.
+-->
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/mmaitre314/duckdb-kql/main/docs/assets/logo-horizontal-dark.svg">
+    <img src="https://raw.githubusercontent.com/mmaitre314/duckdb-kql/main/docs/assets/logo-horizontal-light.svg" alt="duckdb-kql" width="343">
+  </picture>
+</p>
 
 [![CI](https://github.com/mmaitre314/duckdb-kql/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/mmaitre314/duckdb-kql/actions/workflows/ci.yml)
 [![Oracle](https://github.com/mmaitre314/duckdb-kql/actions/workflows/oracle.yml/badge.svg?branch=main)](https://github.com/mmaitre314/duckdb-kql/actions/workflows/oracle.yml)

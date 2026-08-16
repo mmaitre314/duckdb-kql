@@ -68,6 +68,10 @@ dev = [
     # tests/test_workflows.py reads the GitHub Actions definitions.
     "pyyaml",
     "types-PyYAML",
+    # PyPI renders the README with this exact library. tests/test_readme_logo.py
+    # runs it to prove the logo survives PyPI's sanitizer — a check that skips
+    # itself if the package is missing, which is the same as not having it.
+    "readme-renderer[md]",
     # tests/test_demo_notebook.py re-executes demo/duckdb-kql-demo.ipynb. These
     # are only here so that check actually runs: skipping it in CI would leave
     # the demo's committed outputs asserting things nothing verifies.
