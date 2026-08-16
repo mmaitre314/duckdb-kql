@@ -81,12 +81,13 @@ approximated.
 ## Usage
 
 ```
-duckdb-kql serve [DATABASE] [-p PORT] [--allow-origin ORIGIN]
+duckdb-kql serve [DATABASE] [--init SCRIPT] [-p PORT] [--allow-origin ORIGIN]
 ```
 
 | | |
 |---|---|
 | `DATABASE` | DuckDB database file to serve. Omit for an empty in-memory one. |
+| `--init` | A `.sql` script to run before serving. See below. |
 | `-p, --port` | TCP port (default `31415`). |
 | `--allow-origin` | Allow a browser origin. Repeatable; replaces the default list. |
 
@@ -100,6 +101,62 @@ package — create a view first:
 ```sql
 CREATE VIEW Logs AS SELECT * FROM 'logs/*.parquet';
 ```
+
+## Several databases at once
+
+`--init` runs a `.sql` script against the connection before the socket is bound.
+Its main use is `ATTACH`, which turns one server into several Kusto databases:
+
+```sql
+-- attach.sql
+ATTACH 'sales.duckdb'     AS Sales     (READ_ONLY);
+ATTACH 'customers.duckdb' AS Customers (READ_ONLY);
+```
+
+```bash
+duckdb-kql serve --init attach.sql
+```
+
+```
+duckdb-kql serving :memory: as database 'memory'
+  init attach.sql
+  attached: Customers, Sales
+  http://127.0.0.1:31415
+```
+
+Each attached file is a Kusto database to any client, reached with KQL's
+cross-database syntax — including on both sides of a join:
+
+```kql
+database("Sales").Orders
+| where Status == "shipped"
+| join kind=inner (database("Customers").Customers) on CustomerId
+| summarize Revenue = sum(Total) by Region, Tier
+```
+
+`demo/serve-multi-db.sh` is exactly this, end to end: it builds the two files
+with the DuckDB CLI from `demo/sql/*.sql`, serves them, and runs the query above.
+
+Notes on the pieces:
+
+- **The init script is SQL, not KQL.** `ATTACH` is a DuckDB statement with no
+  KQL spelling, so the setup step is necessarily SQL even though every query
+  afterwards is KQL. The extension decides: `.sql` runs, `.kql` is refused *by
+  name* with "not implemented yet" rather than falling through to a message that
+  reads like the extension was a typo.
+- **A failing init script stops the server.** Serving a half-attached database
+  answers queries with "no such table" instead of with the reason the attach
+  failed.
+- **`--init` runs before the bind**, so a client cannot observe the database
+  halfway through its own setup.
+- **`.show databases entities` spans every database**; `.show tables` is the
+  current one only. Both are measured on the Kusto Emulator with a second
+  database created, not inferred — and the first is what the Azure Data Explorer
+  web UI draws its schema tree from, so attached databases appear there.
+- **`cluster(...)` is refused.** A cross-cluster reference names a service that
+  does not exist here, and quietly reading
+  `cluster("prod").database("Sales").Orders` as the local `Sales` would answer a
+  question about production with local data.
 
 ## What it implements
 

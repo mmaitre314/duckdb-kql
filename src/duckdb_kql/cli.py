@@ -140,14 +140,23 @@ def _serve_command(args: argparse.Namespace) -> int:
 
     origins = tuple(args.allow_origin) if args.allow_origin else ADX_ORIGINS
     try:
-        serve(args.database, port=args.port, allowed_origins=origins)
+        serve(args.database, port=args.port, allowed_origins=origins, init=args.init)
     except ImportError as exc:  # pragma: no cover - depends on the install
         # `engine._require_duckdb` already names the extra to install; repeating
         # it here would print the same instruction twice.
         print(f"duckdb-kql serve: {exc}", file=sys.stderr)
         return EXIT_TRANSLATION_ERROR
+    except ValueError as exc:
+        # A bad init script: wrong extension, or not readable as one.
+        print(f"duckdb-kql serve: --init: {exc}", file=sys.stderr)
+        return EXIT_TRANSLATION_ERROR
     except OSError as exc:
         print(f"duckdb-kql serve: {exc}", file=sys.stderr)
+        return EXIT_TRANSLATION_ERROR
+    except Exception as exc:  # noqa: BLE001 - an init script that failed to run
+        # Fatal on purpose: serving a half-attached database answers queries
+        # with "no such table" instead of with the reason.
+        print(f"duckdb-kql serve: --init {args.init}: {exc}", file=sys.stderr)
         return EXIT_TRANSLATION_ERROR
     return EXIT_OK
 
@@ -427,6 +436,15 @@ def _parser() -> argparse.ArgumentParser:
         default=":memory:",
         metavar="DATABASE",
         help="DuckDB database file to serve. Omit for an empty in-memory one.",
+    )
+    serve.add_argument(
+        "--init",
+        metavar="SCRIPT",
+        help=(
+            "run a .sql script against the database before serving. This is how "
+            "several databases are served at once: ATTACH them here, then query "
+            'across them with database("Name").Table.'
+        ),
     )
     serve.add_argument(
         "-p",

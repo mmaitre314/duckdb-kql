@@ -170,12 +170,21 @@ def schema(con: DuckDBPyConnection) -> Schema:
     """
     try:
         rows = con.execute(
-            "SELECT table_name, column_name FROM information_schema.columns "
-            "ORDER BY table_name, ordinal_position"
+            "SELECT table_catalog, table_name, column_name, current_database() "
+            "FROM information_schema.columns "
+            "ORDER BY table_catalog, table_name, ordinal_position"
         ).fetchall()
     except Exception:  # noqa: BLE001 - a schema-less connection is not an error
         return {}
     out: Schema = {}
-    for table, column in rows:
-        out.setdefault(table, []).append(column)
+    for catalog, table, column, current in rows:
+        # Every table is reachable as `Database.Table`, which is what
+        # `database("Sales").Orders` lowers to.
+        out.setdefault(f"{catalog}.{table}", []).append(column)
+        # A bare name means the current database, in KQL as in DuckDB. Keying
+        # every catalog's tables by their bare name too would let an attached
+        # file silently shadow a table of the same name in the database the
+        # caller actually connected to.
+        if catalog == current:
+            out.setdefault(table, []).append(column)
     return out

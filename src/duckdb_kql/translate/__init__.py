@@ -328,9 +328,22 @@ def output_name(named: ir.NamedExpr, position: int) -> str:
 # ---------------------------------------------------------------------------
 
 
+def render_table_ref(source: ir.TableRef) -> str:
+    """``"Orders"`` or ``"Sales"."Orders"``.
+
+    Two parts, not three: DuckDB reads ``"db"."name"`` as catalog-and-table and
+    finds it wherever the database's search path puts it. Pinning ``"main"`` in
+    the middle would be more explicit and would stop resolving the moment
+    someone attaches a file whose tables live in another schema.
+    """
+    if source.database is None:
+        return quote_ident(source.name)
+    return f"{quote_ident(source.database)}.{quote_ident(source.name)}"
+
+
 def render_source(source: ir.Source) -> str:
     if isinstance(source, ir.TableRef):
-        return f"SELECT * FROM {quote_ident(source.name)}"
+        return f"SELECT * FROM {render_table_ref(source)}"
 
     if isinstance(source, ir.PrintSource):
         cols = [

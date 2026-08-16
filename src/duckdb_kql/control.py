@@ -321,9 +321,19 @@ ORDER BY "TableName\""""
 def _entities_sql() -> str:
     """`.show databases entities` — one row per table, with its column list.
 
+    **Every** database, not the current one. That is measured, not assumed: on
+    the emulator with a second database attached, running it from `NetDefaultDB`
+    returns `NetDefaultDB.Users` *and* `Sales.Orders`, and running it from
+    `Sales` returns the same rows in the same order. `.show tables` is the one
+    that is current-database-only — also measured, and left that way.
+
+    The distinction is what makes an attached database usable: the Azure Data
+    Explorer web UI draws its schema tree from this command, so filtering to the
+    current database would hide everything `duckdb-kql serve --init` attached.
+
     `CslOutputSchema` is the load-bearing column: `C0:long, C1:datetime`, in KQL
-    type names. The Azure Data Explorer web UI reads it to draw the schema tree,
-    so a wrong type here is visible in the product rather than buried.
+    type names. The UI reads it for each table's columns, so a wrong type here is
+    visible in the product rather than buried.
     """
     from .types import kusto_type_sql
 
@@ -345,8 +355,7 @@ SELECT t.table_catalog AS "DatabaseName",
        coalesce(({column_list}), '') AS "CslOutputSchema",
        CAST('{{"column_docs":{{}}}}' AS JSON) AS "Properties"
 FROM information_schema.tables t
-WHERE t.table_catalog = current_database()
-ORDER BY "EntityName"
+ORDER BY "DatabaseName", "EntityName"
 """
 
 

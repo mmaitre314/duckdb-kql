@@ -383,6 +383,11 @@ def _lower_source(node: Any) -> ir.Source:
     if kind == "IdentifierName":
         return ir.TableRef(node.getText())
 
+    if kind == "FunctionCallOrPathPathExpression":
+        qualified = _lower_qualified_table(node)
+        if qualified is not None:
+            return qualified
+
     if kind == "RangeExpression":
         kids = _rule_children(node)
         if len(kids) != 4:
@@ -415,6 +420,61 @@ def _lower_source(node: Any) -> ir.Source:
         return ir.PrintSource((ir.NamedExpr(_lower_expr(node)),))
     except KqlUnsupportedError:
         raise _unsupported(node, f"source:{kind}") from None
+
+
+def _lower_qualified_table(node: Any) -> ir.TableRef | None:
+    """``database("Sales").Orders`` -> ``TableRef("Orders", database="Sales")``.
+
+    Returns ``None`` when the path is not a cross-database table reference, so
+    the caller falls through to its own error rather than this one guessing.
+
+    `cluster(...)` is refused rather than ignored. A cross-*cluster* reference
+    names a service that does not exist here; quietly treating
+    ``cluster("prod").database("Sales").Orders`` as the local `Sales` would
+    answer a question about production with local data, which is the one failure
+    this package exists to prevent.
+    """
+    root, *operations = _rule_children(node)
+    call = _find_all(root, "NamedFunctionCallExpression")
+    if not call:
+        return None
+    name_nodes = _rule_children(call[0])
+    function = name_nodes[0].getText().lower() if name_nodes else ""
+
+    if function == "cluster":
+        raise _unsupported(
+            node,
+            "cluster() — there is no cluster here; attach the database locally "
+            'and reference it as database("Name").Table',
+        )
+    if function != "database":
+        return None
+
+    literals = _find_all(call[0], "StringLiteralExpression")
+    if len(literals) != 1:
+        return None
+    database = _literal_string(literals[0])
+    if database is None:
+        return None
+
+    # Exactly one `.Name` after it. `database("X").Y.Z` is not a table.
+    names = [n for op in operations for n in _find_all(op, "IdentifierOrKeywordOrEscapedName")]
+    if len(names) != 1:
+        return None
+    return ir.TableRef(names[0].getText(), database=database)
+
+
+def _literal_string(node: Any) -> str | None:
+    """The value of a string-literal node, or ``None`` if it is not one.
+
+    Routed through :func:`_lower_expr` rather than reading the text, so quoting
+    and escaping are decided in exactly one place — `database('a\\'b')` cannot
+    mean one thing here and another everywhere else.
+    """
+    lowered = _lower_expr(node)
+    if isinstance(lowered, ir.Literal) and isinstance(lowered.value, str):
+        return lowered.value
+    return None
 
 
 def _lower_operator(node: Any) -> ir.Operator | None:

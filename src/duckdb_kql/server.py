@@ -39,6 +39,7 @@ import re
 import threading
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
 from . import __version__
@@ -52,6 +53,9 @@ if TYPE_CHECKING:
 __all__ = [
     "serve",
     "build_server",
+    "read_init_script",
+    "run_init_script",
+    "INIT_SCRIPT_LANGUAGES",
     "KustoRestServer",
     "Result",
     "RestColumn",
@@ -576,6 +580,19 @@ class KustoRestServer(ThreadingHTTPServer):
             host = host.decode()
         return f"http://{host}:{port}"
 
+    def databases(self) -> list[str]:
+        """Every database reachable on this connection, `.show databases` order.
+
+        More than one once an init script has attached others: each is a Kusto
+        database here, addressed as `database("Name").Table`.
+        """
+        with self._lock:
+            rows = self._con.execute(
+                "SELECT database_name FROM duckdb_databases() "
+                "WHERE NOT internal ORDER BY database_name"
+            ).fetchall()
+        return [str(row[0]) for row in rows]
+
     def serves(self, name: str) -> bool:
         """Whether *name* is a database this connection can answer for.
 
@@ -584,16 +601,9 @@ class KustoRestServer(ThreadingHTTPServer):
         one we have would be a wrong answer wearing the right label, so an
         unrecognised name is a 404 instead.
         """
-        with self._lock:
-            attached = {
-                row[0]
-                for row in self._con.execute(
-                    "SELECT database_name FROM duckdb_databases() WHERE NOT internal"
-                ).fetchall()
-            }
         # `default` is what a client sends before it has asked what exists —
         # the Azure Data Explorer UI uses it as the initial database name.
-        return name in attached or name == "default"
+        return name in self.databases() or name == "default"
 
     def run(self, csl: str, parameters: dict[str, Any] | None = None) -> Result:
         """Translate and execute *csl*, described the way Kusto describes it.
@@ -637,19 +647,94 @@ def _declared_schema(csl: str) -> tuple[CommandColumn, ...] | None:
     return SCHEMA.get(command)
 
 
+# ---------------------------------------------------------------------------
+# Startup scripts
+# ---------------------------------------------------------------------------
+
+#: What an init script may be written in, keyed by file extension.
+#:
+#: `.sql` is what makes several databases reachable at once: `ATTACH` is a
+#: DuckDB statement with no KQL counterpart, so the setup step is necessarily in
+#: SQL even though every query afterwards is KQL.
+#:
+#: `.kql` is deliberately *listed and refused* rather than left to fall through
+#: to the "unknown extension" message. A KQL init script is a coherent idea —
+#: `let` definitions and views shared by every session — and the refusal should
+#: say that it is not built yet rather than imply the extension is a typo.
+INIT_SCRIPT_LANGUAGES = {
+    ".sql": "DuckDB SQL, executed as written",
+    ".kql": None,
+}
+
+_KQL_INIT_HINT = (
+    "a KQL init script is not implemented yet; only .sql is executed today. "
+    "ATTACH is a SQL statement with no KQL spelling, so attaching databases "
+    "belongs in a .sql script either way"
+)
+
+
+def read_init_script(path: str | Path) -> str:
+    """The text of an init script, refusing anything not executable.
+
+    Dispatch is on the **extension**, not on the content, so a `.kql` file is
+    refused with a reason instead of being handed to DuckDB and failing as a
+    syntax error halfway through.
+    """
+    script = Path(path)
+    suffix = script.suffix.lower()
+    if suffix not in INIT_SCRIPT_LANGUAGES:
+        raise ValueError(
+            f"{script}: unsupported init script type {suffix or '(no extension)'!r}; "
+            f"expected one of {', '.join(sorted(INIT_SCRIPT_LANGUAGES))}"
+        )
+    if INIT_SCRIPT_LANGUAGES[suffix] is None:
+        raise ValueError(f"{script}: {_KQL_INIT_HINT}")
+    return script.read_text(encoding="utf-8")
+
+
+def run_init_script(con: DuckDBPyConnection, path: str | Path) -> None:
+    """Run *path* against *con* before the first request is served.
+
+    Executed as one script rather than split on `;`, because DuckDB's own parser
+    knows where a statement ends and a naive split does not — a semicolon inside
+    a string literal or a `$$`-quoted body would cut a statement in half.
+
+    A failure here is fatal by design. Serving anyway would answer queries out
+    of a half-attached database, and "no such table" is a far worse way to learn
+    that an ATTACH failed than the error itself.
+    """
+    sql = read_init_script(path)
+    if sql.strip():
+        con.execute(sql)
+
+
+# ---------------------------------------------------------------------------
+# Construction
+# ---------------------------------------------------------------------------
+
+
 def build_server(
     database: str = ":memory:",
     *,
     port: int = DEFAULT_PORT,
     host: str = "127.0.0.1",
     allowed_origins: tuple[str, ...] = ADX_ORIGINS,
+    init: str | Path | None = None,
     quiet: bool = False,
 ) -> KustoRestServer:
-    """A server ready to `serve_forever()`, with its own DuckDB connection."""
+    """A server ready to `serve_forever()`, with its own DuckDB connection.
+
+    *init* runs before the socket is bound, so a client can never observe the
+    database halfway through its own setup.
+    """
     from .engine import connect  # noqa: PLC0415
 
+    con = connect(database)
+    if init is not None:
+        run_init_script(con, init)
+
     return KustoRestServer(
-        connect(database),
+        con,
         port=port,
         host=host,
         allowed_origins=allowed_origins,
@@ -663,10 +748,21 @@ def serve(
     *,
     port: int = DEFAULT_PORT,
     allowed_origins: tuple[str, ...] = ADX_ORIGINS,
+    init: str | Path | None = None,
 ) -> None:
     """Run until interrupted. This is what the CLI's ``serve`` calls."""
-    server = build_server(database, port=port, allowed_origins=allowed_origins)
+    server = build_server(
+        database, port=port, allowed_origins=allowed_origins, init=init
+    )
     print(f"duckdb-kql serving {database} as database {server.database!r}")
+    if init is not None:
+        print(f"  init {init}")
+    attached = [name for name in server.databases() if name != server.database]
+    if attached:
+        # Named at startup because a client reaches these as
+        # `database("Name").Table`, and the name is the attach alias rather
+        # than anything derivable from the file path.
+        print(f"  attached: {', '.join(attached)}")
     print(f"  {server.url}")
     print("Connect from https://dataexplorer.azure.com -> Add connection")
     print("Local connections only. Ctrl-C to stop.")

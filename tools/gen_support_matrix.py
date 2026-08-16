@@ -201,6 +201,7 @@ OPERATORS: list[tuple[str, str, str]] = [
 
 SOURCES: list[tuple[str, str, str]] = [
     ("table reference", "T", "A KQL table name is a DuckDB table, view, or registered relation. Case-**sensitive**."),
+    ("`database()`", 'database("Sales").Orders', 'A cross-database reference, spelled `"Sales"."Orders"` in DuckDB. Attach the file first — `duckdb-kql serve --init` does it for a whole server. Joins may cross databases. `cluster(...)` is refused: there is none, and reading it as local would answer a question about somewhere else with data from here.'),
     ("`print`", "print x = 1", "Unnamed columns are `print_0`, `print_1`, … as in KQL."),
     ("`datatable`", "datatable (a: long) [1, 2]", "Values are read row-major and must divide evenly by the column count, as in KQL."),
     ("`range`", "range i from 1 to 3 step 1", "The end value is **inclusive**, unlike DuckDB's `range()`. Works over datetimes with a timespan step."),
@@ -384,9 +385,11 @@ REFUSALS: list[tuple[str, str]] = [
         "offline transpiler by construction.",
     ),
     (
-        "Cross-cluster and cross-database references (`cluster()`, `database()`)",
-        "There is no cluster. Resolving them against the local database would "
-        "answer a question about somewhere else with data from here.",
+        "Cross-**cluster** references (`cluster()`)",
+        "There is no cluster. Resolving one against the local database would "
+        "answer a question about somewhere else with data from here. "
+        "Cross-*database* references (`database()`) **are** supported — attach "
+        "the other file and they resolve to a real, local table.",
     ),
 ]
 

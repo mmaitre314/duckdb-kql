@@ -93,6 +93,7 @@ returns an approximate answer.
 | Source | Limitations and gotchas |
 |---|---|
 | table reference | A KQL table name is a DuckDB table, view, or registered relation. Case-**sensitive**. |
+| `database()` | A cross-database reference, spelled `"Sales"."Orders"` in DuckDB. Attach the file first — `duckdb-kql serve --init` does it for a whole server. Joins may cross databases. `cluster(...)` is refused: there is none, and reading it as local would answer a question about somewhere else with data from here. |
 | `print` | Unnamed columns are `print_0`, `print_1`, … as in KQL. |
 | `datatable` | Values are read row-major and must divide evenly by the column count, as in KQL. |
 | `range` | The end value is **inclusive**, unlike DuckDB's `range()`. Works over datetimes with a timespan step. |
@@ -391,7 +392,7 @@ and shipping that would be worse than raising.
 | `series_*` functions | Time-series decomposition, anomaly detection and forecasting. Real algorithms with real parameters; an approximation would be indistinguishable from a result. |
 | `hll`, `tdigest` and their `_merge` / `dcount_hll` / `percentile_tdigest` forms | These serialise a specific sketch **format**. Producing a differently shaped blob under the same name would break anything that stores or merges them. |
 | Plugins (`evaluate` with `python`, `sql_request`, `cosmosdb_sql_request`, …) | They execute code or call out over the network. Out of scope for an offline transpiler by construction. |
-| Cross-cluster and cross-database references (`cluster()`, `database()`) | There is no cluster. Resolving them against the local database would answer a question about somewhere else with data from here. |
+| Cross-**cluster** references (`cluster()`) | There is no cluster. Resolving one against the local database would answer a question about somewhere else with data from here. Cross-*database* references (`database()`) **are** supported — attach the other file and they resolve to a real, local table. |
 
 ## Known divergences
 

@@ -224,3 +224,6 @@ __marimo__/
 # duckdb-kql
 .antlr/
 tests/cases/**/unparsed.json
+
+# Built by demo/serve-multi-db.sh from demo/sql/*.sql
+demo/*.duckdb

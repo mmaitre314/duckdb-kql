@@ -154,7 +154,24 @@ class Source(Node):
 
 @dataclass(frozen=True)
 class TableRef(Source):
+    """A table, optionally in another database.
+
+    ``database("Sales").Orders`` is Kusto's cross-database reference and it
+    lowers to here rather than to a function call: `database()` is not a scalar
+    function, it is the first half of a qualified name. DuckDB spells the same
+    thing ``"Sales"."Orders"`` once the file is attached, which is what makes
+    this a rename rather than a feature.
+    """
+
     name: str
+    #: ``None`` means the connection's current database, which is what an
+    #: unqualified name means in both languages.
+    database: str | None = None
+
+    @property
+    def qualified(self) -> str:
+        """``Orders`` or ``Sales.Orders`` — for messages, not for SQL."""
+        return self.name if self.database is None else f"{self.database}.{self.name}"
 
 
 @dataclass(frozen=True)

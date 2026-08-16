@@ -49,7 +49,9 @@ def output_columns(query: ir.Query, schema: Schema | None = None) -> list[str]:
 
 def _source_columns(source: ir.Source, schema: Schema | None) -> list[str]:
     if isinstance(source, ir.TableRef):
-        return _table_columns(source.name, schema)
+        # `Sales.Orders` when qualified, `Orders` when not — the same string
+        # `engine.schema` keys attached databases by.
+        return _table_columns(source.qualified, schema)
     if isinstance(source, ir.CommandSource):
         return list(source.columns)
     if isinstance(source, ir.DataTable):

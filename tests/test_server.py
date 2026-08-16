@@ -629,3 +629,173 @@ def test_no_command_declares_a_duplicate_column_name() -> None:
     for command, columns in SCHEMA.items():
         names = [c.name for c in columns]
         assert len(names) == len(set(names)), command
+
+
+# ---------------------------------------------------------------------------
+# Init scripts and several databases at once
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def two_databases(tmp_path):
+    """Two DuckDB files and an init script that attaches both.
+
+    The two tables share a key and share *no* other column, deliberately: a
+    join that reaches the second database can then be told apart from one that
+    quietly resolved both sides in the first, because `Name` exists in only one
+    of the files.
+    """
+    import duckdb  # noqa: PLC0415
+
+    con = duckdb.connect(str(tmp_path / "sales.duckdb"))
+    con.execute("CREATE TABLE Orders(CustomerId BIGINT, Amount DOUBLE)")
+    con.execute("INSERT INTO Orders VALUES (1, 10.0), (2, 20.0)")
+    con.close()
+
+    con = duckdb.connect(str(tmp_path / "customers.duckdb"))
+    con.execute("CREATE TABLE Customers(CustomerId BIGINT, Name VARCHAR)")
+    con.execute("INSERT INTO Customers VALUES (1, 'ann'), (2, 'bo')")
+    con.close()
+    init = tmp_path / "attach.sql"
+    init.write_text(
+        f"ATTACH '{tmp_path / 'sales.duckdb'}' AS Sales (READ_ONLY);\n"
+        f"ATTACH '{tmp_path / 'customers.duckdb'}' AS Customers (READ_ONLY);\n"
+    )
+    return init
+
+
+def test_an_init_script_attaches_databases(two_databases) -> None:
+    """The point of --init: one server, several DuckDB files."""
+    srv = build_server(quiet=True, port=0, init=two_databases)
+    try:
+        assert srv.databases() == ["Customers", "Sales", "memory"]
+    finally:
+        srv.server_close()
+
+
+def test_the_init_script_runs_before_the_socket_is_bound(two_databases) -> None:
+    """A client must never see the database halfway through its own setup.
+
+    Ordering is asserted through the observable consequence: by the time a
+    server object exists at all, every attach has already happened.
+    """
+    srv = build_server(quiet=True, port=0, init=two_databases)
+    try:
+        assert "Sales" in srv.databases()
+    finally:
+        srv.server_close()
+
+
+def test_a_failing_init_script_stops_the_server_starting(tmp_path) -> None:
+    """Serving a half-attached database answers queries with 'no such table'
+    rather than with the reason the attach failed."""
+    init = tmp_path / "bad.sql"
+    init.write_text("ATTACH '/no/such/file.duckdb' AS Nope;\n")
+    with pytest.raises(Exception) as caught:
+        build_server(quiet=True, port=0, init=init)
+    assert "Nope" in str(caught.value) or "no/such" in str(caught.value)
+
+
+def test_an_init_script_must_be_sql(tmp_path) -> None:
+    from duckdb_kql.server import read_init_script  # noqa: PLC0415
+
+    script = tmp_path / "setup.txt"
+    script.write_text("ATTACH 'x' AS y;")
+    with pytest.raises(ValueError, match="unsupported init script type"):
+        read_init_script(script)
+
+
+def test_a_kql_init_script_is_refused_by_name_not_by_accident(tmp_path) -> None:
+    """`.kql` is a coherent idea that is not built yet, and the message says so.
+
+    Falling through to "unsupported extension" would read as though `.kql` were
+    a typo, and handing it to DuckDB would fail as a SQL syntax error partway
+    down someone's file.
+    """
+    from duckdb_kql.server import INIT_SCRIPT_LANGUAGES, read_init_script  # noqa: PLC0415
+
+    assert ".kql" in INIT_SCRIPT_LANGUAGES
+    script = tmp_path / "setup.kql"
+    script.write_text("let x = 1;")
+    with pytest.raises(ValueError, match="not implemented yet"):
+        read_init_script(script)
+
+
+def test_show_databases_lists_every_attached_database(two_databases) -> None:
+    srv = build_server(quiet=True, port=0, init=two_databases)
+    try:
+        names = [row[0] for row in srv.run(".show databases").rows]
+        assert names == ["Customers", "Sales", "memory"]
+    finally:
+        srv.server_close()
+
+
+def test_show_databases_entities_spans_every_database(two_databases) -> None:
+    """Measured on the emulator, not assumed.
+
+    With a second database attached, `.show databases entities` run from
+    `NetDefaultDB` returns `NetDefaultDB.Users` *and* `Sales.Orders` — and the
+    same rows in the same order when run from `Sales`. `.show tables` is the
+    current-database one. This matters in the product: the Azure Data Explorer
+    web UI draws its schema tree from this command, so filtering to the current
+    database would hide everything `--init` attached.
+    """
+    srv = build_server(quiet=True, port=0, init=two_databases)
+    try:
+        rows = srv.run(".show databases entities").rows
+        assert [(r[0], r[2]) for r in rows] == [
+            ("Customers", "Customers"),
+            ("Sales", "Orders"),
+        ]
+        # CslOutputSchema is what the UI reads for each table's columns.
+        assert rows[1][7] == "CustomerId:long, Amount:real"
+    finally:
+        srv.server_close()
+
+
+def test_show_tables_stays_current_database_only(two_databases) -> None:
+    """The other half of the measurement: `.show tables` did *not* span."""
+    srv = build_server(quiet=True, port=0, init=two_databases)
+    try:
+        assert srv.run(".show tables").rows == []
+    finally:
+        srv.server_close()
+
+
+def test_a_query_reaches_into_an_attached_database(two_databases) -> None:
+    srv = build_server(quiet=True, port=0, init=two_databases)
+    try:
+        assert srv.run('database("Sales").Orders | count').rows == [(2,)]
+    finally:
+        srv.server_close()
+
+
+def test_a_query_joins_across_two_attached_databases(two_databases) -> None:
+    """The thing a single DuckDB file cannot do, over one connection.
+
+    `Name` lives only in `customers.duckdb` and `Amount` only in
+    `sales.duckdb`, so a result carrying both is proof the join crossed.
+    """
+    srv = build_server(quiet=True, port=0, init=two_databases)
+    try:
+        result = srv.run(
+            'database("Sales").Orders'
+            ' | join kind=inner (database("Customers").Customers) on CustomerId'
+            " | project Name, Amount"
+            " | sort by Amount asc"
+        )
+        assert [c.name for c in result.columns] == ["Name", "Amount"]
+        assert [tuple(r) for r in result.rows] == [("ann", 10.0), ("bo", 20.0)]
+    finally:
+        srv.server_close()
+
+
+def test_a_client_may_select_an_attached_database_by_name(two_databases) -> None:
+    """`db` on the request is checked against what is actually attached."""
+    srv = build_server(quiet=True, port=0, init=two_databases)
+    try:
+        assert srv.serves("Sales")
+        assert srv.serves("Customers")
+        assert not srv.serves("Production")
+    finally:
+        srv.server_close()
