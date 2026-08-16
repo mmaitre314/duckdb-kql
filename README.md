@@ -26,7 +26,7 @@
 </p>
 
 Run [Kusto Query Language](https://learn.microsoft.com/kusto/query/) (KQL) queries on
-[DuckDB](https://duckdb.org) in Python. Use to test KQL queries locally, in unit tests, in CI builds, etc. with no need for network.
+[DuckDB](https://duckdb.org) in Python. Use to develop KQL queries locally, run in unit tests, as part of CI builds, etc. without the need for network.
 
 ```python
 import duckdb_kql
