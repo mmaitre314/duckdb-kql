@@ -66,6 +66,13 @@ https://dataexplorer.azure.us
 `--allow-origin` replaces that list. Widening it is a decision about who may read
 this database from another browser tab, not a formatting preference.
 
+The **origin** is the whole check. Request *headers* are not: a preflight echoes
+back whatever `Access-Control-Request-Headers` asked for, because naming a header
+authorises nothing and a hand-written list is only a second place to be wrong
+about someone else's client. It was wrong once — the list said `x-ms-user` where
+the web UI sends `x-ms-user-id`, and the browser answered by failing the real
+POST with a bare `net::ERR_FAILED` after a preflight that returned 204.
+
 **Nothing it serves can write.** The translated surface is read-only: no
 supported KQL operator produces a statement that modifies the database, and
 control commands that would administer a cluster are refused rather than

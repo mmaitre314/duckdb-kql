@@ -41,6 +41,7 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
+from . import __version__
 from .control import SCHEMA, CommandColumn, is_control_command, split_command
 from .errors import KqlError
 from .types import kusto_type, rest_datatype
@@ -347,11 +348,18 @@ def error_response(message: str, *, code: str = "General_BadRequest") -> dict[st
 
 _LOOPBACK = re.compile(r"^(127\.\d+\.\d+\.\d+|::1)$")
 
+#: Only for a preflight that names no headers, which no browser sends — a
+#: preflight exists *because* there is something non-simple to declare. Kept so
+#: the header is never emitted empty.
+_DEFAULT_ALLOW_HEADERS = "Authorization, Content-Type, Accept"
+
 
 class _Handler(BaseHTTPRequestHandler):
     """One request. The connection and the allow-list come from the server."""
 
-    server_version = f"duckdb-kql/{CLUSTER_NAME}"
+    # `duckdb-kql/0.1.2`, not `duckdb-kql/duckdb-kql`: the slot after the slash
+    # is a version, and this used to interpolate the cluster name into it.
+    server_version = f"duckdb-kql/{__version__}"
     # Announce HTTP/1.1 so the web UI's keep-alive works; every response below
     # sets Content-Length, which is what makes that safe.
     protocol_version = "HTTP/1.1"
@@ -406,16 +414,36 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_response(204)
         self.send_header("Access-Control-Allow-Origin", origin)
         self.send_header("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
-        self.send_header(
-            "Access-Control-Allow-Headers",
-            "Authorization, Content-Type, x-ms-client-request-id, "
-            "x-ms-app, x-ms-user, x-ms-client-version, Accept, Connection",
-        )
+        self.send_header("Access-Control-Allow-Headers", self._allow_headers())
+        # Only when asked. Chrome gates requests from a public page to a private
+        # address behind this; answering unprompted would claim a policy the
+        # browser did not ask about.
+        if self.headers.get("Access-Control-Request-Private-Network") == "true":
+            self.send_header("Access-Control-Allow-Private-Network", "true")
         self.send_header("Access-Control-Allow-Credentials", "true")
         self.send_header("Access-Control-Max-Age", "600")
-        self.send_header("Vary", "Origin")
+        self.send_header("Vary", "Origin, Access-Control-Request-Headers")
         self.send_header("Content-Length", "0")
         self.end_headers()
+
+    def _allow_headers(self) -> str:
+        """The request headers the preflight permits: whatever was asked for.
+
+        Echoed rather than listed, because a hand-written list is a second place
+        to be wrong about someone else's client. It *was* wrong: the list said
+        `x-ms-user` where the Azure Data Explorer UI sends `x-ms-user-id`, CORS
+        matches header names exactly, and the browser answered by failing the
+        real POST with a bare `net::ERR_FAILED` — a preflight that returned 204
+        and still blocked the request. Every header the UI adds in future would
+        break it the same way.
+
+        This gives up nothing. Naming a header does not authorise anything; the
+        origin allow-list and the loopback bind are what decide who may talk to
+        this endpoint, and both are checked before we get here. `*` would be the
+        lazy version of this and is not equivalent — it is invalid alongside
+        `Allow-Credentials: true`, which is why the exact list is echoed back.
+        """
+        return self.headers.get("Access-Control-Request-Headers", _DEFAULT_ALLOW_HEADERS)
 
     def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler's interface
         """A human landing page. Anything else 404s."""

@@ -146,16 +146,110 @@ def test_an_unknown_route_is_a_404_not_a_crash(server) -> None:
 # ---------------------------------------------------------------------------
 
 
+#: What Chrome asks for on behalf of the Azure Data Explorer UI, captured
+#: verbatim from a `dataexplorer.azure.com` HAR against this server.
+ADX_REQUEST_HEADERS = "authorization,content-type,x-ms-app,x-ms-client-request-id,x-ms-user-id"
+
+
+def preflight(server: Any, requested: str = ADX_REQUEST_HEADERS, *, origin: str = ALLOWED_ORIGIN):
+    request = urllib.request.Request(server.url + "/v1/rest/mgmt", method="OPTIONS")
+    request.add_header("Origin", origin)
+    request.add_header("Access-Control-Request-Method", "POST")
+    request.add_header("Access-Control-Request-Headers", requested)
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            return response.status, dict(response.headers)
+    except urllib.error.HTTPError as exc:
+        with exc:
+            return exc.status, dict(exc.headers)
+
+
 def test_a_preflight_from_the_web_ui_is_allowed(server) -> None:
-    status, headers, _ = call(server, "/v1/rest/mgmt", method="OPTIONS", origin=ALLOWED_ORIGIN)
+    status, headers = preflight(server)
     assert status == 204
     assert headers["Access-Control-Allow-Origin"] == ALLOWED_ORIGIN
     assert "POST" in headers["Access-Control-Allow-Methods"]
-    # The UI sends these; a preflight that does not list them fails in the
-    # browser before the real request is ever made.
-    permitted = headers["Access-Control-Allow-Headers"].lower()
-    assert "authorization" in permitted
-    assert "x-ms-client-request-id" in permitted
+
+
+def test_the_preflight_covers_every_header_the_web_ui_asks_for(server) -> None:
+    """The check a browser actually performs, done the way it performs it.
+
+    A preflight can return 204 and still block the request: the browser compares
+    `Access-Control-Request-Headers` against `Access-Control-Allow-Headers` and
+    fails the *real* call — as a bare `net::ERR_FAILED`, with nothing in the
+    response to point at. That happened, because the allow-list said `x-ms-user`
+    where the UI sends `x-ms-user-id`, and asserting "authorization is in the
+    string" did not catch it. Set coverage is the assertion that would have.
+    """
+    _, headers = preflight(server)
+    allowed = {h.strip().lower() for h in headers["Access-Control-Allow-Headers"].split(",")}
+    asked = [h.strip().lower() for h in ADX_REQUEST_HEADERS.split(",")]
+    assert not [h for h in asked if h not in allowed], (
+        f"preflight would block the request: {headers['Access-Control-Allow-Headers']}"
+    )
+
+
+def test_a_header_the_ui_adds_later_does_not_break_the_preflight(server) -> None:
+    """Echoing is the point: the previous list broke the moment the UI changed."""
+    _, headers = preflight(server, "content-type,x-ms-invented-tomorrow")
+    allowed = {h.strip().lower() for h in headers["Access-Control-Allow-Headers"].split(",")}
+    assert "x-ms-invented-tomorrow" in allowed
+
+
+def test_the_preflight_never_answers_with_a_wildcard(server) -> None:
+    """`*` is invalid next to `Allow-Credentials: true`, so it is not a shortcut.
+
+    Echoing the requested list is not a wildcard in disguise either — what
+    decides who may reach this endpoint is the origin allow-list and the
+    loopback bind, both checked before a header name is ever read.
+    """
+    _, headers = preflight(server)
+    assert headers["Access-Control-Allow-Headers"] != "*"
+    assert headers["Access-Control-Allow-Origin"] == ALLOWED_ORIGIN
+    assert "Access-Control-Request-Headers" in headers.get("Vary", "")
+
+
+def test_the_preflight_answers_the_private_network_question_only_when_asked(server) -> None:
+    """Chrome gates a public page reaching a private address behind this."""
+    request = urllib.request.Request(server.url + "/v1/rest/mgmt", method="OPTIONS")
+    request.add_header("Origin", ALLOWED_ORIGIN)
+    request.add_header("Access-Control-Request-Method", "POST")
+    request.add_header("Access-Control-Request-Private-Network", "true")
+    with urllib.request.urlopen(request, timeout=10) as response:
+        assert response.headers["Access-Control-Allow-Private-Network"] == "true"
+
+    _, headers = preflight(server)
+    assert "Access-Control-Allow-Private-Network" not in headers
+
+
+def test_the_post_the_web_ui_makes_after_the_preflight_succeeds(server) -> None:
+    """The request the browser blocked. End to end, with the UI's own headers."""
+    request = urllib.request.Request(
+        server.url + "/v1/rest/mgmt",
+        data=json.dumps({"csl": ".show version", "properties": None}).encode(),
+        headers={
+            "Content-Type": "application/json; charset=UTF-8",
+            "Accept": "application/json",
+            "Origin": ALLOWED_ORIGIN,
+            "x-ms-app": "Kusto.Web.KWE:2.259.0-5|embeddedIn:dataexplorer.azure.com",
+            "x-ms-client-request-id": "Kusto.Web.KWE.Query;29e3ba3d;740cd2cb",
+            "x-ms-user-id": "someone",
+            "Authorization": "Bearer ignored",
+        },
+    )
+    with urllib.request.urlopen(request, timeout=10) as response:
+        assert response.status == 200
+        assert response.headers["Access-Control-Allow-Origin"] == ALLOWED_ORIGIN
+        payload = json.loads(response.read())
+    assert payload["Tables"][0]["Columns"][0]["ColumnName"] == "BuildVersion"
+
+
+def test_the_server_header_reports_a_version(server) -> None:
+    """It read `duckdb-kql/duckdb-kql` — the cluster name in the version slot."""
+    from duckdb_kql import __version__  # noqa: PLC0415
+
+    _, headers, _ = call(server, "/", method="GET")
+    assert headers["Server"].startswith(f"duckdb-kql/{__version__} ")
 
 
 def test_a_preflight_from_anywhere_else_is_refused(server) -> None:
