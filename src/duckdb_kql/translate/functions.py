@@ -365,7 +365,19 @@ BINARY_OPERATORS: dict[str, BinarySpec] = {
         BinarySpec("+", "({0} + {1})"),
         BinarySpec("-", "({0} - {1})"),
         BinarySpec("*", "({0} * {1})"),
-        BinarySpec("/", "({0} / {1})"),
+        # `//`, not `/`. KQL divides two integers as **integers**, truncating
+        # toward zero: `7 / 2` is 3 and `-7 / 2` is -3. SQL's `/` promotes to
+        # double and answers 3.5 — a silently wrong number in the most ordinary
+        # arithmetic there is.
+        #
+        # DuckDB's `//` is not "floor division" despite the spelling: it
+        # truncates toward zero on integers *and behaves as ordinary division on
+        # floats* (`7.5 // 2` is 3.75). That is exactly KQL's rule, and it is
+        # decided from the operand types by DuckDB — which is the type
+        # information the translator does not have. Measured across 17 forms:
+        # `//` matches 14, `/` matched 5. See translate.render_expr for the one
+        # case that needs `/` back.
+        BinarySpec("/", "({0} // {1})"),
         # KQL's % is a MATHEMATICAL modulo: the result takes the sign of
         # nothing -- it is always non-negative. SQL's % takes the dividend's
         # sign, so `-10 % 4` is 2 in KQL and -2 in DuckDB. Measured, not assumed.

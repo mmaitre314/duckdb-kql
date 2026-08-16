@@ -174,6 +174,14 @@ def render_expr(node: ir.Expr) -> str:
             return (
                 f"(epoch({render_expr(node.left)}) / epoch({render_expr(node.right)}))"
             )
+        if node.op == "/" and (_is_real_expr(node.left) or _is_real_expr(node.right)):
+            # `//` is the right default (see BINARY_OPERATORS) but it returns
+            # NULL for division by zero, where KQL's *float* division returns
+            # ±Infinity. `1.0 / 0` is Infinity in Kusto and null under `//`.
+            # Where an operand is visibly a real, say so and use plain `/`.
+            # Where it is not — a column — `//` still divides correctly and only
+            # a zero divisor differs; that residue is in the divergence catalog.
+            return f"({render_expr(node.left)} / {render_expr(node.right)})"
         spec = BINARY_OPERATORS.get(node.op)
         if spec is None:
             raise KqlUnsupportedError(
@@ -1273,6 +1281,30 @@ _DATETIME_RETURNING = frozenset(
     {"todatetime", "datetime", "now", "ago", "startofday", "startofmonth",
      "startofyear", "startofweek", "endofday", "endofmonth", "endofyear"}
 )
+
+
+#: Functions whose result is a real. Deliberately short: the only thing this
+#: decides is whether `/` may keep SQL's float division, and a *wrong* claim
+#: here silently turns integer division back into 3.5. Anything not listed
+#: falls through to `//`, which is correct for both integers and floats.
+_REAL_RETURNING = frozenset({"todouble", "toreal"})
+
+
+def _is_real_expr(node: ir.Expr) -> bool:
+    """Whether an expression is statically known **not** to be an integer."""
+    if isinstance(node, (ir.Literal, ir.Parameter)):
+        return node.kind in ("real", "decimal")
+    if isinstance(node, ir.FunctionCall):
+        return node.name.lower() in _REAL_RETURNING
+    if isinstance(node, ir.UnaryOp):
+        return _is_real_expr(node.operand)
+    if isinstance(node, ir.BinaryOp) and node.op in ("+", "-", "*", "/"):
+        # Arithmetic with a real operand yields a real, in KQL as in SQL. This
+        # is what carries `1.0` through to the division in `1.0 * x / y` — the
+        # idiom the docs use to force float division, and the one place a
+        # zero divisor has to produce Infinity rather than null.
+        return _is_real_expr(node.left) or _is_real_expr(node.right)
+    return False
 
 
 def _is_datetime_expr(node: ir.Expr) -> bool:

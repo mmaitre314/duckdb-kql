@@ -148,7 +148,7 @@ returns an approximate answer.
 | `*` | — |
 | `+` | A datetime plus a timespan is a datetime. Adding two datetimes is an error in both languages. |
 | `-` | Subtracting two datetimes yields a **timespan**. |
-| `/` | Dividing two timespans yields a **number**, not a timespan; DuckDB has no interval division at all. |
+| `/` | Two integers divide as **integers**, truncating toward zero: `7 / 2` is `3` and `-7 / 2` is `-3`, where SQL's `/` answers `3.5`. One real operand makes the whole expression real. Division by zero is **null** for integers and **±Infinity** for reals. Dividing two timespans yields a number, not a timespan; DuckDB has no interval division at all. **Caveat:** the mapping is DuckDB's `//`, which picks integer or float division from the operand types but returns null for *either* zero divisor. Where an operand is visibly a real — a literal, `todouble`, or arithmetic involving one — plain `/` is emitted and Infinity comes back; a zero divisor under a bare real *column* yields null instead. Every non-zero divisor is correct. |
 | `<` | — |
 | `<=` | — |
 | `<>` | Synonym for `!=`. |

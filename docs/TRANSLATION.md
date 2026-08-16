@@ -304,6 +304,33 @@ Auto-generated names are user-visible and must match exactly: `count()` →
 `count_`, `avg(X)` → `avg_X`, etc. Group-by keys come first, in source order, then
 aggregates. An explicit `Name =` overrides. Null group keys form their own group.
 
+An aggregate may be wrapped in a scalar expression — `round(sum(y), 2)`,
+`sum(x) / count()` — and then the name comes from the **aggregate**, not the
+wrapper: `round(sum(y), 2)` is `sum_y`. The rule is positional, following first
+arguments only, so `strcat('n=', tostring(count()))` is `Column1`. A column
+outside an aggregate is refused, as Kusto refuses it — *including* a `by` key,
+which plain SQL would accept.
+
+### R13 — `/` on two integers is **integer** division
+
+*Trap: `tests/test_division.py`*
+
+`7 / 2` is `3`, not `3.5`, and it **truncates toward zero**: `-7 / 2` is `-3`,
+not `-4`. One real operand makes the whole expression real. Division by zero is
+`null` for integers and `±Infinity` for reals.
+
+Rendered with DuckDB's `//`, which despite the spelling is not floor division —
+it truncates toward zero on integers and behaves as ordinary division on floats
+(`7.5 // 2` is `3.75`). DuckDB decides which from the operand types, which is
+exactly the type information the translator does not have. SQL's plain `/`
+promotes to double and answers `3.5`: a silently wrong number in the most
+ordinary arithmetic in the language.
+
+The one place `/` is still emitted is when an operand is *visibly* a real — a
+literal, `todouble`/`toreal`, or arithmetic involving one — because `//` returns
+null for a zero divisor where KQL's float division returns `±Infinity`. Under a
+bare real column that residue remains; see the support matrix.
+
 ---
 
 ## 5. Tabular operator conventions

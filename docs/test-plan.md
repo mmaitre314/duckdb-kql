@@ -472,6 +472,15 @@ KQL↔DuckDB semantic gaps** and should grow as we find more.
 **Strings, numbers, hashing — measured**
 - **`%` is a mathematical modulo**: always non-negative. `-10 % 4` is `2` in KQL
   and `-2` in DuckDB — a silent wrong answer wherever negatives appear.
+- **`/` on two integers is integer division**, truncating toward zero: `7 / 2` is
+  `3` and `-7 / 2` is `-3`. SQL's `/` promotes to double and answers `3.5` —
+  wrong in the most ordinary arithmetic in the language, and wrong everywhere it
+  appeared. Rendered with DuckDB's `//`, which is *not* floor division: it
+  truncates toward zero on integers and divides normally on floats, deciding
+  from the operand types. Measured across 23 forms. **Open —** `//` returns null
+  for a zero divisor where KQL's *float* division returns `±Infinity`; a
+  statically-visible real falls back to `/` and is exact, a bare real column
+  divided by zero yields null.
 - **`tostring` uses .NET's spelling**, not SQL's: a datetime is
   `2020-01-01T00:00:00.0000000Z` (seven fractional digits and a `Z`), a bool is
   `True`/`False`, and a dynamic string is unquoted.
