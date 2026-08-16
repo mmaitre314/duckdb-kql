@@ -26,7 +26,7 @@
 </p>
 
 Run [Kusto Query Language](https://learn.microsoft.com/kusto/query/) (KQL) queries on
-[DuckDB](https://duckdb.org) in Python.
+[DuckDB](https://duckdb.org) in Python. Use to test KQL queries locally, in unit tests, in CI builds, etc. with no need for network.
 
 ```python
 import duckdb_kql
@@ -42,7 +42,7 @@ duckdb_kql.kql(con, """
 """)
 ```
 
-See [Getting started](https://github.com/mmaitre314/duckdb-kql/blob/main/docs/getting-started.md).
+See the [demo](https://github.com/mmaitre314/duckdb-kql/blob/main/demo/demo.ipynb) notebook.
 
 ## Install
 
@@ -54,7 +54,9 @@ Layer | Install | Scenario | Dependencies
 1 | `pip install duckdb-kql[duckdb]` | Run KQL queries | adds duckdb
 2 | `pip install duckdb-kql[kusto]` | Run KQL queries via Kusto SDK APIs | adds pandas
 
-To remove runtime dependencies, translate KQL queries to SQL at build time using the CLI.
+See [Getting started](https://github.com/mmaitre314/duckdb-kql/blob/main/docs/getting-started.md).
+
+To reduce runtime dependencies, translate KQL queries to SQL at build time using the CLI.
 
 ```bash
 duckdb-kql translate -o query.sql query.kql
@@ -62,35 +64,42 @@ duckdb-kql translate -o query.sql query.kql
 
 See [Build-time translation](https://github.com/mmaitre314/duckdb-kql/blob/main/docs/cli.md).
 
-## Query it from the Azure Data Explorer UI
+## KustoClient query
 
-`duckdb-kql serve` puts a local Kusto REST endpoint in front of a DuckDB file,
-so Kusto's own tools can query it. Standard library only — no new dependency.
-
-```bash
-duckdb-kql serve analytics.duckdb     # http://127.0.0.1:31415
-```
-
-Open <https://dataexplorer.azure.com>, choose **Add connection**, and paste that
-URL. It listens on loopback only and cannot be told otherwise, because it
-answers unauthenticated queries: see
-[A local Kusto endpoint](https://github.com/mmaitre314/duckdb-kql/blob/main/docs/kusto-server.md).
-
-## Three layers
-
-| Layer | Import | Needs | For |
-|---|---|---|---|
-| **0** | `duckdb_kql` | `antlr4-python3-runtime` | KQL text in, DuckDB SQL out. No database involved. |
-| **1** | `duckdb_kql.engine` | `+ duckdb` | Running the translated SQL. |
-| **2** | `duckdb_kql.kusto` | `+ pandas` | A drop-in for `azure-kusto-data`'s `KustoClient`. |
-
-Importing `duckdb_kql` never imports `duckdb`, so Layer 0 genuinely installs and
-runs without a database.
-
-### Layer 0 — translate
+Run queries using APIs compatible with Kusto client SDK ([azure-kusto-data](https://github.com/Azure/azure-kusto-python)). 
 
 ```python
->>> import duckdb_kql
+from duckdb_kql.kusto import KustoClient
+from duckdb_kql.kusto.helpers import dataframe_from_result_table
+
+client = KustoClient(con)
+
+response = client.execute("NetDefaultDB", """
+    Requests
+    | where Status >= 500
+    | summarize Errors = count() by Service
+    | sort by Errors desc
+""")
+
+dataframe_from_result_table(table)
+```
+
+See [Kusto client](https://github.com/mmaitre314/duckdb-kql/blob/main/docs/kusto-client.md).
+
+## Local HTTP server
+
+Start a local KQL HTTP server using the CLI, then open <https://dataexplorer.azure.com>, choose 'Add connection', and enter `http://127.0.0.1:31415`.
+
+```bash
+duckdb-kql serve
+```
+See [Kusto server](https://github.com/mmaitre314/duckdb-kql/blob/main/docs/kusto-server.md).
+
+## Query validation and translation
+
+Use `validate()` and `to_sql()` to respectively validate the KQL query and translate it to SQL. 
+
+```python
 >>> duckdb_kql.to_sql("print x = 1 + 1")
 'SELECT (CAST(1 AS BIGINT) + CAST(1 AS BIGINT)) AS "x"'
 
@@ -98,56 +107,20 @@ runs without a database.
 [Diagnostic(span=SourceSpan(line=1, column=21), message="mismatched input '<EOF>' ...")]
 ```
 
-### Layer 1 — execute
-
-```python
-import duckdb_kql
-
-con = duckdb_kql.connect("analytics.duckdb")   # duckdb.connect + TimeZone=UTC
-rel = duckdb_kql.kql(con, "StormEvents | summarize n = count() by State")
-rel.fetchall()
-```
-
-### Layer 2 — the Kusto SDK interface
-
-For code already written against `azure-kusto-data`: change the import and the
-connection string, leave the queries alone.
-
-```python
-from duckdb_kql.kusto import KustoClient, ClientRequestProperties
-from duckdb_kql.kusto.helpers import dataframe_from_result_table
-
-client = KustoClient("analytics.duckdb")
-props = ClientRequestProperties()
-props.set_parameter("state", user_input)
-
-response = client.execute("Storm", """
-    declare query_parameters(state:string);
-    StormEvents | where State == state | take 10
-""", props)
-
-df = dataframe_from_result_table(response.primary_results[0])
-```
-
-Details, including what it refuses and why:
-[`docs/kusto-client.md`](https://github.com/mmaitre314/duckdb-kql/blob/main/docs/kusto-client.md).
-
 ## Query parameters
 
-Never build a query by concatenating strings. Declare parameters and pass
-values; they are bound as values, so the generated SQL contains no
-caller-controlled text at all.
+Declare parameters and pass values to defend against query injections.
 
 ```python
 duckdb_kql.kql(con, """
     declare query_parameters(state:string);
     StormEvents | where State == state
-""", {"state": user_input})     # safe whatever user_input contains
+""", {"state": user_input})
 ```
 
 ## Coverage
 
-Measured against the real KQL engine (the Kusto Emulator), not asserted.
+Measured against the real KQL engine (the Kusto Emulator).
 
 | | |
 |---|---|
@@ -161,23 +134,9 @@ Supported operators: `where`, `project`, `project-away`, `project-rename`,
 `sort` / `order by`, `take` / `limit`, `render`; sources `print`, `datatable`,
 `range`, and tables; plus `let` and `declare query_parameters`.
 
-**[The support matrix](https://github.com/mmaitre314/duckdb-kql/blob/main/docs/kql-support.md)
-lists every operator, function and type — supported or not — with the known
-limitations and Kusto discrepancies for each.** It is generated from the
-translator's own registries and probed at build time, so it cannot claim support
-that does not exist.
-
-## Why refusal matters
-
-The failure mode this project is built to avoid is not a crash — it is a query
-that runs and returns a *different* answer than Kusto would. KQL and SQL look
-alike in places where they behave differently: `%` is a mathematical modulo in
-KQL and takes the dividend's sign in DuckDB; `extract`'s arguments are in the
-opposite order; KQL weeks start on Sunday; `make_datetime` truncates where
-`make_timestamp` rounds. Every mapping is verified against the emulator rather
-than inferred from documentation, and where an honest mapping does not exist —
-`hash_xxhash64`, `datetime_part('nanosecond')` — the answer is an error, not an
-approximation.
+[The support matrix](https://github.com/mmaitre314/duckdb-kql/blob/main/docs/kql-support.md)
+lists every operator, function and type, supported or not, with the known
+limitations and Kusto discrepancies for each.
 
 ## Documentation
 
