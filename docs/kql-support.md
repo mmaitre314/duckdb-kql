@@ -74,7 +74,7 @@ returns an approximate answer.
 | `sample-distinct` | See `sample`. |
 | `serialize` | Pins row order so window functions (`row_number`, `prev`, `next`) can reference it. Those are unsupported too, so this would pin an order nothing consumes. |
 | `as` | Names an intermediate result for later reference, which needs multi-statement scope. |
-| `consume` | Discards rows to benchmark the engine. Meaningless without the cluster it measures. |
+| `consume` | Discards its input without returning rows. It exists to make a cluster execute a query while sending nothing back, which is meaningless without the cluster it is measuring. |
 | `facet` | Returns **multiple** result tables. Layer 1 returns one relation, so this needs a response shape that does not exist yet. |
 | `fork` | Multiple result tables, like `facet`. |
 | `invoke` | Calls a tabular user-defined function, so it needs `let` function support first. |

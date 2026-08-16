@@ -1,5 +1,26 @@
 # Logos
 
+## Licensing
+
+The committed SVGs were outlined from **DejaVu Sans Mono** — `generate_logo.py`
+defaults to `/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf`, and
+regenerating with that default reproduces every committed file byte for byte.
+
+Its outlines are copyright Bitstream, Inc. under the permissive **Bitstream Vera
+Fonts** license, with DejaVu's own changes in the public domain. The notice is in
+[`../../THIRD-PARTY-NOTICES.md`](../../THIRD-PARTY-NOTICES.md) and the full text
+in [`../../licenses/Bitstream-Vera-DejaVu.txt`](../../licenses/Bitstream-Vera-DejaVu.txt).
+
+Outlined glyphs are artwork, not a font, so there is no runtime dependency and
+nothing here is redistributed *as* a font — which is what the license's one
+substantive condition is about (modified versions must not carry a
+"Bitstream"/"Vera" name).
+
+**If you swap the typeface, update the notice too.** `tests/test_licensing.py`
+checks that the font `generate_logo.py` defaults to is the one
+`THIRD-PARTY-NOTICES.md` names, so a swap that leaves the attribution stale
+fails the build rather than shipping quietly.
+
 ## Regenerating
 
 `generate_logo.py` derives the whole layout from the font's own metrics, so

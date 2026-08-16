@@ -3,7 +3,7 @@
 `.devcontainer/demo/` exists so someone can open the notebook and see what the
 published package does. Every piece of development machinery it grows — a JDK,
 Docker-in-Docker, the emulator, an editable install of this repository — makes it
-test the working tree instead of the artifact, and makes it slower to start for
+test the working tree instead of the artifact, and makes it heavier to start for
 no benefit to the person it is for.
 
 That is easy to erode by copy-and-paste from the dev container next door, and the

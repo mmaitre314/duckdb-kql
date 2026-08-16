@@ -15,11 +15,12 @@
 |---|---|---|
 | `dataexplorer-docs` **code samples** (KQL queries) | MIT | ✅ Harvest freely (attribution) |
 | `dataexplorer-docs` **prose** (incl. example output tables) | CC-BY-4.0 | ⚠️ Avoid — we generate expectations instead (§3) |
-| `microsoft/Kusto-Query-Language` (incl. vendored `Kql.g4`) | Apache-2.0 | ✅ Vendor with `NOTICE` |
+| `microsoft/Kusto-Query-Language` (incl. vendored `Kql.g4`) | Apache-2.0 | ✅ Vendor; ship the license text, state modifications. **No upstream `NOTICE` file exists** (checked at the pinned commit), so §4(d) does not apply |
 | `saoc90/kql-to-sql` | MIT | ✅ Import with notice |
 | ClickHouse KQL tests | Apache-2.0 | ✅ Import + state modifications |
 | KustoLoco / BabyKusto | MIT | ✅ Import with notice |
 | **Kusto Emulator** (`kustainer`) | MS Software License Terms | ✅ **Approved** for dev/CI oracle use (§5) |
+| **DejaVu Sans Mono** (outlined into `docs/assets/*.svg`) | Bitstream Vera | ✅ Redistributable; notice given. Not shipped as a font — the glyphs are paths (§4) |
 
 Nothing is copyleft; nothing conflicts with shipping `duckdb-kql` under **MIT**.
 
@@ -61,12 +62,21 @@ This shrinks the CC-BY surface to ~zero while *improving* fidelity.
 |---|---|---|
 | `saoc90/kql-to-sql` | MIT | preserve notice |
 | ClickHouse KQL `.sql`/`.reference` | Apache-2.0 | notice + **state modifications** (§4) — we reformat into our case schema, so say so |
-| `microsoft/Kusto-Query-Language` (incl. vendored `Kql.g4`) | Apache-2.0 | notice + `NOTICE` |
+| `microsoft/Kusto-Query-Language` (incl. vendored `Kql.g4`) | Apache-2.0 | ship the license text (§4a), mark modified files (§4b), retain attribution (§4c). §4(d) is moot: upstream has no `NOTICE` file |
+| **DejaVu Sans Mono** (logo wordmark) | Bitstream Vera | preserve notice; do not redistribute *as a font* under a Bitstream/Vera name — we redistribute outlines, not a font |
+| `azure-kusto-data` (a few helper bodies in the compat layer) | MIT | preserve copyright + permission notice — see `docs/kusto-client.md` §Provenance |
 | KustoLoco / BabyKusto | MIT (verified) | preserve notice |
 
 None are copyleft; nothing affects our MIT license. Vendoring `Kql.g4` makes the
 repo "MIT + an Apache-2.0 subtree" — standard practice, handled by
-`NOTICE` / `THIRD-PARTY-NOTICES` plus `grammar/UPSTREAM.md`.
+`THIRD-PARTY-NOTICES.md` plus `grammar/UPSTREAM.md`.
+
+Full license texts live in [`licenses/`](../licenses/) and ship in **both** the
+wheel and the sdist. That is not cosmetic: the wheel contains
+`src/duckdb_kql/_antlr/`, which is generated from the Apache-2.0 grammar, and
+§4(a) requires a recipient of a derivative work to get a copy of the license.
+Until `license-files` was set in `pyproject.toml`, `pip install duckdb-kql`
+delivered the derived parser with no notice at all.
 
 ## 5. Kusto Emulator EULA — review
 

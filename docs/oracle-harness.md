@@ -5,6 +5,24 @@
 > engine, and the freeze-and-compare loop from
 > [`test-plan.md`](./test-plan.md) §5.2 is operational.
 
+## Scope of use
+
+The Kusto Emulator is used solely as a **correctness oracle**: it establishes
+what the reference KQL engine returns for a given query, so that this project's
+translation can be compared against it row for row.
+
+No performance measurement of any kind is taken from the emulator, and none is
+published. This project makes no claim about the performance of the emulator or
+of Azure Data Explorer. The emulator is a development and CI dependency only, is
+never a runtime dependency, and is never redistributed.
+
+This is a licence obligation, not a preference — the emulator's terms restrict
+disclosing benchmark results, and [`licensing.md`](./licensing.md) §5 records the
+clause-by-clause review. The same constraint is repeated in
+[`CONTRIBUTING.md`](../CONTRIBUTING.md), [`docker-compose.yml`](../docker-compose.yml)
+and [`.github/workflows/oracle.yml`](../.github/workflows/oracle.yml), so it is
+in front of anyone about to add a workflow step that would breach it.
+
 ## What runs
 
 | | |

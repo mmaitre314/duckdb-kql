@@ -186,7 +186,7 @@ OPERATORS: list[tuple[str, str, str]] = [
     ("sample-distinct", "T | sample-distinct 1 of a", "See `sample`."),
     ("serialize", "T | serialize rn = row_number()", "Pins row order so window functions (`row_number`, `prev`, `next`) can reference it. Those are unsupported too, so this would pin an order nothing consumes."),
     ("as", "T | as X", "Names an intermediate result for later reference, which needs multi-statement scope."),
-    ("consume", "T | consume", "Discards rows to benchmark the engine. Meaningless without the cluster it measures."),
+    ("consume", "T | consume", "Discards its input without returning rows. It exists to make a cluster execute a query while sending nothing back, which is meaningless without the cluster it is measuring."),
     ("facet", "T | facet by a", "Returns **multiple** result tables. Layer 1 returns one relation, so this needs a response shape that does not exist yet."),
     ("fork", "T | fork (where a == 1)", "Multiple result tables, like `facet`."),
     ("invoke", "T | invoke f()", "Calls a tabular user-defined function, so it needs `let` function support first."),

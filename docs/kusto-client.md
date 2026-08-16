@@ -270,4 +270,39 @@ in one line.
 Both are worth revisiting if a real need appears; neither is being faked in the
 meantime.
 
+## Provenance
+
+This layer **reimplements the `azure-kusto-data` interface**; it does not vendor
+the upstream package, and `azure-kusto-data` is not a dependency of
+`duckdb-kql` at runtime or otherwise. Nothing from it is installed alongside
+this package.
+
+Reproducing the *interface* is the entire point of a drop-in, so class names,
+method signatures, attribute names and the wire-protocol string constants
+(`WellKnownDataSet.PrimaryResult` and friends) match upstream by intent. That is
+not copying in any meaningful sense — a drop-in that renamed them would not be
+one.
+
+The *implementations* were written against the documented behaviour and pinned
+by tests, not transcribed. A line-level audit against `azure-kusto-data` 6.0.4
+found that mostly holds, with a bounded set of exceptions worth naming rather
+than glossing:
+
+| Where | What matches | Why |
+|---|---|---|
+| `helpers.py` | The KQL-type → pandas-dtype dispatch table (~19 lines), and the `parse_timedelta` numeric branch | Matching the SDK's *exact* dtype behaviour is the requirement — `dataframe_from_result_table` has to produce the dtypes downstream code already indexes on. The same table written differently would be a different answer, not a different phrasing. |
+| `_models.py` | Short dunder bodies — `__len__`, `__iter__`, `__getitem__`, `columns_count` | Four- to six-line methods whose content follows from the signature. `__nonzero__ = __bool__` is upstream's Python-2 alias, kept so subclassing code behaves identically. |
+| `response.py` | The index-or-name `__getitem__` lookup | Same shape, same reason. |
+
+Everything else — the connection-string builder, the request-option policy, the
+control-command handling, the timeout enforcement, the error types — is this
+project's own, and diverges from upstream deliberately where the constraints
+differ (see [The governing rule](#the-governing-rule)).
+
+Because those exceptions exist, `azure-kusto-data`'s MIT notice is carried in
+[`THIRD-PARTY-NOTICES.md`](../THIRD-PARTY-NOTICES.md) with its full license text
+in [`licenses/MIT-azure-kusto-python.txt`](../licenses/MIT-azure-kusto-python.txt),
+rather than paraphrasing working code to avoid the attribution. MIT asks for the
+copyright line and the permission notice; both are there.
+
 [sdk]: https://pypi.org/project/azure-kusto-data/
