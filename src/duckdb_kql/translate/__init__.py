@@ -539,10 +539,13 @@ def render_operator(op: ir.Operator, prev: str, cols: list[str] | None = None) -
     if isinstance(op, ir.Sort):
         return f"SELECT * FROM {prev} ORDER BY {render_sort_keys(op.keys)}"
 
-    if isinstance(op, ir.Join):
-        # Joins need both sides' columns, so they are rendered by to_sql(),
+    if isinstance(op, (ir.Join, ir.Lookup)):
+        # These need both sides' columns, so they are rendered by to_sql(),
         # which threads the schema. Reaching here means a bug, not a gap.
-        raise KqlUnsupportedError("join", hint="internal: join must be rendered by to_sql")
+        name = "lookup" if isinstance(op, ir.Lookup) else "join"
+        raise KqlUnsupportedError(
+            name, hint=f"internal: {name} must be rendered by to_sql"
+        )
 
     raise KqlUnsupportedError(f"operator:{type(op).__name__}")
 
@@ -600,17 +603,25 @@ def to_sql(query: ir.Query, schema: Schema | None = None) -> TranslationResult:
 
     for op in query.operators:
         prev = f"_s{len(stages) - 1}"
-        if isinstance(op, ir.Join):
-            # Only a join forces us to resolve columns, so only a join can fail
-            # for lack of a schema.
+        if isinstance(op, (ir.Join, ir.Lookup)):
+            # Only these force us to resolve columns, so only these can fail for
+            # lack of a schema.
             if cols is None:
                 cols = _source_cols(query, schema)
             right_cols = output_columns(op.right, schema)
             right_sql = str(to_sql(op.right, schema))
-            stages.append(render_join(op, prev, cols, right_sql, right_cols))
-            from ..schema import join_output_columns
+            if isinstance(op, ir.Lookup):
+                from ..schema import lookup_output_columns
 
-            cols = join_output_columns(cols, right_cols, op.kind)
+                stages.append(render_lookup(op, prev, cols, right_sql, right_cols))
+                cols = lookup_output_columns(
+                    cols, right_cols, [k.right for k in op.keys]
+                )
+            else:
+                from ..schema import join_output_columns
+
+                stages.append(render_join(op, prev, cols, right_sql, right_cols))
+                cols = join_output_columns(cols, right_cols, op.kind)
         else:
             stages.append(render_operator(op, prev, cols))
             if cols is not None:
@@ -958,6 +969,65 @@ _SQL_JOIN_TYPE = {
 }
 
 
+def render_key_equality(keys: Sequence[ir.JoinKey]) -> str:
+    """The ``ON`` predicate for `join` and `lookup` keys.
+
+    ``IS NOT DISTINCT FROM``, not ``=``. KQL matches a **null key to a null
+    key**; SQL's ``=`` answers NULL and drops the pair. Measured on the
+    emulator across every kind:
+
+        datatable(Row:string, Key:int) ["1", 1, "2", int(null)]
+        | join kind=leftouter (datatable(Key:int, Alias:string) [int(null), "dnull"])
+          on Key
+
+    returns ``dnull`` on the null row, and `leftanti` correspondingly does *not*
+    return it. Emitting ``=`` silently loses every null-keyed match — the exact
+    class of quiet wrong answer this project exists to prevent.
+    """
+    return " AND ".join(
+        f"_l.{quote_ident(k.left)} IS NOT DISTINCT FROM _r.{quote_ident(k.right)}"
+        for k in keys
+    )
+
+
+def render_lookup(
+    op: ir.Lookup, prev: str, left_cols: list[str], right_sql: str, right_cols: list[str]
+) -> str:
+    """Render ``lookup`` (docs/TRANSLATION.md R14).
+
+    Two measured differences from `join` drive this, and both are the kind that
+    would otherwise pass a smoke test and be wrong in the details:
+
+    * the default kind is **leftouter**, where `join` defaults to `innerunique`.
+      So `lookup` never de-duplicates the left key set — duplicate left rows all
+      survive.
+    * the right side's **key columns are dropped**, so the output has no ``Key1``.
+    """
+    sql_type = {"leftouter": "LEFT", "inner": "INNER"}.get(op.kind)
+    if sql_type is None:
+        raise KqlUnsupportedError(
+            f"lookup kind:{op.kind}", hint="lookup supports only leftouter and inner"
+        )
+
+    from ..schema import lookup_output_columns  # noqa: PLC0415 - avoids a cycle
+
+    dropped = {k.right for k in op.keys}
+    kept = [c for c in right_cols if c not in dropped]
+    out_names = lookup_output_columns(left_cols, right_cols, [k.right for k in op.keys])
+
+    projection = ", ".join(
+        [f"_l.{quote_ident(c)} AS {quote_ident(c)}" for c in left_cols]
+        + [
+            f"_r.{quote_ident(src)} AS {quote_ident(out)}"
+            for src, out in zip(kept, out_names[len(left_cols):], strict=True)
+        ]
+    )
+    return (
+        f"SELECT {projection} FROM {prev} AS _l "
+        f"{sql_type} JOIN ({right_sql}) AS _r ON {render_key_equality(op.keys)}"
+    )
+
+
 def render_join(
     op: ir.Join, prev: str, left_cols: list[str], right_sql: str, right_cols: list[str]
 ) -> str:
@@ -986,9 +1056,7 @@ def render_join(
         keys = ", ".join(quote_ident(k.left) for k in op.keys)
         left = f"(SELECT DISTINCT ON ({keys}) * FROM {prev})"
 
-    on = " AND ".join(
-        f"_l.{quote_ident(k.left)} = _r.{quote_ident(k.right)}" for k in op.keys
-    )
+    on = render_key_equality(op.keys)
 
     # Anti/semi are directional: KQL's `rightanti` keeps unmatched RIGHT rows,
     # which is DuckDB's ANTI JOIN with the sides swapped.

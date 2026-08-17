@@ -17,7 +17,8 @@ from . import ir
 from .errors import KqlSchemaError
 
 __all__ = [
-    "Schema", "output_columns", "join_output_columns", "disambiguate",
+    "Schema", "output_columns", "join_output_columns", "lookup_output_columns",
+    "disambiguate",
 ]
 
 #: Table name -> ordered column names.
@@ -106,6 +107,9 @@ def _operator_columns(
     if isinstance(op, ir.Join):
         left, right = cols, output_columns(op.right, schema)
         return join_output_columns(left, right, op.kind)
+    if isinstance(op, ir.Lookup):
+        right = output_columns(op.right, schema)
+        return lookup_output_columns(cols, right, [k.right for k in op.keys])
     raise KqlSchemaError(type(op).__name__, hint="cannot determine columns")
 
 
@@ -130,6 +134,36 @@ def join_output_columns(left: list[str], right: list[str], kind: str) -> list[st
     taken = list(left)
     out = list(left)
     for name in right:
+        out.append(disambiguate(name, taken))
+        taken.append(out[-1])
+    return out
+
+
+def lookup_output_columns(
+    left: list[str], right: list[str], right_keys: list[str]
+) -> list[str]:
+    """Column names a ``lookup`` produces (R14).
+
+    The difference from :func:`join_output_columns` that makes `lookup` worth a
+    separate operator: the right side's **key columns are dropped** instead of
+    being carried through with a ``1`` suffix. Everything left over is appended
+    and disambiguated exactly as a join would.
+
+    Measured on the emulator. With left ``(Row, Key, V)`` and right
+    ``(Key, V, Alias)`` joined on ``Key``, a `join` gives
+    ``Row, Key, V, Key1, V1, Alias`` but a `lookup` gives
+    ``Row, Key, V, V1, Alias`` — `Key1` is absent, and `V1` is still there, so
+    this is specifically about the *keys*, not about collisions in general.
+
+    Keys are matched by name on the right side, which is what
+    ``on $left.K1 == $right.K2`` drops: ``K2`` goes, ``K1`` stays.
+    """
+    dropped = set(right_keys)
+    taken = list(left)
+    out = list(left)
+    for name in right:
+        if name in dropped:
+            continue
         out.append(disambiguate(name, taken))
         taken.append(out[-1])
     return out

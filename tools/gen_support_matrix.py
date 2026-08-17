@@ -56,6 +56,8 @@ RULES = {
     "R10": "Which rows come back is **not deterministic** without a terminal `sort`.",
     "R11": "Character-oriented, not byte-oriented; `substring` indices are 0-based and clamp.",
     "R12": "Output column names follow KQL's scheme (`count_`, `avg_X`), not SQL's.",
+    "R13": "`/` on two integers is **integer** division, truncating toward zero.",
+    "R14": "`lookup` defaults to **`leftouter`** and drops the right key columns; join/lookup keys match **null to null**.",
 }
 
 #: R11 covers two unrelated hazards. Aggregates get the one that applies to them.
@@ -175,7 +177,7 @@ OPERATORS: list[tuple[str, str, str]] = [
     ("union", "T | union T", "Needs column-set unification across branches — KQL widens the schema rather than erroring on a mismatch — plus wildcard table resolution."),
     ("parse", "T | parse a with * 'x' *", "Needs a pattern-to-regex compiler covering the greedy/lazy `*` forms and typed captures. The largest single gap — around 27 corpus cases. `extract()` and `extract_all()` cover the regex cases meanwhile."),
     ("parse-where", "T | parse-where a with * 'x' *", "The same pattern compiler as `parse`, plus dropping non-matching rows."),
-    ("lookup", "T | lookup (T) on a", "A leftouter join with dimension-table semantics. Close to `join kind=leftouter`, which is supported — but the column-collision rules differ, so it is not aliased to it."),
+    ("lookup", "T | lookup (T) on a", "Defaults to **`leftouter`**, not `join`'s `innerunique`, and only `leftouter` and `inner` exist — every other kind is refused, as Kusto refuses it. The right side's **key columns are dropped**, so there is no `Key1`; non-key collisions still get the `1` suffix (R14). Needs the input schema, like `join`. As with any outer join, an unmatched `string` column is null here but `''` in Kusto, so a downstream `!= \"\"` differs — `isempty()` is the portable test."),
     ("getschema", "T | getschema", "Reports `ColumnName`, `ColumnOrdinal` (0-based), `DataType` and `ColumnType`, verified against the emulator including the non-obvious .NET names (`bool` is `System.SByte`, `decimal` is `System.Data.SqlTypes.SqlDecimal`). Types are DuckDB's, named as Kusto names them, so a DuckDB type with no Kusto counterpart reports as `dynamic` (composites) or `string` (everything else) rather than inventing a name."),
     ("project-keep", "T | project-keep a", "Wildcard column selection against the input schema. The plumbing `project-away` uses would cover it."),
     ("project-reorder", "T | project-reorder b, a", "The same schema plumbing as `project-keep`, plus the trailing-column rules."),
@@ -646,7 +648,7 @@ def build() -> str:
     a("")
     a("Coverage against a published external subset:")
     a("[Azure Monitor profile](azure-monitor-profile.md). The normative mapping spec,")
-    a("including the full text of R1–R12: [`TRANSLATION.md`](TRANSLATION.md).")
+    a("including the full text of R1–R14: [`TRANSLATION.md`](TRANSLATION.md).")
 
     return "\n".join(lines) + "\n"
 

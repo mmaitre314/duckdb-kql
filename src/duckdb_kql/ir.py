@@ -32,7 +32,7 @@ __all__ = [
     # sources
     "TableRef", "DataTable", "PrintSource", "RangeSource",
     # operators
-    "Summarize", "Join", "JoinKey", "MvExpand", "ProjectAway", "ProjectRename",
+    "Summarize", "Join", "JoinKey", "Lookup", "MvExpand", "ProjectAway", "ProjectRename",
     "Where", "Project", "Extend", "Take", "Sort", "SortKey", "Count", "Distinct",
 ]
 
@@ -389,6 +389,25 @@ class Join(Operator):
     right: Query
     keys: tuple[JoinKey, ...]
     kind: str = "innerunique"
+
+
+@dataclass(frozen=True)
+class Lookup(Operator):
+    """``lookup kind=... (rightQuery) on keys`` — enrich rows from a dimension table.
+
+    Deliberately **not** a flavour of :class:`Join`, because two of its defining
+    behaviours differ (docs/TRANSLATION.md R14):
+
+    * the default kind is **leftouter**, not `join`'s `innerunique`;
+    * the right side's **key columns are dropped** from the output rather than
+      carried through with a ``1`` suffix.
+
+    Only `leftouter` and `inner` exist — Kusto rejects every other kind.
+    """
+
+    right: Query
+    keys: tuple[JoinKey, ...]
+    kind: str = "leftouter"
 
 
 @dataclass(frozen=True)

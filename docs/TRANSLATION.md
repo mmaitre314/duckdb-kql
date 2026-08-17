@@ -333,6 +333,54 @@ bare real column that residue remains; see the support matrix.
 
 ---
 
+### R14 — `lookup` is not `join kind=leftouter`, and join keys match **null to null**
+
+*Trap: `tests/test_lookup.py`*
+
+Two independent rules, both measured on the emulator, both of the "looks right,
+returns the wrong rows" kind.
+
+**(a) `lookup` has its own defaults and its own column rule.**
+
+> `| lookup (D) on Key` defaults to **`leftouter`** — *not* `join`'s
+> `innerunique` — and **drops the right side's key columns** from the output.
+
+Only `leftouter` and `inner` exist; the emulator rejects `innerunique`,
+`fullouter`, `leftsemi`, `leftanti` and the rest outright, so accepting them
+would let a query pass locally and fail on a real cluster. Because the default
+is `leftouter`, `lookup` never de-duplicates the left key set the way a bare
+`join` does.
+
+The column rule is specifically about *keys*, not collisions in general. With
+left `(Row, Key, V)` and right `(Key, V, Alias)` on `Key`:
+
+| | output |
+|---|---|
+| `join kind=leftouter` | `Row, Key, V, Key1, V1, Alias` |
+| `lookup` | `Row, Key, V, V1, Alias` |
+
+`Key1` is gone; `V1` remains. With `on $left.K1 == $right.K2` it is `K2` that
+disappears and `K1` that stays — the key is identified by its name on the right.
+
+**(b) A null key matches a null key.** This one applies to `join` too:
+
+> KQL's join/lookup key equality is **not** SQL's `=`. `Key == null` on the left
+> matches `Key == null` on the right.
+
+Measured across every kind: `leftouter`, `inner` and `innerunique` all return the
+matched row, and `leftanti` correspondingly does *not* return it. SQL's `=`
+answers NULL and drops the pair, so both operators emit
+**`IS NOT DISTINCT FROM`**. Emitting `=` silently loses every null-keyed match.
+
+**Known residue.** KQL has no null string — an outer join's unmatched `string`
+column is `''` there and NULL in DuckDB. `isempty()` reads both correctly, but a
+downstream `| where Alias != ""` keeps the unmatched row here and drops it in
+Kusto. Fixing it needs column *types*, which the translator does not carry — the
+schema is names only. Applies equally to `join kind=leftouter`; see the support
+matrix.
+
+---
+
 ## 5. Tabular operator conventions
 
 | KQL | DuckDB rendering |

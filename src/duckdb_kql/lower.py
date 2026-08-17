@@ -601,6 +601,9 @@ def _lower_operator(node: Any) -> ir.Operator | None:
     if kind == "JoinOperator":
         return _lower_join(node, kids)
 
+    if kind == "LookupOperator":
+        return _lower_lookup(node, kids)
+
     if kind == "SummarizeOperator":
         aggregates: list[ir.NamedExpr] = []
         by: list[ir.NamedExpr] = []
@@ -692,6 +695,61 @@ def _lower_join(node: Any, kids: list[Any]) -> ir.Join:
         raise _unsupported(node, "join", )
 
     return ir.Join(_lower_join_right(right_node), tuple(keys), kind)
+
+
+#: The only two kinds `lookup` has. Measured: the emulator rejects every other
+#: spelling outright, including ones `join` accepts (`innerunique`, `fullouter`,
+#: `leftanti`, ...), so accepting them here would let a query pass locally and
+#: fail against a real cluster.
+_LOOKUP_KINDS = ("leftouter", "inner")
+
+#: Distribution hints `lookup` tolerates. `join` ignores every `hint.*`, but
+#: `lookup` is narrower: the emulator accepts `hint.remote` and `hint.strategy`
+#: and *rejects* `hint.shufflekey`. Mirroring that keeps us from being more
+#: permissive than the engine we translate for.
+_LOOKUP_HINTS = ("hint.remote", "hint.strategy")
+
+
+def _lower_lookup(node: Any, kids: list[Any]) -> ir.Lookup:
+    """Lower ``lookup kind=... (right) on keys`` (docs/TRANSLATION.md R14).
+
+    Shares `join`'s `on` clause — the grammar reuses `joinOperatorOnClause` — so
+    key parsing is shared too. What differs is the default kind (**leftouter**,
+    not `innerunique`) and the output columns, which are decided later.
+    """
+    kind = "leftouter"
+    right_node = None
+    keys: list[ir.JoinKey] = []
+
+    for k in kids:
+        cls = _cls(k)
+        if cls in ("RelaxedQueryOperatorParameter", "QueryOperatorParameter"):
+            text = k.getText()
+            name, _, value = text.partition("=")
+            key = name.strip().lower()
+            if key in _LOOKUP_HINTS:
+                # Cluster distribution only; cannot change the result, and
+                # DuckDB is single-node.
+                continue
+            if key != "kind":
+                raise _unsupported(k, f"lookup parameter:{name.strip()}")
+            spelling = value.strip().lower()
+            if spelling not in _LOOKUP_KINDS:
+                raise _unsupported(k, f"lookup kind:{value.strip()}")
+            kind = spelling
+        elif cls == "JoinOperatorOnClause":
+            keys.extend(_lower_join_key(c) for c in _rule_children(k))
+        elif right_node is None:
+            right_node = k
+
+    if right_node is None:
+        raise _unsupported(node, "lookup")
+    # The grammar makes `on` mandatory for lookup (unlike join, where it is
+    # optional), so an empty key list means `on` with nothing after it.
+    if not keys:
+        raise _unsupported(node, "lookup")
+
+    return ir.Lookup(_lower_join_right(right_node), tuple(keys), kind)
 
 
 def _lower_join_right(node: Any) -> ir.Query:
@@ -1109,7 +1167,7 @@ def _substitute_operator(op: ir.Operator, scalars: Scalars) -> ir.Operator:
             aggregates=tuple(_substitute(a, scalars) for a in op.aggregates),
             by=tuple(_substitute(k, scalars) for k in op.by),
         )
-    if isinstance(op, ir.Join):
+    if isinstance(op, (ir.Join, ir.Lookup)):
         return dataclasses.replace(op, right=_substitute_query(op.right, scalars))
     return op
 
