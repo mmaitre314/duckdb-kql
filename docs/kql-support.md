@@ -161,7 +161,7 @@ returns an approximate answer.
 | `contains_cs` | Substring, case-**sensitive**. |
 | `endswith` | Suffix, case-**insensitive** by default. |
 | `endswith_cs` | Suffix, case-sensitive. |
-| `has` | Whole **term**, case-insensitive. `Text has "err"` is **false** for `"error"` — terms are delimited by non-alphanumerics. |
+| `has` | Whole **term**, case-insensitive. `Text has "err"` is **false** for `"error"`. A term is a run of Unicode letters and digits; every other character delimits one, **underscore included** — so `"a_b" has "a"` is **true**. (Regex `\b` would say false; measured on the emulator.) |
 | `has_cs` | Whole term, case-**sensitive**. |
 | `matches regex` | Regex match, case-sensitive. Both engines use RE2-family syntax, so lookarounds are unavailable on either side. |
 | `or` | — |
@@ -171,8 +171,14 @@ returns an approximate answer.
 The `in` family (`in`, `!in`, `in~`, `!in~`) is supported, including the
 subquery form `x in (T | project col)`.
 
-Not supported: `has_any`, `has_all`, `between` / `!between`, and the
-term-prefix forms `hasprefix` / `hassuffix`.
+`has_any` and `has_all` are supported. They share the `in` family's syntax
+but not its meaning: each item is a whole-**term** match like `has`, so
+`"errors" has_any ("error")` is **false** (R3). The right-hand side may be a
+value list, a `dynamic` array, or a subquery. Kusto has no `!has_any`,
+`!has_all` or `has_any_cs`, and neither does this — they are refused.
+
+Not supported: `between` / `!between`, and the term-prefix forms
+`hasprefix` / `hassuffix`.
 
 ## Aggregate functions
 
@@ -209,7 +215,7 @@ Not supported: `arg_max`, `arg_min`, `binary_all_*`, `buildschema`,
 
 ## Scalar functions
 
-110 supported, grouped by family.
+111 supported, grouped by family.
 
 ### Conditional
 
@@ -343,6 +349,7 @@ Not supported: `arg_max`, `arg_min`, `binary_all_*`, `buildschema`,
 | `log10` | — |
 | `log2` | — |
 | `log` | **Natural** logarithm, mapped to SQL's `ln`. SQL's own `log()` is base-10 in most dialects, so the naive mapping is off by a factor of `ln(10)`. |
+| `not` | Null-aware: `isempty` (null **or** empty string) is not the same as `isnull`, and arithmetic propagates null. |
 | `notnull` | Null-aware: `isempty` (null **or** empty string) is not the same as `isnull`, and arithmetic propagates null. |
 | `pow` | — |
 | `round` | Both arities. The value is cast to DOUBLE first: DuckDB's two-argument `round` returns DECIMAL and rounds the decimal value, so `round(1.005, 2)` is `1.01` there and `1.0` in Kusto, which rounds the double `1.005` actually is. |

@@ -149,12 +149,40 @@ The highest-risk family in the language.
 | `startswith` / `endswith` | prefix / suffix | insensitive |
 | `startswith_cs` / `endswith_cs` | prefix / suffix | sensitive |
 | `hasprefix` / `hassuffix` | **term** prefix / suffix | insensitive |
+| `has_any (a, b, …)` | whole term, **any** item matches | insensitive |
+| `has_all (a, b, …)` | whole term, **every** item matches | insensitive |
 
 - `contains` → `ILIKE '%' || … || '%'` (escape `%`/`_` in the pattern).
 - `has` → **not** a substring match. `Text has "err"` is **false** for
   `"error"`, because `has` matches whole terms delimited by non-alphanumeric
   characters. Emit a tokenization-aware form (regex on term boundaries), never a
   bare `LIKE '%x%'`.
+
+**What a term is, exactly.** A run of Unicode letters and digits; *every* other
+character delimits one — **underscore included**. This is not regex `\b`, which
+counts `_` as a word character:
+
+> `"a_b" has "a"` is **true** in Kusto. Emitting `\ba\b` makes it **false**.
+
+Measured on the emulator across ~30 punctuation characters (all delimit) against
+`a1`, `aa` and `éa` (none do — accented letters are term characters). The
+mapping is therefore `(?:^|[^\pL\pN])needle(?:$|[^\pL\pN])`, spelled with the
+brace-free `\pL` form because these patterns double as `str.format` templates.
+
+**`has_any` / `has_all` are the list forms of `has`, not of `in`.** The grammar
+groups them with `in` — they share `listEqualityExpression` — but they are term
+matches, not equality tests: `"errors" has_any ("error")` is **false**, exactly
+as `has` is. `has_any` is an OR of term matches, `has_all` an AND, over one
+shared term definition. The right-hand side may be a value list, a `dynamic`
+array, or a tabular subquery; all three were confirmed accepted.
+
+There is **no** `!has_any`, `!has_all` or `has_any_cs` — Kusto rejects all
+three, so they are refused here too.
+
+**`not()` is a function, not the `!` prefix.** It is also the one member of this
+neighbourhood that does *not* get R4's totality treatment: `not(bool(null))` is
+**null**, not true, so SQL's `NOT` maps across directly. `not(1)` is `false`, so
+the argument is cast rather than required to be boolean.
 - Every operator above has a negated form (`!has`, `!contains`, …), and each is
   **true** on a null operand rather than null (R4) — a bare `NOT (…)` silently
   drops those rows.

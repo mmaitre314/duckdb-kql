@@ -28,7 +28,7 @@ __all__ = [
     "Node", "Expr", "Operator", "Query",
     # expressions
     "Literal", "ColumnRef", "BinaryOp", "UnaryOp", "FunctionCall", "NamedExpr",
-    "InList", "PathAccess", "PathStep", "Parameter",
+    "InList", "HasList", "PathAccess", "PathStep", "Parameter",
     # sources
     "TableRef", "DataTable", "PrintSource", "RangeSource",
     # operators
@@ -331,6 +331,25 @@ class InList(Expr):
     #: A tabular right-hand side: ``x in (SomeTable | project col)``. When set,
     #: ``items`` is empty and membership is tested against the query's first
     #: column.
+    subquery: Query | None = None
+
+
+@dataclass(frozen=True)
+class HasList(Expr):
+    """``x has_any (a, b, ...)`` / ``x has_all (...)``.
+
+    Deliberately not an :class:`InList`. The grammar groups these with `in`
+    (they share ``listEqualityExpression``), but the semantics are the `has`
+    family's: each item is matched as a whole **term**, case-insensitively, not
+    compared for equality (R3). ``x has_any ("err")`` is false for ``"errors"``
+    where ``x in ("err")`` is simply a different question.
+    """
+
+    value: Expr
+    items: tuple[Expr, ...]
+    #: `has_all` requires every item; `has_any` requires one.
+    require_all: bool = False
+    #: A tabular right-hand side: ``x has_any (T | project col)``.
     subquery: Query | None = None
 
 

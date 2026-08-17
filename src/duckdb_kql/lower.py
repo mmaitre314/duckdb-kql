@@ -903,7 +903,9 @@ def _resolve_in_subqueries(query: ir.Query, tabular_names: set[str]) -> ir.Query
         return query
 
     def fix(node: ir.Expr) -> ir.Expr:
-        if isinstance(node, ir.InList):
+        # `has_any` / `has_all` take the same shape of right-hand side as `in`,
+        # so a tabular `let` on the right resolves the same way.
+        if isinstance(node, (ir.InList, ir.HasList)):
             if (
                 node.subquery is None
                 and len(node.items) == 1
@@ -1109,7 +1111,10 @@ def _substitute(node: Any, scalars: Scalars) -> Any:
                 for s in node.steps
             ),
         )
-    if isinstance(node, ir.InList):
+    if isinstance(node, (ir.InList, ir.HasList)):
+        # `let areas = dynamic(['a','b']); T | where State has_any (areas)` is
+        # real corpus KQL. Without HasList here the name stayed a ColumnRef and
+        # the generated SQL referenced a column that does not exist.
         return dataclasses.replace(
             node,
             value=_substitute(node.value, scalars),
@@ -1224,8 +1229,14 @@ _IN_OPERATORS = {
 }
 
 
+#: `has_any` / `has_all` share the `in` family's grammar rule
+#: (`listEqualityExpression`) but not its semantics — see ir.HasList.
+_HAS_LIST_OPERATORS = {"has_any": False, "has_all": True}
+
+
 def _lower_in_list(node: Any) -> ir.Expr:
-    """Lower ``x in (a, b, ...)`` and its ``!in`` / ``in~`` variants.
+    """Lower ``x in (a, b, ...)``, its ``!in`` / ``in~`` variants, and the
+    ``has_any`` / ``has_all`` forms that share the same grammar rule.
 
     The operator is a bare token between the value and the parenthesised list,
     and the list items arrive as separate rule children.
@@ -1234,15 +1245,22 @@ def _lower_in_list(node: Any) -> ir.Expr:
     for child in _children(node):
         if not type(child).__name__.endswith("Context"):
             text = child.getText().strip().lower()
-            if text in _IN_OPERATORS:
+            if text in _IN_OPERATORS or text in _HAS_LIST_OPERATORS:
                 op = text
                 break
     if op is None:
-        raise _unsupported(node, "in")
+        # Name the operator that is actually there. This used to say "in"
+        # unconditionally — the handler's name, not the query's — so an
+        # unsupported `has_any` was reported as an unsupported `in`, pointing
+        # at the wrong half of the expression.
+        raise _unsupported(node, _list_operator_text(node) or "in")
 
     rules = _rule_children(node)
     if len(rules) < 2:
-        raise _unsupported(node, "in")
+        raise _unsupported(node, op)
+
+    if op in _HAS_LIST_OPERATORS:
+        return _lower_has_list(node, rules, op)
 
     value = _lower_expr(rules[0])
     negated, case_insensitive = _IN_OPERATORS[op]
@@ -1261,6 +1279,45 @@ def _lower_in_list(node: Any) -> ir.Expr:
                 value, (), negated, case_insensitive, _lower_query_node(r)
             )
     return ir.InList(value, tuple(items), negated, case_insensitive)
+
+
+def _list_operator_text(node: Any) -> str | None:
+    """The operator token of a ``listEqualityExpression``, as written.
+
+    Used only to name the construct in an error. Everything between the value
+    and the opening parenthesis is the operator, so the first bare token that is
+    not punctuation is it.
+    """
+    for child in _children(node):
+        if type(child).__name__.endswith("Context"):
+            continue
+        text: str = child.getText().strip()
+        if text and text not in ("(", ")", ","):
+            return text.lower()
+    return None
+
+
+def _lower_has_list(node: Any, rules: list[Any], op: str) -> ir.Expr:
+    """Lower ``x has_any (...)`` / ``x has_all (...)`` (R3).
+
+    Term matching, not equality — the items are `has` needles. The right-hand
+    side may be a value list, a `dynamic` array, or a tabular subquery; the
+    emulator accepts all three.
+    """
+    value = _lower_expr(rules[0])
+    require_all = _HAS_LIST_OPERATORS[op]
+
+    items = []
+    for r in rules[1:]:
+        try:
+            items.append(_lower_expr(r))
+        except KqlUnsupportedError:
+            # Same shape as the `in` case: a tabular right-hand side rather than
+            # a value list. `x has_any (T | project col)` is accepted by Kusto.
+            if len(rules) != 2:
+                raise
+            return ir.HasList(value, (), require_all, _lower_query_node(r))
+    return ir.HasList(value, tuple(items), require_all)
 
 
 # ---------------------------------------------------------------------------

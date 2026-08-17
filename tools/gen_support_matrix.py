@@ -76,7 +76,7 @@ SPECIFIC_GOTCHAS: dict[str, str] = {
     "contains_cs": "Substring, case-**sensitive**.",
     "!contains": "Negated substring match. Null handling is pinned against the emulator rather than derived from `NOT (…)`.",
     "!contains_cs": "Negated case-sensitive substring match.",
-    "has": 'Whole **term**, case-insensitive. `Text has "err"` is **false** for `"error"` — terms are delimited by non-alphanumerics.',
+    "has": 'Whole **term**, case-insensitive. `Text has "err"` is **false** for `"error"`. A term is a run of Unicode letters and digits; every other character delimits one, **underscore included** — so `"a_b" has "a"` is **true**. (Regex `\\b` would say false; measured on the emulator.)',
     "has_cs": "Whole term, case-**sensitive**.",
     "!has": "Negated whole-term match — not `NOT contains`. Null handling pinned against the emulator.",
     "!has_cs": "Negated case-sensitive whole-term match.",
@@ -545,8 +545,14 @@ def build() -> str:
     a("The `in` family (`in`, `!in`, `in~`, `!in~`) is supported, including the")
     a("subquery form `x in (T | project col)`.")
     a("")
-    a("Not supported: `has_any`, `has_all`, `between` / `!between`, and the")
-    a("term-prefix forms `hasprefix` / `hassuffix`.")
+    a("`has_any` and `has_all` are supported. They share the `in` family's syntax")
+    a("but not its meaning: each item is a whole-**term** match like `has`, so")
+    a('`\"errors\" has_any (\"error\")` is **false** (R3). The right-hand side may be a')
+    a("value list, a `dynamic` array, or a subquery. Kusto has no `!has_any`,")
+    a("`!has_all` or `has_any_cs`, and neither does this — they are refused.")
+    a("")
+    a("Not supported: `between` / `!between`, and the term-prefix forms")
+    a("`hasprefix` / `hassuffix`.")
     a("")
 
     # -- Aggregates ---------------------------------------------------------

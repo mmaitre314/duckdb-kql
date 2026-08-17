@@ -303,6 +303,12 @@ SCALAR_FUNCTIONS: dict[str, FunctionSpec] = {
         # --- conditional -----------------------------------------------------
         _f("iff", "template", "CASE WHEN {0} THEN {1} ELSE {2} END", (3,)),
         _f("iif", "template", "CASE WHEN {0} THEN {1} ELSE {2} END", (3,)),
+        # `not()` is a FUNCTION in KQL, not the `!` prefix operator, and it does
+        # NOT get R4's totality treatment: measured on the emulator,
+        # `not(bool(null))` is **null**, not true. SQL's `NOT NULL` is null too,
+        # so the plain mapping is exact. The cast is what makes `not(1)` false
+        # rather than a binder error — KQL accepts a non-bool argument.
+        _f("not", "template", "(NOT CAST({0} AS BOOLEAN))", (1,), ("R4",)),
         # --- aggregates ------------------------------------------------------
         # count() counts rows; count(x) ignores nulls (R4).
         _f("count", "template", "count(*)", (0,), ("R4",)),
@@ -340,22 +346,85 @@ class BinarySpec:
     null_result: str | None = None
 
 
+#: DuckDB's LIKE has **no default escape character**, so escaping `%`/`_` with a
+#: backslash does nothing on its own -- the pattern then requires a literal
+#: backslash and matches nothing. Every LIKE built from a runtime value must
+#: therefore carry this clause. Without it `s contains "user_id"` silently
+#: returned zero rows: the `_` stayed a wildcard, the added `\` did not.
+#: Found by a random differential sweep against the emulator.
+_LIKE_ESCAPE = " ESCAPE '\\'"
+
+
 def _escape_like(operand: str) -> str:
-    """Escape LIKE metacharacters in a runtime value."""
+    """Escape LIKE metacharacters in a runtime value.
+
+    Only half the job -- the resulting comparison must also end with
+    :data:`_LIKE_ESCAPE`, or the escaping is inert.
+    """
     return f"replace(replace({operand}, '%', '\\%'), '_', '\\_')"
 
 
 # Term boundary for `has` (R3): KQL matches whole *terms*, so a substring LIKE
-# is wrong -- `t has "error"` must be FALSE for "errors". DuckDB's regex engine
-# spells the word boundary `\b`; `(?i)` makes the default form case-insensitive.
-_HAS = r"regexp_matches({0}, '(?i)\b' || regexp_escape({1}) || '\b')"
-_HAS_CS = r"regexp_matches({0}, '\b' || regexp_escape({1}) || '\b')"
+# is wrong -- `t has "error"` must be FALSE for "errors".
+#
+# NOT regex `\b`, which is what this used to emit. `\b` treats `_` as a word
+# character, so `"a_b" has "a"` came back FALSE here and TRUE on the emulator.
+# A Kusto term is a run of Unicode letters and digits; every other character
+# delimits one, underscore included. Measured across ~30 punctuation characters:
+# all of them delimit, while `a1`, `aa` and `ea` (accented) do not.
+#
+# Spelled `\pL\pN` rather than `\p{L}\p{N}`: these strings are also used as
+# `str.format` templates, where a brace is a placeholder. RE2 accepts the
+# single-letter form and both were checked to behave identically.
+_TERM_START = r"(?:^|[^\pL\pN])"
+_TERM_END = r"(?:$|[^\pL\pN])"
+
+
+def term_match_sql(haystack: str, needle: str, *, case_sensitive: bool = False) -> str:
+    """SQL testing whether *needle* occurs in *haystack* as a whole term.
+
+    Shared by `has`/`has_cs` and the `has_any`/`has_all` list forms, so the term
+    definition lives in exactly one place.
+
+    The boundary is applied at an edge **only when the needle's own character at
+    that edge is a term character** — found by a random differential sweep, not
+    by reading the docs. Measured on the emulator:
+
+    ======================  =========  ==========================================
+    query                   Kusto      why
+    ======================  =========  ==========================================
+    ``'xa b' has "a "``     false      needle starts with `a`, so `x` blocks it
+    ``'a b'  has "a "``     true       same needle, now at a real boundary
+    ``'x ab y' has " a"``   false      needle ends with `a`, so `b` blocks it
+    ``'b .b-' has " "``     **true**   needle is all delimiters: plain substring
+    ``anything has ""``     true       ditto, degenerately
+    ======================  =========  ==========================================
+
+    Wrapping an all-delimiter needle in boundaries makes ``has " "`` false where
+    Kusto says true, so the two ``CASE`` arms are load-bearing rather than
+    defensive. They are emitted rather than decided here because the needle can
+    be a column or a bound parameter, unknown until the query runs; for the
+    usual string literal DuckDB folds them away.
+    """
+    flag = "" if case_sensitive else "(?i)"
+    lead = f"CASE WHEN regexp_matches({needle}, '^[\\pL\\pN]') THEN '{_TERM_START}' ELSE '' END"
+    trail = f"CASE WHEN regexp_matches({needle}, '[\\pL\\pN]$') THEN '{_TERM_END}' ELSE '' END"
+    return (
+        f"regexp_matches({haystack}, '{flag}' || {lead} "
+        f"|| regexp_escape({needle}) || {trail})"
+    )
+
+
+_HAS = term_match_sql("{0}", "{1}")
+_HAS_CS = term_match_sql("{0}", "{1}", case_sensitive=True)
 
 # `contains` IS plain substring (R3) -- the mirror image of `has`. The needle is
 # a runtime value, so its LIKE metacharacters must be escaped or `a contains "%"`
 # would match everything.
-_CONTAINS = "({0} ILIKE '%' || " + _escape_like("{1}") + " || '%')"
-_CONTAINS_CS = "({0} LIKE '%' || " + _escape_like("{1}") + " || '%')"
+_CONTAINS = "({0} ILIKE '%' || " + _escape_like("{1}") + " || '%'" + _LIKE_ESCAPE + ")"
+_CONTAINS_CS = "({0} LIKE '%' || " + _escape_like("{1}") + " || '%'" + _LIKE_ESCAPE + ")"
+_STARTSWITH = "({0} ILIKE " + _escape_like("{1}") + " || '%'" + _LIKE_ESCAPE + ")"
+_ENDSWITH = "({0} ILIKE '%' || " + _escape_like("{1}") + _LIKE_ESCAPE + ")"
 
 #: Wave 1 binary operators, keyed by their KQL spelling.
 BINARY_OPERATORS: dict[str, BinarySpec] = {
@@ -416,16 +485,13 @@ BINARY_OPERATORS: dict[str, BinarySpec] = {
         BinarySpec("has_cs", _HAS_CS, ("R3", "R4"), null_result="FALSE"),
         BinarySpec("!has_cs", f"NOT {_HAS_CS}", ("R3", "R4"), null_result="TRUE"),
         # R3 — prefix / suffix, case-insensitive by default
-        BinarySpec("startswith", "({0} ILIKE " + _escape_like("{1}") + " || '%')",
-                   ("R3", "R4"), null_result="FALSE"),
-        BinarySpec("!startswith", "NOT ({0} ILIKE " + _escape_like("{1}") + " || '%')",
-                   ("R3", "R4"), null_result="TRUE"),
+        BinarySpec("startswith", _STARTSWITH, ("R3", "R4"), null_result="FALSE"),
+        BinarySpec("!startswith", f"NOT {_STARTSWITH}", ("R3", "R4"),
+                   null_result="TRUE"),
         BinarySpec("startswith_cs", "starts_with({0}, {1})", ("R3", "R4"),
                    null_result="FALSE"),
-        BinarySpec("endswith", "({0} ILIKE '%' || " + _escape_like("{1}") + ")",
-                   ("R3", "R4"), null_result="FALSE"),
-        BinarySpec("!endswith", "NOT ({0} ILIKE '%' || " + _escape_like("{1}") + ")",
-                   ("R3", "R4"), null_result="TRUE"),
+        BinarySpec("endswith", _ENDSWITH, ("R3", "R4"), null_result="FALSE"),
+        BinarySpec("!endswith", f"NOT {_ENDSWITH}", ("R3", "R4"), null_result="TRUE"),
         BinarySpec("endswith_cs", "ends_with({0}, {1})", ("R3", "R4"),
                    null_result="FALSE"),
         BinarySpec("!endswith_cs", "NOT ends_with({0}, {1})", ("R3", "R4"),

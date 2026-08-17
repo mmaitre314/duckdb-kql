@@ -201,6 +201,9 @@ def render_expr(node: ir.Expr) -> str:
     if isinstance(node, ir.InList):
         return render_in_list(node)
 
+    if isinstance(node, ir.HasList):
+        return render_has_list(node)
+
     if isinstance(node, ir.FunctionCall):
         if node.name.lower() == "bin":
             return render_bin(node)
@@ -1174,6 +1177,71 @@ def render_in_list(node: ir.InList) -> str:
         items = [f"lower({i})" for i in items]
     sql = f"({value} IN ({', '.join(items)}))"
     return _in_result(sql, node, value)
+
+
+def render_has_list(node: ir.HasList) -> str:
+    """``x has_any (a, b, ...)`` / ``x has_all (...)`` (R3).
+
+    These share the `in` family's *grammar* but none of its semantics: each item
+    is a `has` needle, matched as a whole **term**, case-insensitively. Measured
+    on the emulator — ``"errors" has_any ("error")`` is **false**, exactly as
+    ``has`` is, where an `in`-style equality test would be a different question
+    entirely.
+
+    So `has_any` is an OR of term matches and `has_all` an AND, sharing one term
+    definition with `has` via :func:`term_match_sql`.
+
+    Nulls follow `has`: a null left operand makes both **false** (measured), so
+    the result is coalesced rather than left as SQL's NULL.
+    """
+    from .functions import term_match_sql
+
+    value = render_expr(node.value)
+    joiner = " AND " if node.require_all else " OR "
+
+    if node.subquery is not None:
+        # A tabular right-hand side. Rendered as a scalar subquery over the
+        # first column so the term test stays the same one used everywhere else.
+        inner = str(to_sql(node.subquery))
+        needle = "_needle"
+        test = term_match_sql(value, f"CAST({needle} AS VARCHAR)")
+        agg = "bool_and" if node.require_all else "bool_or"
+        sql = (
+            f"(SELECT coalesce({agg}({test}), FALSE) FROM "
+            f"(SELECT COLUMNS(*) AS {needle} FROM ({inner})) )"
+        )
+        return _has_list_result(sql, node)
+
+    parts = []
+    for item in node.items:
+        if _is_dynamic(item):
+            # `has_any (dynamic(["a","b"]))` is a list *inside one item*, so the
+            # needles are only known at runtime and cannot be unrolled here.
+            arr = f"CAST({render_expr(item)} AS VARCHAR[])"
+            test = term_match_sql(value, "t")
+            matched = f"len(list_filter({arr}, t -> {test}))"
+            parts.append(f"({matched} = len({arr}))" if node.require_all
+                         else f"({matched} > 0)")
+        else:
+            parts.append(term_match_sql(value, f"CAST({render_expr(item)} AS VARCHAR)"))
+
+    if not parts:
+        # `has_any ()` cannot be written — the grammar needs at least one item.
+        raise KqlUnsupportedError("has_all" if node.require_all else "has_any")
+
+    sql = f"({joiner.join(parts)})"
+    return _has_list_result(sql, node)
+
+
+def _has_list_result(sql: str, node: ir.HasList) -> str:
+    """Give `has_any`/`has_all` KQL's null behaviour rather than SQL's (R4).
+
+    Measured: a null (or empty) left operand makes both false, matching `has`
+    rather than leaving NULL for `where` to drop.
+    """
+    if _never_null(node.value):
+        return sql
+    return f"coalesce({sql}, FALSE)"
 
 
 def _is_dynamic_expr(node: ir.Expr) -> bool:
