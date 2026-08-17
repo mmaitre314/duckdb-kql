@@ -20,9 +20,9 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from typing import Any
 
 import pytest
-import tomllib
 
 NOTICES = Path("THIRD-PARTY-NOTICES.md")
 LICENSES = Path("licenses")
@@ -34,8 +34,13 @@ def _notices() -> str:
     return NOTICES.read_text(encoding="utf-8")
 
 
-def _pyproject() -> dict:
-    return tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+def _pyproject() -> dict[str, Any]:
+    # ``tomllib`` is 3.11+; conftest holds the 3.10 fallback, as test_docs.py
+    # does. Importing it here rather than at module scope keeps a collection
+    # error from taking the whole file down on the older interpreter.
+    from conftest import read_pyproject  # noqa: PLC0415
+
+    return read_pyproject()
 
 
 # ---------------------------------------------------------------------------

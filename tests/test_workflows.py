@@ -80,6 +80,59 @@ def test_the_ci_matrix_spans_the_supported_range() -> None:
     )
 
 
+#: Top-level stdlib modules and the Python version that introduced them.
+#: Importing one at module scope silently raises the package's real floor above
+#: what ``requires-python`` claims.
+_STDLIB_ADDED_IN = {
+    "tomllib": (3, 11),
+    "annotationlib": (3, 14),
+    "compression": (3, 14),
+}
+
+
+def test_nothing_imports_a_stdlib_module_newer_than_the_floor() -> None:
+    """The other half of the matrix claim: the floor lane has to *work*.
+
+    Running the suite on a newer interpreter cannot see this. `tomllib` arrived
+    in 3.11, the floor is 3.10, and a module-scope `import tomllib` in a test
+    file is not a skipped test — it is a collection error that takes the whole
+    file down. That reached `main` once; this is why it cannot again.
+
+    Module scope only. Importing inside a function with a fallback is the
+    sanctioned pattern — `conftest.read_pyproject` is exactly that.
+    """
+    import ast  # noqa: PLC0415
+
+    from conftest import read_pyproject  # noqa: PLC0415
+
+    floor = tuple(
+        int(p) for p in read_pyproject()["project"]["requires-python"].lstrip(">=").split(".")
+    )
+
+    offenders = []
+    for directory in ("src", "tests", "tools", "demo"):
+        for path in Path(directory).rglob("*.py"):
+            if "_antlr" in path.parts:
+                continue
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for node in tree.body:  # top level only
+                if isinstance(node, ast.Import):
+                    names = [alias.name.split(".")[0] for alias in node.names]
+                elif isinstance(node, ast.ImportFrom):
+                    names = [(node.module or "").split(".")[0]] if node.level == 0 else []
+                else:
+                    continue
+                for name in names:
+                    added = _STDLIB_ADDED_IN.get(name)
+                    if added and added > floor:
+                        offenders.append(
+                            f"{path}:{node.lineno} imports {name!r}, added in "
+                            f"{'.'.join(map(str, added))}, but the floor is "
+                            f"{'.'.join(map(str, floor))}"
+                        )
+    assert not offenders, "\n".join(offenders)
+
+
 def test_ci_still_runs_the_tests_and_the_linter() -> None:
     steps = [
         step.get("run", "")
