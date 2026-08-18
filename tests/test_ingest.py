@@ -271,23 +271,38 @@ def _ask(server, csl):
         with urllib.request.urlopen(request) as response:
             return 200, json.loads(response.read())
     except urllib.error.HTTPError as exc:
-        return exc.code, exc.read().decode()
+        # `with exc:` as in test_server.py. An HTTPError holds the response
+        # body open; letting it be collected implicitly raises ResourceWarning,
+        # which `filterwarnings = ["error"]` turns into a failure — attributed,
+        # confusingly, to whichever test was running when the GC ran.
+        with exc:
+            return exc.code, exc.read().decode()
 
 
 @pytest.fixture
 def serving(con):
     from duckdb_kql.server import KustoRestServer
 
+    started: list[tuple] = []
+
     def start(allow_write: bool):
-        server = KustoRestServer(con, port=0, allow_write=allow_write)
-        threading.Thread(target=server.serve_forever, daemon=True).start()
+        # `quiet=True` as in test_server.py, and not merely for tidiness: the
+        # request log is written from the serving *thread*, into whatever pytest
+        # has swapped stdout for. On 3.14 that raced capture teardown and
+        # surfaced as an unraisable `_TemporaryFileCloser.__del__`, which
+        # `filterwarnings = ["error"]` turned into a failure of whichever test
+        # happened to be running.
+        server = KustoRestServer(con, port=0, allow_write=allow_write, quiet=True)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        started.append((server, thread))
         return server
 
-    servers: list = []
-    yield lambda allow_write: servers.append(start(allow_write)) or servers[-1]
-    for server in servers:
+    yield start
+    for server, thread in started:
         server.shutdown()
         server.server_close()
+        thread.join(timeout=5)
 
 
 def test_the_server_refuses_writes_by_default(serving, con) -> None:

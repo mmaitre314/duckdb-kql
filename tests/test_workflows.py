@@ -133,6 +133,46 @@ def test_nothing_imports_a_stdlib_module_newer_than_the_floor() -> None:
     assert not offenders, "\n".join(offenders)
 
 
+def test_http_error_responses_are_closed_in_tests() -> None:
+    """An unclosed `HTTPError` fails the suite, on one interpreter, elsewhere.
+
+    `urllib` raises `HTTPError` for a non-2xx response, and the exception *is*
+    the response — it holds the body open. Letting it be collected implicitly
+    emits `ResourceWarning`, which `filterwarnings = ["error"]` turns into a
+    failure; on 3.14 it arrives as an unraisable during GC and pytest attributes
+    it to **whichever test happened to be running**, so the reported test is not
+    the one at fault. That cost a red CI lane and a bisect to find.
+
+    `test_server.py` had the right pattern already (`with exc:`); a later file
+    did not. This checks the convention instead of relying on remembering it.
+    """
+    import ast  # noqa: PLC0415
+
+    offenders = []
+    for path in Path("tests").glob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ExceptHandler) or node.name is None:
+                continue
+            if "HTTPError" not in ast.dump(node.type or ast.Pass()):
+                continue
+            closed = any(
+                (isinstance(inner, ast.With)
+                 and any(isinstance(i.context_expr, ast.Name)
+                         and i.context_expr.id == node.name for i in inner.items))
+                or (isinstance(inner, ast.Call)
+                    and isinstance(inner.func, ast.Attribute)
+                    and inner.func.attr == "close")
+                for inner in ast.walk(node)
+            )
+            if not closed:
+                offenders.append(
+                    f"{path}:{node.lineno} catches HTTPError as {node.name!r} "
+                    f"without `with {node.name}:` or {node.name}.close()"
+                )
+    assert not offenders, "\n".join(offenders)
+
+
 def test_ci_still_runs_the_tests_and_the_linter() -> None:
     steps = [
         step.get("run", "")
