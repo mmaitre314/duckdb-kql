@@ -21,7 +21,7 @@ from .errors import KqlSchemaError, KqlUnsupportedError, SourceSpan
 from .params import ParameterDeclaration, normalize_type
 from .parser import parse
 
-__all__ = ["lower", "query_parameters"]
+__all__ = ["lower", "qualify", "query_parameters"]
 
 #: Query-scope scalar bindings — `let` values and query parameters — keyed by
 #: the KQL name they were declared under, substituted into the IR before
@@ -1425,3 +1425,119 @@ def _lower_mv_expand(node: Any, kids: list[Any]) -> ir.Operator:
     if not isinstance(target.expr, ir.ColumnRef):
         raise _unsupported(node, "mv-expand", )
     return ir.MvExpand(target.expr.name, target.name, item_index)
+
+
+# ---------------------------------------------------------------------------
+# Default database qualification
+# ---------------------------------------------------------------------------
+
+
+def qualify(query: ir.Query, database: str | None) -> ir.Query:
+    """Give every unqualified table reference *database* as its database.
+
+    This is how ``kql(con, q, database="sales")`` targets a database: the name
+    is baked into the SQL as ``"sales"."T"`` at translate time, rather than the
+    connection being switched to it and switched back.
+
+    Switching was the obvious design and it cannot be made correct here. A
+    relation from :func:`duckdb_kql.kql` is **lazy**, and DuckDB resolves an
+    unqualified table name when the relation is *fetched* — so restoring the
+    previous database before the caller fetches makes the query read the wrong
+    one, silently. Two threads sharing a connection make it worse: measured, one
+    query in 144 answered from the wrong database with no error. See
+    ``docs/session-state-proposal.md`` §1-§2.
+
+    Qualifying at translate time has none of that: nothing mutates, nothing to
+    restore, and the answer cannot drift between building and fetching.
+
+    Two kinds of name are deliberately left alone:
+
+    * one that already names a database — ``database("other").T`` wins, as it
+      does in Kusto;
+    * one bound by a tabular ``let``, which is a CTE in the generated SQL and
+      not a table at all. Qualifying it would produce SQL referring to a table
+      that does not exist.
+    """
+    if database is None:
+        return query
+    return _qualify_query(query, database, frozenset())
+
+
+def _qualify_query(
+    query: ir.Query, database: str, bound: frozenset[str]
+) -> ir.Query:
+    # A `let` may refer to an earlier one, so names accumulate in order.
+    lets: list[tuple[str, ir.Query | ir.Expr]] = []
+    seen = set(bound)
+    for name, value in query.lets:
+        if isinstance(value, ir.Query):
+            lets.append((name, _qualify_query(value, database, frozenset(seen))))
+        else:
+            lets.append((name, value))
+        seen.add(name)
+    scope = frozenset(seen)
+
+    source = query.source
+    if isinstance(source, ir.TableRef) and source.database is None:
+        if source.name not in scope:
+            source = dataclasses.replace(source, database=database)
+
+    operators = [_qualify_operator(op, database, scope) for op in query.operators]
+
+    out = ir.Query(source, operators, lets, list(query.parameters))
+    return out
+
+
+def _qualify_operator(
+    op: ir.Operator, database: str, scope: frozenset[str]
+) -> ir.Operator:
+    if isinstance(op, (ir.Join, ir.Lookup)):
+        return dataclasses.replace(op, right=_qualify_query(op.right, database, scope))
+    if isinstance(op, ir.Where):
+        return dataclasses.replace(op, predicate=_qualify_expr(op.predicate, database, scope))
+    if isinstance(op, (ir.Project, ir.Extend)):
+        return dataclasses.replace(
+            op,
+            expressions=tuple(
+                dataclasses.replace(e, expr=_qualify_expr(e.expr, database, scope))
+                for e in op.expressions
+            ),
+        )
+    if isinstance(op, ir.Summarize):
+        return dataclasses.replace(
+            op,
+            aggregates=tuple(
+                dataclasses.replace(a, expr=_qualify_expr(a.expr, database, scope))
+                for a in op.aggregates
+            ),
+            by=tuple(
+                dataclasses.replace(b, expr=_qualify_expr(b.expr, database, scope))
+                for b in op.by
+            ),
+        )
+    return op
+
+
+def _qualify_expr(expr: ir.Expr, database: str, scope: frozenset[str]) -> ir.Expr:
+    """Only subqueries carry table references; everything else is passed through."""
+    if isinstance(expr, (ir.InList, ir.HasList)):
+        if expr.subquery is not None:
+            return dataclasses.replace(
+                expr, subquery=_qualify_query(expr.subquery, database, scope)
+            )
+        return expr
+    if isinstance(expr, ir.BinaryOp):
+        return dataclasses.replace(
+            expr,
+            left=_qualify_expr(expr.left, database, scope),
+            right=_qualify_expr(expr.right, database, scope),
+        )
+    if isinstance(expr, ir.UnaryOp):
+        return dataclasses.replace(
+            expr, operand=_qualify_expr(expr.operand, database, scope)
+        )
+    if isinstance(expr, ir.FunctionCall):
+        return dataclasses.replace(
+            expr, args=tuple(_qualify_expr(a, database, scope) for a in expr.args)
+        )
+    return expr

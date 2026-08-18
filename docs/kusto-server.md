@@ -124,8 +124,23 @@ duckdb-kql serving :memory: as database 'memory'
   http://127.0.0.1:31415
 ```
 
-Each attached file is a Kusto database to any client, reached with KQL's
-cross-database syntax — including on both sides of a join:
+Each attached file is a Kusto database to any client. There are two ways to
+reach one.
+
+**Selecting it in the client.** The database a client picks — the dropdown in
+the Azure Data Explorer UI, the `db` field on the request — now decides which
+tables an unqualified name means. Pick `Sales` and `Orders | count` counts
+Sales' orders. Until recently the request's database was validated and then
+ignored, so an unqualified query was answered from whichever database the server
+started in; if you have a client that seemed to ignore the dropdown, that was
+this.
+
+The database is applied by qualifying names during translation, not by switching
+the connection: one connection serves every request thread, and switching it
+would race (`docs/session-state-proposal.md`).
+
+**Naming it in the query**, with KQL's cross-database syntax — including on both
+sides of a join:
 
 ```kql
 database("Sales").Orders

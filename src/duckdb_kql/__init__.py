@@ -146,6 +146,7 @@ def to_sql(
     kql: str,
     schema: Schema | None = None,
     parameters: Parameters | None = None,
+    database: str | None = None,
 ) -> TranslationResult:
     """Translate *kql* to DuckDB SQL. Requires no connection and no database.
 
@@ -159,6 +160,12 @@ def to_sql(
         parameters: values for the query's declared parameters, by KQL name.
             They are bound as values, never spliced into the SQL, so a value may
             contain any text at all without changing what the query does.
+        database: the database unqualified table names belong to. Rendered into
+            the SQL as ``"db"."T"``, so nothing about the connection is
+            changed and the answer cannot drift between translating and
+            executing. An explicit ``database("other").T`` in the query wins,
+            and a name bound by a tabular ``let`` is left alone — it is a CTE,
+            not a table. See ``docs/session-state-proposal.md``.
 
     .. important::
        KQL datetimes are UTC (``docs/TRANSLATION.md`` R8), and DuckDB reads the
@@ -181,7 +188,7 @@ def to_sql(
     from . import ir
     from .control import COLUMNS, is_control_command, split_command
     from .control import translate_control_command as _command_sql
-    from .lower import lower
+    from .lower import lower, qualify
     from .params import bind
     from .translate import TranslationResult as _Result
     from .translate import to_sql as _emit
@@ -202,9 +209,9 @@ def to_sql(
         # `lower` wants a whole query and the pipeline alone is not one.
         tail = lower(f"__command__ {pipeline}")
         source = ir.CommandSource(head, COLUMNS[command], command)
-        return _emit(ir.Query(source, tail.operators), schema)
+        return _emit(qualify(ir.Query(source, tail.operators), database), schema)
 
-    query = lower(kql)
+    query = qualify(lower(kql), database)
     result = _emit(query, schema)
     if query.parameters or parameters:
         bound, unbound = bind(query.parameters, parameters)

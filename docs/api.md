@@ -102,6 +102,11 @@ Every syntax diagnostic, empty when the query is valid. Does not raise.
 `Diagnostic` has `.span` (a `SourceSpan` with 1-based `line`, 0-based `column`)
 and `.message`.
 
+### `to_sql(kql, schema=None, parameters=None, database=None)`
+
+`database` gives unqualified table names a database: `T` renders as
+`"sales"."T"`. It needs no connection, so Layer 0 can target a database too.
+
 ---
 
 ## Layer 1 — `duckdb_kql.engine`
@@ -118,9 +123,23 @@ so `join` works without you supplying one.
 the zone yourself. Raises `ImportError` with an install hint if `duckdb` is not
 installed.
 
-### `kql(con, query, parameters=None) -> DuckDBPyRelation`
+### `kql(con, query, parameters=None, database=None) -> DuckDBPyRelation`
 
 Execute and return a relation, so you can keep composing with DuckDB's API.
+
+`database` selects which attached database unqualified table names belong to.
+It is applied by **qualifying the names during translation**, not by switching
+the connection — so nothing about `con` changes, and the relation cannot drift
+between being built and being fetched. An explicit `database("other").T` in the
+query wins, and a name bound by a tabular `let` is left alone (it is a CTE).
+A database that is not attached raises `KqlSchemaError` naming it, and listing
+the ones that are.
+
+> **Concurrency.** A DuckDB connection is not safe for concurrent use, and this
+> predates `database=`: reading the schema is an `execute` / `fetchall` pair
+> that a second thread's `execute` invalidates. Serialize access to a shared
+> connection, or give each thread its own. `duckdb-kql serve` holds a lock for
+> exactly this reason.
 
 Also accepts the control commands `.show version`, `.show databases` and
 `.show tables` — a separate Kusto dialect, with the column shapes Kusto returns
@@ -128,11 +147,11 @@ Also accepts the control commands `.show version`, `.show databases` and
 `.show tables | where TableName startswith "Storm"`.
 See [Control commands](kusto-client.md#control-commands).
 
-### `execute(con, kql, parameters=None) -> DuckDBPyConnection`
+### `execute(con, kql, parameters=None, database=None) -> DuckDBPyConnection`
 
 Mirrors `con.execute` — for the cursor, or the side effect.
 
-### `df(con, kql, parameters=None)` · `arrow(con, kql, parameters=None)`
+### `df(con, kql, parameters=None, database=None)` · `arrow(con, kql, parameters=None, database=None)`
 
 `kql(...).df()` and `kql(...).arrow()`. Need `pandas` and `pyarrow` respectively.
 

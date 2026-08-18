@@ -45,7 +45,10 @@ Parameters = dict[str, Any]
 #: Table name -> column names, as :func:`schema` returns it.
 Schema = dict[str, list[str]]
 
-__all__ = ["connect", "kql", "execute", "df", "arrow", "schema", "Parameters", "Schema"]
+__all__ = [
+    "connect", "kql", "execute", "df", "arrow", "schema", "databases",
+    "Parameters", "Schema",
+]
 
 
 def connect(database: str = ":memory:", **kwargs: Any) -> DuckDBPyConnection:
@@ -81,6 +84,7 @@ def kql(
     con: DuckDBPyConnection,
     query: str,
     parameters: Parameters | None = None,
+    database: str | None = None,
 ) -> DuckDBPyRelation:
     """Execute the KQL *query* against a DuckDB connection, returning a relation.
 
@@ -106,7 +110,7 @@ def kql(
             {"state": user_input},   # safe whatever user_input contains
         )
     """
-    translated, bound = _prepare(con, query, parameters)
+    translated, bound = _prepare(con, query, parameters, database)
     return con.sql(translated, params=bound) if bound else con.sql(translated)
 
 
@@ -114,25 +118,33 @@ def execute(
     con: DuckDBPyConnection,
     query: str,
     parameters: Parameters | None = None,
+    database: str | None = None,
 ) -> DuckDBPyConnection:
     """Execute the KQL *query* and return the connection, mirroring ``con.execute``.
 
     Use this for its side effect or its cursor; use :func:`kql` when you want a
     relation to keep composing.
     """
-    translated, bound = _prepare(con, query, parameters)
+    translated, bound = _prepare(con, query, parameters, database)
     return con.execute(translated, bound) if bound else con.execute(translated)
 
 
 def _prepare(
-    con: DuckDBPyConnection, query: str, parameters: Parameters | None
+    con: DuckDBPyConnection,
+    query: str,
+    parameters: Parameters | None,
+    database: str | None = None,
 ) -> tuple[str, Parameters]:
     """Translate the KQL *query* and get *con* into the state the SQL assumes."""
     from . import to_sql
     from .errors import KqlSchemaError
 
     con.execute("SET TimeZone='UTC'")
-    translated: TranslationResult = to_sql(query, schema=schema(con), parameters=parameters)
+    if database is not None:
+        _check_database(con, database)
+    translated: TranslationResult = to_sql(
+        query, schema=schema(con), parameters=parameters, database=database
+    )
 
     if translated.unbound:
         # DuckDB would raise too, but naming a generated slot rather than the
@@ -144,22 +156,58 @@ def _prepare(
     return str(translated), translated.parameters
 
 
+def databases(con: DuckDBPyConnection) -> list[str]:
+    """Every database reachable on *con*, in name order.
+
+    These are the names ``database=`` and ``database("X").T`` accept: an
+    attached DuckDB file is a Kusto database here.
+    """
+    try:
+        rows = con.execute(
+            "SELECT database_name FROM duckdb_databases() "
+            "WHERE NOT internal ORDER BY database_name"
+        ).fetchall()
+    except Exception:  # noqa: BLE001 - report it as "none reachable", not a crash
+        return []
+    return [str(row[0]) for row in rows]
+
+
+def _check_database(con: DuckDBPyConnection, database: str) -> None:
+    """Fail with a KQL error naming the database, not a raw catalog error.
+
+    Without this, `database="typo"` surfaces as DuckDB's ``Catalog Error: Table
+    with name "typo.T" does not exist because schema "typo" does not exist`` —
+    which blames the table for a mistake in the database name, and only when the
+    query happens to reference a table at all.
+    """
+    from .errors import KqlSchemaError
+
+    known = databases(con)
+    if database not in known:
+        raise KqlSchemaError(
+            database,
+            hint=f"database not attached to this connection; reachable: {known}",
+        )
+
+
 def df(
     con: DuckDBPyConnection,
     query: str,
     parameters: Parameters | None = None,
+    database: str | None = None,
 ) -> pd.DataFrame:
     """Execute the KQL *query* and return a pandas DataFrame."""
-    return kql(con, query, parameters).df()
+    return kql(con, query, parameters, database).df()
 
 
 def arrow(
     con: DuckDBPyConnection,
     query: str,
     parameters: Parameters | None = None,
+    database: str | None = None,
 ) -> pa.Table:
     """Execute the KQL *query* and return a pyarrow Table."""
-    return kql(con, query, parameters).arrow()
+    return kql(con, query, parameters, database).arrow()
 
 
 def schema(con: DuckDBPyConnection) -> Schema:

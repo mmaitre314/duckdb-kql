@@ -520,7 +520,11 @@ class _Handler(BaseHTTPRequestHandler):
         parameters = properties.get("Parameters") if isinstance(properties, dict) else None
 
         try:
-            result = self.kusto.run(csl, parameters if isinstance(parameters, dict) else None)
+            result = self.kusto.run(
+                csl,
+                parameters if isinstance(parameters, dict) else None,
+                database if isinstance(database, str) and database else None,
+            )
         except KqlError as exc:
             # A statement about the query, which is what the client should show.
             self._send(400, error_response(str(exc), code="General_BadRequest"))
@@ -605,16 +609,35 @@ class KustoRestServer(ThreadingHTTPServer):
         # the Azure Data Explorer UI uses it as the initial database name.
         return name in self.databases() or name == "default"
 
-    def run(self, csl: str, parameters: dict[str, Any] | None = None) -> Result:
+    def run(
+        self,
+        csl: str,
+        parameters: dict[str, Any] | None = None,
+        database: str | None = None,
+    ) -> Result:
         """Translate and execute *csl*, described the way Kusto describes it.
+
+        *database* is the one the client selected, and it is honoured rather
+        than merely validated. Before this the request's `db` was checked
+        against `serves()` and then dropped, so a client that picked `sales`
+        from `.show databases` and ran `T | count` was answered from whichever
+        database this process started in — the wrong table, with no error.
+
+        It is applied by qualifying names during translation, not by `USE`:
+        this connection is shared by every request thread, and switching it
+        would race (docs/session-state-proposal.md).
 
         Serialized: a DuckDB connection is not safe to use from several threads
         at once, and ThreadingHTTPServer will happily try.
         """
         from .engine import kql  # noqa: PLC0415
 
+        # `default` is the placeholder name the ADX UI shows before a database
+        # has been chosen; it is not a database this process can qualify with.
+        target = database if database and database != "default" else None
+
         with self._lock:
-            rel = kql(self._con, csl, parameters or None)
+            rel = kql(self._con, csl, parameters or None, target)
             names = list(rel.columns)
             kinds = [kusto_type(t) for t in rel.types]
             rows = rel.fetchall()
