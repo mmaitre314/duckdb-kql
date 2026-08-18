@@ -147,6 +147,7 @@ def to_sql(
     schema: Schema | None = None,
     parameters: Parameters | None = None,
     database: str | None = None,
+    allow_write: bool = True,
 ) -> TranslationResult:
     """Translate *kql* to DuckDB SQL. Requires no connection and no database.
 
@@ -188,10 +189,24 @@ def to_sql(
     from . import ir
     from .control import COLUMNS, is_control_command, split_command
     from .control import translate_control_command as _command_sql
+    from .ingest import is_ingestion_command, parse_ingestion, render_ingestion
     from .lower import lower, qualify
     from .params import bind
     from .translate import TranslationResult as _Result
     from .translate import to_sql as _emit
+
+    if is_ingestion_command(kql):
+        # Ingestion is a control command that *writes*. It is handled before the
+        # read-only command table because its source is a whole KQL query, which
+        # only this function knows how to translate.
+        if not allow_write:
+            raise KqlUnsupportedError(
+                f"ingestion command {kql.strip().split()[0]}",
+                hint="writes are disabled here; see allow_write",
+            )
+        ingestion = parse_ingestion(kql)
+        rows_sql = _emit(qualify(lower(ingestion.source), database), schema)
+        return _Result(render_ingestion(ingestion, str(rows_sql), database))
 
     if is_control_command(kql):
         # A different dialect (see duckdb_kql.control), and one that composes

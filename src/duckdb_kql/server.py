@@ -44,7 +44,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
 from . import __version__
 from .control import SCHEMA, CommandColumn, is_control_command, split_command
-from .errors import KqlError
+from .errors import KqlError, KqlUnsupportedError
 from .types import kusto_type, rest_datatype
 
 if TYPE_CHECKING:
@@ -525,6 +525,15 @@ class _Handler(BaseHTTPRequestHandler):
                 parameters if isinstance(parameters, dict) else None,
                 database if isinstance(database, str) and database else None,
             )
+        except KqlUnsupportedError as exc:
+            # A refused write is a policy answer, not a bad query: say so with
+            # 403 so the operator can tell "I did not enable this" apart from
+            # "that is not valid KQL".
+            self._send(
+                403 if "writes are disabled" in str(exc) else 400,
+                error_response(str(exc), code="Forbidden"),
+            )
+            return
         except KqlError as exc:
             # A statement about the query, which is what the client should show.
             self._send(400, error_response(str(exc), code="General_BadRequest"))
@@ -555,6 +564,7 @@ class KustoRestServer(ThreadingHTTPServer):
         allowed_origins: tuple[str, ...] = ADX_ORIGINS,
         source: str = ":memory:",
         quiet: bool = False,
+        allow_write: bool = False,
     ) -> None:
         super().__init__((host, port), _Handler)
         self._con = con
@@ -573,6 +583,17 @@ class KustoRestServer(ThreadingHTTPServer):
             raise ValueError("the connection reports no current database")
         self.database = str(current[0])
         self.quiet = quiet
+        #: Whether a request may run an ingestion command.
+        #:
+        #: **Off by default, unlike the DuckDB CLI**, and the reason is the
+        #: threat model rather than taste: this process answers *unauthenticated*
+        #: requests from anything that can reach loopback, including any page
+        #: the browser happens to be showing. A default that let one of those
+        #: run `.set-or-replace` against the operator's data file would be a
+        #: bad trade for a convenience. `duckdb_kql.kql()` defaults the other
+        #: way, because there the caller wrote the query and owns the
+        #: connection — the trust boundary is the socket, not the library.
+        self.allow_write = allow_write
         self._lock = threading.Lock()
 
     @property
@@ -637,7 +658,7 @@ class KustoRestServer(ThreadingHTTPServer):
         target = database if database and database != "default" else None
 
         with self._lock:
-            rel = kql(self._con, csl, parameters or None, target)
+            rel = kql(self._con, csl, parameters or None, target, self.allow_write)
             names = list(rel.columns)
             kinds = [kusto_type(t) for t in rel.types]
             rows = rel.fetchall()
@@ -744,6 +765,7 @@ def build_server(
     allowed_origins: tuple[str, ...] = ADX_ORIGINS,
     init: str | Path | None = None,
     quiet: bool = False,
+    allow_write: bool = False,
 ) -> KustoRestServer:
     """A server ready to `serve_forever()`, with its own DuckDB connection.
 
@@ -763,6 +785,7 @@ def build_server(
         allowed_origins=allowed_origins,
         source=database,
         quiet=quiet,
+        allow_write=allow_write,
     )
 
 
@@ -772,10 +795,15 @@ def serve(
     port: int = DEFAULT_PORT,
     allowed_origins: tuple[str, ...] = ADX_ORIGINS,
     init: str | Path | None = None,
+    allow_write: bool = False,
 ) -> None:
     """Run until interrupted. This is what the CLI's ``serve`` calls."""
     server = build_server(
-        database, port=port, allowed_origins=allowed_origins, init=init
+        database,
+        port=port,
+        allowed_origins=allowed_origins,
+        init=init,
+        allow_write=allow_write,
     )
     print(f"duckdb-kql serving {database} as database {server.database!r}")
     if init is not None:

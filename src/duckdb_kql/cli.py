@@ -140,7 +140,13 @@ def _serve_command(args: argparse.Namespace) -> int:
 
     origins = tuple(args.allow_origin) if args.allow_origin else ADX_ORIGINS
     try:
-        serve(args.database, port=args.port, allowed_origins=origins, init=args.init)
+        serve(
+            args.database,
+            port=args.port,
+            allowed_origins=origins,
+            init=args.init,
+            allow_write=args.allow_write,
+        )
     except ImportError as exc:  # pragma: no cover - depends on the install
         # `engine._require_duckdb` already names the extra to install; repeating
         # it here would print the same instruction twice.
@@ -453,6 +459,16 @@ def _parser() -> argparse.ArgumentParser:
         default=DEFAULT_PORT,
         metavar="PORT",
         help=f"TCP port to listen on (default: {DEFAULT_PORT})",
+    )
+    serve.add_argument(
+        "--allow-write",
+        action="store_true",
+        help=(
+            "allow ingestion commands (.set, .append, .set-or-append, "
+            ".set-or-replace) to modify the database. Off by default: this "
+            "server answers unauthenticated requests from anything that can "
+            "reach loopback, so writes are opt-in rather than opt-out."
+        ),
     )
     serve.add_argument(
         "--allow-origin",

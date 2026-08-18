@@ -87,6 +87,7 @@ duckdb-kql serve [DATABASE] [--init SCRIPT] [-p PORT] [--allow-origin ORIGIN]
 | | |
 |---|---|
 | `DATABASE` | DuckDB database file to serve. Omit for an empty in-memory one. |
+| `--allow-write` | Permit ingestion commands to modify the database. **Off by default.** |
 | `--init` | A `.sql` script to run before serving. See below. |
 | `-p, --port` | TCP port (default `31415`). |
 | `--allow-origin` | Allow a browser origin. Repeatable; replaces the default list. |
@@ -101,6 +102,40 @@ package — create a view first:
 ```sql
 CREATE VIEW Logs AS SELECT * FROM 'logs/*.parquet';
 ```
+
+## Loading data
+
+`.set`, `.append`, `.set-or-append` and `.set-or-replace` load rows into a
+table, which is how small sample data gets in without leaving KQL:
+
+```kql
+.set-or-replace Events <| datatable(Timestamp:datetime, Level:string, Count:long)
+[
+    datetime(2024-01-01T00:00:00Z), "Error", 3,
+    datetime(2024-01-01T01:00:00Z), "Warn",  7,
+]
+```
+
+The source after `<|` is a whole KQL query, so a table can also be built from
+another one: `.set-or-replace Recent <| Events | where Timestamp > ago(1d)`.
+
+**Writes are off by default here**, and `--allow-write` turns them on. That
+differs from the DuckDB CLI, deliberately: this process answers *unauthenticated*
+requests from anything that can reach loopback — including whatever page the
+browser is showing — so a default that let one of them run `.set-or-replace`
+against a data file would be a poor trade. A refused write answers **403**, not
+400, so "I did not enable this" is distinguishable from "that is not valid KQL".
+`duckdb_kql.kql()` defaults the other way, because there the caller wrote the
+query and owns the connection: the trust boundary is the socket, not the library.
+
+What the commands do when the table is missing or present is measured against
+the emulator, including the part that is easy to get wrong — **`.set-or-replace`
+replaces the rows and keeps the table's schema**, so a source whose columns
+differ is refused rather than silently redefining the table.
+
+Not supported: `async` (its result is an operation id to poll, and there is no
+queue here) and `with (...)` properties (`extend_schema` and `recreate_schema`
+would change the result, so the clause is refused rather than ignored).
 
 ## Several databases at once
 

@@ -85,6 +85,7 @@ def kql(
     query: str,
     parameters: Parameters | None = None,
     database: str | None = None,
+    allow_write: bool = True,
 ) -> DuckDBPyRelation:
     """Execute the KQL *query* against a DuckDB connection, returning a relation.
 
@@ -110,7 +111,7 @@ def kql(
             {"state": user_input},   # safe whatever user_input contains
         )
     """
-    translated, bound = _prepare(con, query, parameters, database)
+    translated, bound = _prepare(con, query, parameters, database, allow_write)
     return con.sql(translated, params=bound) if bound else con.sql(translated)
 
 
@@ -119,13 +120,14 @@ def execute(
     query: str,
     parameters: Parameters | None = None,
     database: str | None = None,
+    allow_write: bool = True,
 ) -> DuckDBPyConnection:
     """Execute the KQL *query* and return the connection, mirroring ``con.execute``.
 
     Use this for its side effect or its cursor; use :func:`kql` when you want a
     relation to keep composing.
     """
-    translated, bound = _prepare(con, query, parameters, database)
+    translated, bound = _prepare(con, query, parameters, database, allow_write)
     return con.execute(translated, bound) if bound else con.execute(translated)
 
 
@@ -134,6 +136,7 @@ def _prepare(
     query: str,
     parameters: Parameters | None,
     database: str | None = None,
+    allow_write: bool = True,
 ) -> tuple[str, Parameters]:
     """Translate the KQL *query* and get *con* into the state the SQL assumes."""
     from . import to_sql
@@ -143,7 +146,11 @@ def _prepare(
     if database is not None:
         _check_database(con, database)
     translated: TranslationResult = to_sql(
-        query, schema=schema(con), parameters=parameters, database=database
+        query,
+        schema=schema(con),
+        parameters=parameters,
+        database=database,
+        allow_write=allow_write,
     )
 
     if translated.unbound:
@@ -195,9 +202,10 @@ def df(
     query: str,
     parameters: Parameters | None = None,
     database: str | None = None,
+    allow_write: bool = True,
 ) -> pd.DataFrame:
     """Execute the KQL *query* and return a pandas DataFrame."""
-    return kql(con, query, parameters, database).df()
+    return kql(con, query, parameters, database, allow_write).df()
 
 
 def arrow(
@@ -205,9 +213,10 @@ def arrow(
     query: str,
     parameters: Parameters | None = None,
     database: str | None = None,
+    allow_write: bool = True,
 ) -> pa.Table:
     """Execute the KQL *query* and return a pyarrow Table."""
-    return kql(con, query, parameters, database).arrow()
+    return kql(con, query, parameters, database, allow_write).arrow()
 
 
 def schema(con: DuckDBPyConnection) -> Schema:
