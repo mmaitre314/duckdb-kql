@@ -20,11 +20,13 @@ There is a better mechanism for each half, and it happens to be simpler:
 | Goal | Proposed here | Instead of |
 |---|---|---|
 | Target a database | **Qualify names at translate time** (`"sales"."T"`) | `USE sales` … `USE prev` |
-| KQL's UTC semantics | **Emit session-independent SQL** | `SET TimeZone` … restore |
+| KQL's UTC semantics | **Emit session-independent SQL** (partial — see §5.4) | `SET TimeZone` … restore |
 | Ingest via `.set-or-replace` | Fully-qualified DDL | any session switching |
 
 Both replace mutable session state with something the generated SQL carries on
-its own. That is what makes `connect()` droppable — not the restore step.
+its own. Note that B turns out **not** to retire `connect()` by itself: a
+caller's own `TIMESTAMPTZ` column still reads the session zone, and that needs
+column *types* at render time, which the translator does not have (§5.4).
 
 ---
 
@@ -146,61 +148,142 @@ user who picks `sales` from the database list and runs `T | count` is answered
 from whichever database the server happened to start in. With Proposal A the
 server passes `database=` through and the request means what it says.
 
-## 5. Proposal B — make the SQL session-independent, then retire `connect()`
+## 5. Proposal B — make the SQL session-independent
 
-The timezone half is better than the database half, because the dependence can
-be removed rather than managed.
+> **Corrected after measurement.** An earlier draft of this section claimed B
+> retires `connect()`. It does not, on its own. The reason is in §5.4, and it is
+> the most important paragraph here.
 
-**How bad it is today.** Six of fourteen probe queries change answer between
-`UTC` and `America/Los_Angeles`:
+### 5.1 Why the dependence exists
 
-```
-todatetime("2024-01-01 12:00:00")   UTC=12:00   LA=20:00
-datetime(2024-01-01 12:00:00)       UTC=12:00   LA=20:00
-bin(datetime(...), 1h)              UTC=12:00   LA=20:00
-datetime_part("hour", ...)          UTC=12      LA=20
-tostring(datetime(...))             UTC=...T12  LA=...T20
-datetime(2024-01-01) + 1d           UTC=00:00   LA=08:00
-```
+KQL has one datetime type and it is an **absolute instant, always UTC**. DuckDB
+has two:
 
-**All six share one root.** Every one flows through `_TODATETIME`
-(`functions.py:91`) and its `TRY_CAST({0} AS TIMESTAMPTZ)`, which interprets
-offset-less text in the *session* zone. `now()` is already
-session-independent, so this really is the single site.
+| DuckDB type | Holds | Session zone affects |
+|---|---|---|
+| `TIMESTAMP` | a naive wall-clock reading | nothing |
+| `TIMESTAMPTZ` | an absolute instant | how it is *rendered*, *extracted*, and compared against a naive value |
 
-**A session-independent form exists**, and returns identical results under
-`UTC`, `America/Los_Angeles` and `Asia/Kolkata`:
+The KQL datetime maps onto naive `TIMESTAMP` holding **UTC wall time**, and the
+pipeline already lands there — `AT TIME ZONE 'UTC'` converts `TIMESTAMPTZ` to
+`TIMESTAMP`, so `todatetime(...)` returns a naive value today. The output type
+is not the problem.
+
+The problem is the **middle step**. `_TODATETIME` (`functions.py:91`) is:
 
 ```sql
-CASE WHEN regexp_matches({0}, '(Z|[+-][0-9]{2}:?[0-9]{2})$')
-     THEN CAST({0} AS TIMESTAMPTZ) AT TIME ZONE 'UTC'   -- offset is explicit
-     ELSE TRY_CAST({0} AS TIMESTAMP)                    -- naive text is UTC
-END
+COALESCE(TRY_CAST({0} AS TIMESTAMPTZ) AT TIME ZONE 'UTC', try_strptime({0}, [...]))
 ```
 
-with the correct values in both branches (`12:00` stays `12:00`;
-`13:45:56+02:00` becomes `11:45:56`).
+For text with no offset, `CAST('2024-01-01 12:00:00' AS TIMESTAMPTZ)` has to
+answer *"12:00 in which zone?"* — and it answers **the session zone**. The
+following `AT TIME ZONE 'UTC'` then faithfully converts that instant to UTC wall
+time, giving `20:00` when the session said Los Angeles. The round trip is
 
-**Then `SET TimeZone='UTC'` becomes unnecessary**, and with it:
+```
+naive text --(session zone)--> instant --(UTC)--> naive UTC
+```
 
-- `_prepare()` stops mutating the caller's connection at all;
-- `connect()` loses its only reason to exist and can be deprecated honestly —
-  not "we now restore it for you", but "the SQL no longer cares";
-- `to_sql()` output becomes correct standalone, which today it is not. The CLI
-  currently has to emit a `SET TimeZone='UTC'` header into generated `.sql`
-  files and document that callers must keep it. That header could go.
+and the session zone cancels out **only when it is already UTC**. That is the
+entire dependence: a detour through an instant that never needed to happen.
 
-The last point is the strongest argument for doing B at all: build-time
-translation currently ships a caveat, and this removes it.
+### 5.2 The fix: don't take the detour
 
-**Risks.** This is the highest-traffic mapping in the project — the datetime
-corpus is large — so it must be driven by the emulator, not by unit tests:
-freeze the current expectations, change the mapping, and require zero corpus
-movement. The `try_strptime` fallback list must keep its ordering (the
-TIMESTAMPTZ branch is deliberately first today). Expect the output *type* to
-need checking: `TRY_CAST(... AS TIMESTAMP)` and `... AT TIME ZONE 'UTC'` should
-both be naive `TIMESTAMP`, but `getschema` asserts type names, so that is a real
-test and not a formality.
+Text that already carries an offset does not need the session — the offset
+determines the instant. Text without one is UTC by definition in KQL, so a plain
+naive cast is exactly right:
+
+```sql
+COALESCE(
+  CASE WHEN regexp_matches({0}, '<offset>')
+       THEN TRY_CAST({0} AS TIMESTAMPTZ) AT TIME ZONE 'UTC'   -- offset decides
+       ELSE TRY_CAST({0} AS TIMESTAMP)                        -- naive text is UTC
+  END,
+  try_strptime({0}, [...]))                                   -- unchanged
+)
+```
+
+Measured, per input, `TRY_CAST(... AS TIMESTAMPTZ) AT TIME ZONE 'UTC'` versus
+`TRY_CAST(... AS TIMESTAMP)`:
+
+| input | UTC session | LA session | naive cast |
+|---|---|---|---|
+| `2024-01-01 12:00:00` | 12:00 | **20:00** | 12:00 |
+| `2024-01-01` | 00:00 | **08:00** | 00:00 |
+| `2024-01-01T12:00:00Z` | 12:00 | 12:00 | 12:00 |
+| `2024-01-01T13:45:56+02:00` | 11:45:56 | 11:45:56 | **13:45:56** (wrong) |
+
+The two columns that matter: for offset-less text the naive cast equals the
+UTC-session answer, and for offset-bearing text it is wrong — which is precisely
+why the branch exists rather than a blanket replacement.
+
+### 5.3 The detector, derived rather than guessed
+
+A first attempt at the regex was wrong in a way worth recording: `[+-][0-9]{2}$`
+as an alternative matches the tail of **`2024-01-01`**, so a date-only string was
+read as offset-bearing.
+
+The detector was then derived against DuckDB itself, using "the `TIMESTAMPTZ`
+cast is *not* session-dependent" as ground truth for "carries an offset", over 22
+spellings including `Z`, `+02:00`, `+0200`, bare `+02`, `+05:30`, `-00:30`,
+date-only, and 7-digit fractional seconds:
+
+```
+[0-9]{2}:[0-9]{2}(:[0-9]{2}(\.[0-9]+)?)?(Z|z|[+-][0-9]{2}(:?[0-9]{2})?)$
+```
+
+Anchoring the offset to a preceding **time** is what keeps `2024-01-01` out.
+**0 disagreements** across the 22 spellings.
+
+**Equivalence check.** 27 inputs (including every `try_strptime` format, junk,
+empty string, `0001-01-01`, `9999-12-31`) across 5 zones — UTC, Los Angeles,
+Kolkata, Chatham (a 45-minute offset), Etc/GMT+12 — is 135 comparisons. The
+candidate equals *today's answer under a UTC session* in **all 135**. So this is
+not a semantic change; it makes the already-correct answer independent of
+configuration.
+
+### 5.4 Why this does **not** retire `connect()` on its own
+
+`SET TimeZone='UTC'` in `_prepare()` is doing a second job I had missed: it also
+pins how a **caller's own `TIMESTAMPTZ` column** behaves. Running the translated
+SQL without it, against a table whose column is `TIMESTAMPTZ`:
+
+| construct | UTC | Asia/Kolkata | |
+|---|---|---|---|
+| `Aware \| project t` | 12:00+00:00 | 17:30+05:30 | diverges |
+| `datetime_part('hour', t)` | 12 | 17 | diverges |
+| `tostring(t)` | 12:00+00 | 17:30+05:30 | diverges |
+| `Aware \| where t == datetime(2024-01-01 12:00:00) \| count` | **1** | **0** | diverges |
+| naive `TIMESTAMP` column | 12:00 | 12:00 | same |
+
+The last row is the good news and the fourth is the bad news: a filter returned
+**one row under UTC and none under Kolkata**, because comparing a naive literal
+against an aware column makes DuckDB convert the naive side using the session
+zone. Rows silently disappear.
+
+§5.2 cannot fix this, because it is about the *caller's column type*, not our
+generated text. Fixing it means knowing column types at render time — and
+`render_expr()` is a pure function of the IR with no schema in scope. That is the
+same architectural limit that blocks the outer-join null-string residue in R14.
+`schema()` could carry types cheaply (it already reads
+`information_schema.columns`); **threading them into expression rendering is the
+real work**, and it is a much larger change than B.
+
+### 5.5 What B is still worth
+
+Even without retiring `connect()`:
+
+- **`to_sql()` becomes correct standalone** for KQL-authored datetimes. Today the
+  CLI must emit a `SET TimeZone='UTC'` header into generated `.sql` and document
+  that callers keep it; after B that header is no longer load-bearing for
+  literals and `todatetime()`.
+- **Defence in depth**: `kql()` stops depending on a `SET` having succeeded.
+- It is a prerequisite for ever retiring `connect()`, not a substitute for it.
+
+**Risks.** This is the highest-traffic mapping in the project, so it must be
+driven by the emulator: freeze expectations, change the mapping, require zero
+corpus movement. Keep the `try_strptime` fallback ordering. Check the output type
+with `getschema`, which asserts type names.
 
 ## 6. Proposal C — `.set-or-replace` needs neither
 
@@ -237,10 +320,13 @@ Two things to decide, both of which want the emulator first:
    error.
 2. **Proposal A** (`database=` by qualification) — small, reuses `TableRef`,
    fixes a live server bug. Good first step.
-3. **Proposal B** (session-independent datetimes) — larger and needs the oracle,
-   but retires `connect()`, removes the CLI's `SET TimeZone` caveat, and deletes
-   a whole class of "works on my machine, wrong in CI" bugs. Do it second, on
-   its own, with frozen expectations.
+3. **Proposal B** (session-independent datetimes) — worth doing for `to_sql()`
+   correctness and as defence in depth, but it does **not** retire `connect()`:
+   keep `SET TimeZone='UTC'` in `_prepare()`, now justified by caller-owned
+   `TIMESTAMPTZ` columns rather than by our own casts. Do it second, on its own,
+   with frozen expectations.
+   Retiring `connect()` is a separate, larger project: type-aware schema threaded
+   into expression rendering. Worth scoping only if someone wants it.
 4. **Proposal C** (`.set-or-replace`) — after A and B, with measured schemas and
    a default-off write policy in `serve`.
 
