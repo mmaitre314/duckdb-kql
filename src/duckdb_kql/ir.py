@@ -304,7 +304,16 @@ class Count(Operator):
 
 @dataclass(frozen=True)
 class Distinct(Operator):
-    columns: tuple[str, ...]
+    """``distinct a, b`` — and, measured, ``distinct B2 = tostring(B)``.
+
+    Expressions, not just column names. The documented syntax is a column list,
+    but the emulator accepts a named or bare expression and names the output by
+    `summarize`'s rule: `tostring(B)` becomes `B`, `strcat(B,'!')` becomes
+    `Column1`. Modelling this as a list of strings dropped the alias and turned
+    the function's *name* into a column.
+    """
+
+    expressions: tuple[NamedExpr, ...]
 
 
 @dataclass(frozen=True)

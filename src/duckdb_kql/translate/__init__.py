@@ -542,8 +542,13 @@ def render_operator(op: ir.Operator, prev: str, cols: list[str] | None = None) -
         return f"SELECT count(*) AS {quote_ident(op.name)} FROM {prev}"
 
     if isinstance(op, ir.Distinct):
-        distinct_cols = ", ".join(quote_ident(c) for c in op.columns)
-        return f"SELECT DISTINCT {distinct_cols} FROM {prev}"
+        targets = ", ".join(
+            f"{render_expr(e.expr)} AS {quote_ident(name)}"
+            for e, name in zip(
+                op.expressions, target_names(op.expressions), strict=True
+            )
+        )
+        return f"SELECT DISTINCT {targets} FROM {prev}"
 
     if isinstance(op, ir.ProjectAway):
         excluded = ", ".join(quote_ident(c) for c in op.columns)
@@ -727,17 +732,43 @@ def _source_cols(query: ir.Query, schema: Schema | None) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
+#: Functions that pass their first argument's column name through to the output
+#: name of a `summarize` key or a `distinct` target. Measured one by one on the
+#: emulator, because it is an **allow-list and not a rule**: `tostring(B)` is
+#: named `B` but `tolower(B)` is `Column1`; `startofday(T)` is `T` but
+#: `startofweek(T)` is `Column1`; `log2` and `exp2` pass through, `pow` and
+#: `exp10` do not. Anything absent falls back to the positional name, which is
+#: also what an unrecognised function should do.
+_NAME_PRESERVING = frozenset({
+    # conversions
+    "tostring", "toint", "tolong", "todouble", "toreal", "tobool", "todatetime",
+    "totimespan", "toguid", "todecimal", "tohex",
+    # bucketing and rounding
+    "bin", "bin_at", "floor", "ceiling", "round", "startofday",
+    # numeric
+    "abs", "sqrt", "log", "log10", "log2", "exp", "exp2",
+})
+
+
 def _argument_name(expr: ir.Expr) -> str | None:
     """The column name an expression contributes to an auto-generated name.
 
-    A bare column gives its own name; a single-argument function of a column
-    gives the *inner* column's name (``bin(t,1d)`` keys are named ``t``,
-    ``tostring(x)`` keys are named ``x``). Anything else contributes nothing.
+    A bare column gives its own name. A call listed in `_NAME_PRESERVING` gives
+    its first argument's name, and nests — `tostring(toint(C))` is `C`, and so
+    is `bin(tolong(C), 2)`. A call outside the list contributes nothing *and
+    breaks the chain*: `abs(-C)` and `tolower(tostring(B))` are both `Column1`.
+
+    This used to treat **any** single-argument call as name-preserving, which
+    named `summarize ... by tolower(x)` after `x` where Kusto names it
+    `Column1` — a wrong column name, silently, on one of the most-used
+    operators.
     """
     if isinstance(expr, ir.ColumnRef):
         return expr.name
     if isinstance(expr, ir.FunctionCall) and expr.args:
-        return _argument_name(expr.args[0])
+        if expr.name.lower() in _NAME_PRESERVING:
+            return _argument_name(expr.args[0])
+        return None
     return None
 
 
@@ -814,11 +845,34 @@ def aggregate_name(named: ir.NamedExpr) -> str:
     return name
 
 
+def target_names(targets: Sequence[ir.NamedExpr]) -> list[str]:
+    """Output names for a ``summarize by`` key list or a ``distinct`` list.
+
+    One rule for both — measured, they agree on every function probed.
+
+    The positional fallback counts **only the targets that need one**:
+    `distinct C, tolower(B)` is `C, Column1`, not `C, Column2`. Numbering by
+    absolute position, which is what this did, shifted every fallback name
+    sitting after a resolvable one.
+    """
+    out: list[str] = []
+    unnamed = 0
+    for target in targets:
+        name = target.name or _argument_name(target.expr)
+        if name is None:
+            unnamed += 1
+            name = f"Column{unnamed}"
+        out.append(name)
+    return out
+
+
 def group_key_name(named: ir.NamedExpr, position: int) -> str:
-    """Name for one ``by`` key. Positional fallback is 1-based (``Column1``)."""
-    if named.name:
-        return named.name
-    return _argument_name(named.expr) or f"Column{position + 1}"
+    """Name for one ``by`` key, ignoring its neighbours.
+
+    Prefer :func:`target_names`, which gets the positional fallback right; this
+    remains for the single-key case, where the two agree.
+    """
+    return target_names([named])[0] if not named.name else named.name
 
 
 def _render_aggregate_call(expr: ir.FunctionCall) -> str:
@@ -964,9 +1018,10 @@ def render_summarize(op: ir.Summarize, prev: str) -> str:
 
     select: list[str] = []
     group: list[str] = []
+    key_names = target_names(op.by)
     for i, key in enumerate(op.by):
         sql = render_expr(key.expr)
-        select.append(f"{sql} AS {quote_ident(group_key_name(key, i))}")
+        select.append(f"{sql} AS {quote_ident(key_names[i])}")
         # Group by the expression itself rather than by output position: an
         # alias is not visible to GROUP BY in every context, and repeating the
         # expression is what DuckDB will fold anyway.
@@ -977,7 +1032,7 @@ def render_summarize(op: ir.Summarize, prev: str) -> str:
     # separator; DuckDB's own de-duplication would produce set_y_1.
     from ..schema import disambiguate
 
-    taken = [group_key_name(k, i) for i, k in enumerate(op.by)]
+    taken = list(target_names(op.by))
     for agg in op.aggregates:
         name = disambiguate(aggregate_name(agg), taken)
         taken.append(name)

@@ -117,7 +117,7 @@ def _source_columns(source: ir.Source, schema: Schema | None) -> list[str]:
 def _operator_columns(
     op: ir.Operator, cols: list[str], schema: Schema | None
 ) -> list[str]:
-    from .translate import aggregate_name, group_key_name, output_name
+    from .translate import aggregate_name, output_name, target_names
 
     if isinstance(op, (ir.Where, ir.Take, ir.Sort)):
         return cols
@@ -146,9 +146,9 @@ def _operator_columns(
     if isinstance(op, ir.Count):
         return [op.name]
     if isinstance(op, ir.Distinct):
-        return list(op.columns)
+        return target_names(op.expressions)
     if isinstance(op, ir.Summarize):
-        out = [group_key_name(k, i) for i, k in enumerate(op.by)]
+        out = target_names(op.by)
         for agg in op.aggregates:
             out.append(disambiguate(aggregate_name(agg), out))
         return out

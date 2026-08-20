@@ -325,8 +325,8 @@ we must never claim a specific row order absent a terminal `sort`.
 
 ---
 
-### R12 — `summarize` output column naming
-*Trap: `trap-r12-summarize-naming`*
+### R12 — `summarize` and `distinct` output column naming
+*Traps: `trap-r12-summarize-naming`, `tests/test_distinct.py`*
 
 Auto-generated names are user-visible and must match exactly: `count()` →
 `count_`, `avg(X)` → `avg_X`, etc. Group-by keys come first, in source order, then
@@ -338,6 +338,31 @@ wrapper: `round(sum(y), 2)` is `sum_y`. The rule is positional, following first
 arguments only, so `strcat('n=', tostring(count()))` is `Column1`. A column
 outside an aggregate is refused, as Kusto refuses it — *including* a `by` key,
 which plain SQL would accept.
+
+**A `by` key names itself after its inner column only for an allow-listed set of
+functions**, and `distinct` — which also takes expressions, despite a documented
+syntax of a column list — follows the same rule. This is a list, not a
+principle, and every entry was measured:
+
+| | |
+|---|---|
+| passes the name through | `tostring` `toint` `tolong` `todouble` `toreal` `tobool` `todatetime` `totimespan` `toguid` `todecimal` `tohex` `bin` `bin_at` `floor` `ceiling` `round` `startofday` `abs` `sqrt` `log` `log10` `log2` `exp` `exp2` |
+| falls back to `ColumnN` | everything else — including `tolower`, `toupper`, `isempty`, `strcat`, `sign`, `pow`, `exp10`, `startofweek`, `dayofweek` |
+
+So `tostring(B)` is `B` while `tolower(B)` is `Column1`, and `startofday(T)` is
+`T` while `startofweek(T)` is `Column1`. The pass-through nests —
+`tostring(toint(C))` is `C` — but a call outside the list **breaks the chain**:
+`abs(-C)` and `tolower(tostring(B))` are both `Column1`.
+
+The positional fallback counts **only the targets that need one**:
+`distinct C, tolower(B)` is `C, Column1`, not `C, Column2`.
+
+**Known residue.** Arithmetic gets a number one higher than expected —
+`distinct -C` and `distinct C + 0` are both `Column2` on a table of any width,
+with no second column to explain it — and `strlen(B)` is named `strlen_B`, the
+aggregate convention appearing on a scalar. Neither is reproduced; both are rare
+enough that guessing a rule from two data points would be worse than the
+positional name. See the support matrix.
 
 ### R13 — `/` on two integers is **integer** division
 

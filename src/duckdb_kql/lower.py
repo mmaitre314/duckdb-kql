@@ -18,7 +18,7 @@ from typing import Any
 from . import ir
 from ._antlr.KqlParser import KqlParser
 from .clusters import Resolved
-from .errors import KqlSchemaError, KqlUnsupportedError, SourceSpan
+from .errors import KqlError, KqlSchemaError, KqlUnsupportedError, SourceSpan
 from .params import ParameterDeclaration, normalize_type
 from .parser import parse
 
@@ -665,22 +665,56 @@ def _lower_operator(node: Any) -> ir.Operator | None:
         return ir.Sort(tuple(_lower_sort_key(k) for k in kids))
 
     if kind == "DistinctOperator":
-        distinct_on: list[str] = []
+        # Lowered as *expressions*, not names. `_find_names` was used here and
+        # violates its own contract — a function name is a `KeywordName` too —
+        # so `distinct B2 = tostring(B)` collected `tostring` as a column and
+        # threw the alias away. Measured: the emulator accepts an expression
+        # here even though the documented syntax is a column list.
         for k in kids:
             if _cls(k) == "DistinctOperatorStarTarget":
                 raise _unsupported(node, "distinct *")
-            # The column list arrives as a single wrapper node, so taking its
-            # raw text yields one bogus column literally named "State,EventType".
-            found = _find_names(k)
-            if found:
-                distinct_on.extend(found)
-            elif children := _rule_children(k):
-                distinct_on.extend(c.getText() for c in children)
-            else:
-                distinct_on.append(k.getText())
-        return ir.Distinct(tuple(distinct_on))
+        if any(_cls(k) == "RelaxedQueryOperatorParameter" for k in kids):
+            return ir.Distinct(_reparse_distinct(node, kids))
+
+        targets: list[ir.NamedExpr] = []
+        for k in kids:
+            # The targets arrive under a single wrapper node, so descend to the
+            # individual ones rather than lowering the wrapper as one
+            # expression — that yielded a column named `State,EventType`.
+            for target in _rule_children(k) or [k]:
+                targets.append(_lower_named(target))
+        if not targets:
+            raise _unsupported(node, "distinct")
+        return ir.Distinct(tuple(targets))
 
     raise _unsupported(node, kind)
+
+
+def _reparse_distinct(node: Any, kids: list[Any]) -> tuple[ir.NamedExpr, ...]:
+    """Recover ``distinct Name = f(x)``, which the vendored grammar mis-parses.
+
+    ANTLR reads `Name = f` as a query-operator *parameter* and leaves `(x)` as
+    the whole target list, so one expression arrives as two unrelated fragments.
+    It happens only for a single-argument call in the first position —
+    `Name = strcat(a, b)` and `a, Name = f(b)` both parse correctly — because
+    only then is the remainder a valid parenthesised expression.
+
+    Rebuilding the tree from those fragments is fragile, so the original source
+    for the span is read back and parsed as an expression list instead. The text
+    comes from the **input stream**, not ``getText()``: that concatenates token
+    text and would turn ``B has 'x'`` into ``Bhas'x'``, silently changing what
+    the expression means.
+    """
+    stream = kids[0].start.getInputStream()
+    text = stream.getText(kids[0].start.start, kids[-1].stop.stop)
+    try:
+        reparsed = parse(f"print {text}").tree
+    except KqlError:
+        raise _unsupported(node, "distinct") from None
+    prints = _find_all(reparsed, "PrintOperator")
+    if not prints:
+        raise _unsupported(node, "distinct")
+    return tuple(_lower_named(c) for c in _rule_children(prints[0]))
 
 
 #: Join kinds we implement, KQL spelling -> canonical (docs/TRANSLATION.md R5).
@@ -1081,7 +1115,7 @@ def _resolve_in_subqueries(query: ir.Query, tabular_names: set[str]) -> ir.Query
     for op in query.operators:
         if isinstance(op, ir.Where):
             ops.append(dataclasses.replace(op, predicate=fix(op.predicate)))
-        elif isinstance(op, (ir.Project, ir.Extend)):
+        elif isinstance(op, (ir.Project, ir.Extend, ir.Distinct)):
             ops.append(dataclasses.replace(
                 op,
                 expressions=tuple(
@@ -1347,7 +1381,7 @@ def _substitute_query(query: ir.Query, scalars: Scalars) -> ir.Query:
 def _substitute_operator(op: ir.Operator, scalars: Scalars) -> ir.Operator:
     if isinstance(op, ir.Where):
         return dataclasses.replace(op, predicate=_substitute(op.predicate, scalars))
-    if isinstance(op, (ir.Project, ir.Extend)):
+    if isinstance(op, (ir.Project, ir.Extend, ir.Distinct)):
         return dataclasses.replace(
             op, expressions=tuple(_substitute(e, scalars) for e in op.expressions)
         )
@@ -1757,7 +1791,7 @@ def _qualify_operator(
         return dataclasses.replace(
             op, predicate=_qualify_expr(op.predicate, database, scope, clusters)
         )
-    if isinstance(op, (ir.Project, ir.Extend)):
+    if isinstance(op, (ir.Project, ir.Extend, ir.Distinct)):
         return dataclasses.replace(
             op,
             expressions=tuple(

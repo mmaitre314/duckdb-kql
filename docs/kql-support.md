@@ -47,7 +47,7 @@ returns an approximate answer.
 | `summarize` | Any scalar expression over aggregates, not just a bare call — `round(sum(x), 2)`, `sum(x) / count()`, `strcat('n=', tostring(count()))`. Auto-generated names follow KQL: the name comes from the *aggregate*, so `round(sum(y), 2)` is `sum_y`, and an expression whose first argument is not an aggregate is `Column1`. Group keys come first in source order, and a null key forms its own group (R12). A column outside an aggregate is refused, as Kusto refuses it — even a `by` key. |
 | `join` | Needs the input schema to reproduce KQL's column renaming — `duckdb_kql.kql()` supplies it; `to_sql()` needs `schema=`. |
 | `mv-expand` | One column at a time. Multi-column `mv-expand` (zipped expansion) is not supported. |
-| `distinct` | Column list only. `distinct *` works but expands to every column of a wide table. |
+| `distinct` | Takes **expressions**, not just column names — `distinct B2 = tostring(B)` — despite a documented syntax of a column list. Output names follow R12's allow-list, shared with `summarize`'s `by` keys: `tostring(B)` is named `B`, `tolower(B)` is `Column1`. `distinct *` is refused; it needs the input schema to expand. **Residue:** arithmetic gets a number one higher than expected (`distinct -C` is `Column2`), and `strlen(B)` is named `strlen_B` — two data points too few to derive a rule from, so both fall back to the positional name. |
 | `count` | Output column is named `Count`. |
 | `sort` | Defaults to **descending**, the opposite of SQL. Null placement is emitted explicitly rather than left to DuckDB's default (R6). |
 | `order` | Synonym for `sort`. |
