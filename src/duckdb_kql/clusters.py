@@ -40,7 +40,15 @@ from __future__ import annotations
 
 from .errors import KqlSchemaError
 
-__all__ = ["ClusterMap", "normalize_cluster", "parse_cluster_map", "resolve"]
+__all__ = [
+    "ClusterMap",
+    "normalize_cluster",
+    "parse_cluster_map",
+    "resolve",
+    "set_clusters",
+    "get_clusters",
+    "effective_clusters",
+]
 
 #: What a caller may pass as ``clusters=``. Either form is accepted because each
 #: is the natural one somewhere: the flat form reads well in a Python fixture,
@@ -135,3 +143,61 @@ def resolve(cluster: str, database: str, clusters: Resolved | None) -> str:
             hint=f"not in the cluster map; mapped: {known}",
         )
     return target
+
+
+# ---------------------------------------------------------------------------
+# The process-wide default
+# ---------------------------------------------------------------------------
+
+#: Set by :func:`set_clusters`, consulted when a call passes no ``clusters=``.
+#:
+#: Stored **parsed**, so a malformed map fails at the call that configures it
+#: rather than at whichever query happens to run first — the stack trace then
+#: points at the fixture, which is where the mistake is.
+_DEFAULT: Resolved | None = None
+
+
+def set_clusters(clusters: ClusterMap | None) -> None:
+    """Set the mapping every later call uses when it passes no ``clusters=``.
+
+    Meant for a test fixture or an application's start-up, so a suite full of
+    `cluster(...)` queries is configured once::
+
+        duckdb_kql.set_clusters({
+            ("mycluster.eastus.kusto.windows.net", "mydb"): "database1",
+        })
+
+    ``None`` clears it, restoring the refuse-everything default.
+
+    **Process-wide, not thread-local.** That is the point — one fixture
+    configures every thread and every connection — but it does mean a suite
+    that sets it should restore it, or a later test inherits a mapping it never
+    asked for. :func:`get_clusters` exists so a fixture can save and restore.
+    """
+    global _DEFAULT
+    _DEFAULT = parse_cluster_map(clusters)
+
+
+def get_clusters() -> Resolved | None:
+    """The current default, **normalized**, or ``None`` if none is set.
+
+    A copy, so mutating the result cannot change resolution behind the back of
+    the call that set it. Normalized rather than as-written because that is what
+    actually matches — showing the input would hide the host normalization the
+    lookup depends on.
+    """
+    return None if _DEFAULT is None else dict(_DEFAULT)
+
+
+def effective_clusters(clusters: ClusterMap | None) -> Resolved | None:
+    """What a call should resolve against: its own map, or the default.
+
+    A call's ``clusters=`` **replaces** the default rather than merging with it.
+    Merging would mean a query resolved partly by an argument the caller can see
+    and partly by state set somewhere else, and the one thing a cluster mapping
+    has to be is legible: `{}` is how a call says "use no mapping at all",
+    distinct from omitting the argument.
+    """
+    if clusters is None:
+        return _DEFAULT
+    return parse_cluster_map(clusters)

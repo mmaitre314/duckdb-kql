@@ -283,3 +283,107 @@ def test_the_server_refuses_an_unmapped_cluster(serving) -> None:
     status, body = _ask(server, f"cluster('{CLUSTER}').database('mydb').table1 | count")
     assert status == 400
     assert CLUSTER in str(body)
+
+
+# ---------------------------------------------------------------------------
+# The process-wide default
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def no_global_leak():
+    """Save and restore the default, so these tests cannot infect the suite.
+
+    The hazard a process-wide setting introduces, handled where it is created.
+    """
+    from duckdb_kql.clusters import get_clusters, set_clusters
+
+    before = get_clusters()
+    yield
+    set_clusters(before)
+
+
+def test_the_default_applies_when_a_call_passes_nothing(con, no_global_leak) -> None:
+    duckdb_kql.set_clusters(MAP)
+    rows = duckdb_kql.kql(
+        con, f"cluster('{CLUSTER}').database('mydb').table1 | count"
+    ).fetchall()
+    assert rows == [(2,)]
+
+
+def test_a_call_argument_replaces_the_default(con, no_global_leak) -> None:
+    """Replaces rather than merges: one query's resolution comes from one place."""
+    duckdb_kql.set_clusters({(CLUSTER, "mydb"): "database1"})
+    rows = duckdb_kql.kql(
+        con,
+        f"cluster('{CLUSTER}').database('otherdb').table2 | count",
+        clusters={(CLUSTER, "otherdb"): "database2"},
+    ).fetchall()
+    assert rows == [(2,)]
+
+    # And the default's entry is NOT visible to that call, because it replaced it.
+    with pytest.raises(KqlSchemaError):
+        duckdb_kql.kql(
+            con,
+            f"cluster('{CLUSTER}').database('mydb').table1",
+            clusters={(CLUSTER, "otherdb"): "database2"},
+        )
+
+
+def test_an_empty_map_opts_out_of_the_default(con, no_global_leak) -> None:
+    """`{}` is how a call says "no mapping", distinct from omitting the argument."""
+    duckdb_kql.set_clusters(MAP)
+    with pytest.raises(KqlSchemaError):
+        duckdb_kql.kql(
+            con, f"cluster('{CLUSTER}').database('mydb').table1", clusters={}
+        )
+
+
+def test_setting_none_clears_it(con, no_global_leak) -> None:
+    duckdb_kql.set_clusters(MAP)
+    duckdb_kql.set_clusters(None)
+    assert duckdb_kql.get_clusters() is None
+    with pytest.raises(KqlSchemaError):
+        duckdb_kql.kql(con, f"cluster('{CLUSTER}').database('mydb').table1")
+
+
+def test_get_clusters_returns_the_normalized_form(no_global_leak) -> None:
+    """What actually matches, not what was typed — the host is normalized."""
+    duckdb_kql.set_clusters({f"HTTPS://{CLUSTER.upper()}/": {"mydb": "database1"}})
+    assert duckdb_kql.get_clusters() == {(CLUSTER, "mydb"): "database1"}
+
+
+def test_get_clusters_returns_a_copy(no_global_leak) -> None:
+    """Mutating the result must not change resolution behind the setter's back."""
+    duckdb_kql.set_clusters(MAP)
+    got = duckdb_kql.get_clusters()
+    got.clear()
+    assert duckdb_kql.get_clusters() == parse_cluster_map(MAP)
+
+
+def test_a_malformed_default_fails_at_configuration_time(no_global_leak) -> None:
+    """Not at whichever query runs first — the fixture is where the mistake is."""
+    with pytest.raises(KqlSchemaError):
+        duckdb_kql.set_clusters({"host": "should-be-a-dict"})
+
+
+def test_the_default_reaches_layer_0_and_the_server(con, no_global_leak) -> None:
+    duckdb_kql.set_clusters(MAP)
+    sql = str(duckdb_kql.to_sql(f"cluster('{CLUSTER}').database('mydb').table1"))
+    assert '"database1"."table1"' in sql
+
+    from duckdb_kql.server import KustoRestServer
+
+    server = KustoRestServer(con, port=0, quiet=True)  # no per-server map
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        status, body = _ask(
+            server, f"cluster('{CLUSTER}').database('mydb').table1 | count"
+        )
+        assert status == 200, body
+        assert body["Tables"][0]["Rows"] == [[2]]
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)

@@ -160,6 +160,10 @@ There is no cluster here, so `--cluster-map` says what stands in for it:
 duckdb-kql serve --init attach.sql --cluster-map clusters.json
 ```
 
+In-process callers can set the same mapping once with
+`duckdb_kql.set_clusters({...})` instead of passing it to every call; a server
+started without `--cluster-map` falls back to it.
+
 Without the map such a query is **refused**, not answered from whatever happens
 to be local — the point of the map is that the substitution is stated. The
 values are the names the databases are attached under, which `.show databases`

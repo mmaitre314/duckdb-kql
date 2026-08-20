@@ -144,6 +144,42 @@ duckdb_kql.kql(con, query, clusters={
 `{"cluster": {"database": "name"}}` is accepted too — it is what a JSON config
 file looks like, and `duckdb-kql serve --cluster-map` reads that shape.
 
+### `set_clusters(mapping)` · `get_clusters()`
+
+Set the mapping once instead of on every call — a test fixture or an
+application's start-up:
+
+```python
+duckdb_kql.set_clusters({
+    ("mycluster.eastus.kusto.windows.net", "mydb"): "database1",
+    ("mycluster.eastus.kusto.windows.net", "otherdb"): "database2",
+})
+```
+
+Every later call with no `clusters=` uses it. A call that *does* pass
+`clusters=` **replaces** it for that call rather than merging — merging would
+mean one query resolved partly by a visible argument and partly by state set
+elsewhere, and a cluster mapping has to be legible. `clusters={}` is how a call
+says "no mapping at all", which is distinct from omitting the argument.
+
+`set_clusters(None)` clears it. `get_clusters()` returns the current default in
+its **normalized** form — what actually matches, host normalization applied —
+as a copy, so a fixture can save and restore it:
+
+```python
+@pytest.fixture
+def clusters():
+    before = duckdb_kql.get_clusters()
+    duckdb_kql.set_clusters({...})
+    yield
+    duckdb_kql.set_clusters(before)
+```
+
+It is **process-wide, not thread-local** — that is the point, since one fixture
+should configure every thread and connection — so a suite that sets it should
+restore it, or a later test inherits a mapping it never asked for. A malformed
+mapping raises at `set_clusters()` rather than at whichever query runs first.
+
 Omitted, `cluster(...)` is **refused**: reading it as local would answer a
 question about somewhere else with data from here. Spellings are normalized —
 one entry covers `mycluster.example.net`, `https://mycluster.example.net` and a

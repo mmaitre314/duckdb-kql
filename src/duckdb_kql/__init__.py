@@ -43,7 +43,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from .clusters import ClusterMap
+from .clusters import ClusterMap, get_clusters, set_clusters
 from .errors import (
     Diagnostic,
     KqlError,
@@ -91,6 +91,9 @@ __all__ = [
     "ParameterDeclaration",
     "Diagnostic",
     "SourceSpan",
+    # cluster mapping (Layer 0 — no database needed)
+    "set_clusters",
+    "get_clusters",
     # errors (Layer 0)
     "KqlError",
     "KqlSyntaxError",
@@ -196,7 +199,7 @@ def to_sql(
     ``.unbound``, and executing is what turns them into an error.
     """
     from . import ir
-    from .clusters import parse_cluster_map
+    from .clusters import effective_clusters
     from .control import COLUMNS, is_control_command, split_command
     from .control import translate_control_command as _command_sql
     from .ingest import is_ingestion_command, parse_ingestion, render_ingestion
@@ -215,7 +218,7 @@ def to_sql(
                 hint="writes are disabled here; see allow_write",
             )
         ingestion = parse_ingestion(kql)
-        resolved = parse_cluster_map(clusters)
+        resolved = effective_clusters(clusters)
         rows_sql = _emit(
             qualify(lower(ingestion.source), database, resolved), schema
         )
@@ -238,11 +241,11 @@ def to_sql(
         tail = lower(f"__command__ {pipeline}")
         source = ir.CommandSource(head, COLUMNS[command], command)
         return _emit(
-            qualify(ir.Query(source, tail.operators), database, parse_cluster_map(clusters)),
+            qualify(ir.Query(source, tail.operators), database, effective_clusters(clusters)),
             schema,
         )
 
-    query = qualify(lower(kql), database, parse_cluster_map(clusters))
+    query = qualify(lower(kql), database, effective_clusters(clusters))
     result = _emit(query, schema)
     if query.parameters or parameters:
         bound, unbound = bind(query.parameters, parameters)
