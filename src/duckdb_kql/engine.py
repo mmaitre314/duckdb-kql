@@ -34,6 +34,7 @@ if TYPE_CHECKING:
     import pyarrow as pa
     from duckdb import DuckDBPyConnection, DuckDBPyRelation
 
+    from .clusters import ClusterMap
     from .translate import TranslationResult
 
 #: Values a caller may supply for a query's declared parameters. Deliberately
@@ -86,6 +87,7 @@ def kql(
     parameters: Parameters | None = None,
     database: str | None = None,
     allow_write: bool = True,
+    clusters: ClusterMap | None = None,
 ) -> DuckDBPyRelation:
     """Execute the KQL *query* against a DuckDB connection, returning a relation.
 
@@ -111,7 +113,7 @@ def kql(
             {"state": user_input},   # safe whatever user_input contains
         )
     """
-    translated, bound = _prepare(con, query, parameters, database, allow_write)
+    translated, bound = _prepare(con, query, parameters, database, allow_write, clusters)
     return con.sql(translated, params=bound) if bound else con.sql(translated)
 
 
@@ -121,13 +123,14 @@ def execute(
     parameters: Parameters | None = None,
     database: str | None = None,
     allow_write: bool = True,
+    clusters: ClusterMap | None = None,
 ) -> DuckDBPyConnection:
     """Execute the KQL *query* and return the connection, mirroring ``con.execute``.
 
     Use this for its side effect or its cursor; use :func:`kql` when you want a
     relation to keep composing.
     """
-    translated, bound = _prepare(con, query, parameters, database, allow_write)
+    translated, bound = _prepare(con, query, parameters, database, allow_write, clusters)
     return con.execute(translated, bound) if bound else con.execute(translated)
 
 
@@ -137,6 +140,7 @@ def _prepare(
     parameters: Parameters | None,
     database: str | None = None,
     allow_write: bool = True,
+    clusters: ClusterMap | None = None,
 ) -> tuple[str, Parameters]:
     """Translate the KQL *query* and get *con* into the state the SQL assumes."""
     from . import to_sql
@@ -151,6 +155,7 @@ def _prepare(
         parameters=parameters,
         database=database,
         allow_write=allow_write,
+        clusters=clusters,
     )
 
     if translated.unbound:
@@ -203,9 +208,10 @@ def df(
     parameters: Parameters | None = None,
     database: str | None = None,
     allow_write: bool = True,
+    clusters: ClusterMap | None = None,
 ) -> pd.DataFrame:
     """Execute the KQL *query* and return a pandas DataFrame."""
-    return kql(con, query, parameters, database, allow_write).df()
+    return kql(con, query, parameters, database, allow_write, clusters).df()
 
 
 def arrow(
@@ -214,9 +220,10 @@ def arrow(
     parameters: Parameters | None = None,
     database: str | None = None,
     allow_write: bool = True,
+    clusters: ClusterMap | None = None,
 ) -> pa.Table:
     """Execute the KQL *query* and return a pyarrow Table."""
-    return kql(con, query, parameters, database, allow_write).arrow()
+    return kql(con, query, parameters, database, allow_write, clusters).arrow()
 
 
 def schema(con: DuckDBPyConnection) -> Schema:

@@ -139,6 +139,13 @@ def _serve_command(args: argparse.Namespace) -> int:
     from .server import serve  # noqa: PLC0415
 
     origins = tuple(args.allow_origin) if args.allow_origin else ADX_ORIGINS
+    clusters = None
+    if args.cluster_map:
+        try:
+            clusters = json.loads(Path(args.cluster_map).read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            print(f"duckdb-kql serve: --cluster-map: {exc}", file=sys.stderr)
+            return EXIT_TRANSLATION_ERROR
     try:
         serve(
             args.database,
@@ -146,6 +153,7 @@ def _serve_command(args: argparse.Namespace) -> int:
             allowed_origins=origins,
             init=args.init,
             allow_write=args.allow_write,
+            clusters=clusters,
         )
     except ImportError as exc:  # pragma: no cover - depends on the install
         # `engine._require_duckdb` already names the extra to install; repeating
@@ -459,6 +467,16 @@ def _parser() -> argparse.ArgumentParser:
         default=DEFAULT_PORT,
         metavar="PORT",
         help=f"TCP port to listen on (default: {DEFAULT_PORT})",
+    )
+    serve.add_argument(
+        "--cluster-map",
+        metavar="FILE",
+        help=(
+            "JSON mapping Kusto clusters to local databases, so queries written "
+            'as cluster("c").database("d").Table resolve here: '
+            '{"c": {"d": "duckdb_database"}}. Without it such a query is '
+            "refused rather than answered from whatever is local."
+        ),
     )
     serve.add_argument(
         "--allow-write",

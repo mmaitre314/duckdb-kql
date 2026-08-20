@@ -102,7 +102,7 @@ Every syntax diagnostic, empty when the query is valid. Does not raise.
 `Diagnostic` has `.span` (a `SourceSpan` with 1-based `line`, 0-based `column`)
 and `.message`.
 
-### `to_sql(kql, schema=None, parameters=None, database=None, allow_write=True)`
+### `to_sql(kql, schema=None, parameters=None, database=None, allow_write=True, clusters=None)`
 
 `database` gives unqualified table names a database: `T` renders as
 `"sales"."T"`. It needs no connection, so Layer 0 can target a database too.
@@ -123,7 +123,7 @@ so `join` works without you supplying one.
 the zone yourself. Raises `ImportError` with an install hint if `duckdb` is not
 installed.
 
-### `kql(con, query, parameters=None, database=None, allow_write=True) -> DuckDBPyRelation`
+### `kql(con, query, parameters=None, database=None, allow_write=True, clusters=None) -> DuckDBPyRelation`
 
 Execute and return a relation, so you can keep composing with DuckDB's API.
 
@@ -131,6 +131,24 @@ Execute and return a relation, so you can keep composing with DuckDB's API.
 `.append`, `.set-or-append` and `.set-or-replace`. It defaults to allowing them
 because the caller wrote the query and owns the connection; `duckdb-kql serve`
 defaults the other way, since it answers unauthenticated requests.
+
+`clusters` says which local database stands in for each Kusto cluster, so a
+query written for a real service runs against test data unchanged:
+
+```python
+duckdb_kql.kql(con, query, clusters={
+    ("mycluster.eastus.kusto.windows.net", "mydb"): "database1",
+})
+```
+
+`{"cluster": {"database": "name"}}` is accepted too — it is what a JSON config
+file looks like, and `duckdb-kql serve --cluster-map` reads that shape.
+
+Omitted, `cluster(...)` is **refused**: reading it as local would answer a
+question about somewhere else with data from here. Spellings are normalized —
+one entry covers `mycluster.example.net`, `https://mycluster.example.net` and a
+trailing slash — but a short name is *not* expanded to a domain, because Kusto
+does not expand it either.
 
 `database` selects which attached database unqualified table names belong to.
 It is applied by **qualifying the names during translation**, not by switching

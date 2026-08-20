@@ -94,7 +94,7 @@ returns an approximate answer.
 |---|---|
 | table reference | A KQL table name is a DuckDB table, view, or registered relation. Case-**sensitive**. |
 | keyword and escaped names | Most KQL keywords are legal names (`id`, `count`, `by`, `range`), and `['...']` names anything a bare identifier cannot — including a table, which is the only way to reference one called `count`. Escaped names are unescaped once: `['my col']` is the column `my col`. |
-| `database()` | A cross-database reference, spelled `"Sales"."Orders"` in DuckDB. Attach the file first — `duckdb-kql serve --init` does it for a whole server. Joins may cross databases. `cluster(...)` is refused: there is none, and reading it as local would answer a question about somewhere else with data from here. |
+| `database()` | A cross-database reference, spelled `"Sales"."Orders"` in DuckDB. Attach the file first — `duckdb-kql serve --init` does it for a whole server. Joins may cross databases. |
 | `print` | Unnamed columns are `print_0`, `print_1`, … as in KQL. |
 | `datatable` | Values are read row-major and must divide evenly by the column count, as in KQL. |
 | `range` | The end value is **inclusive**, unlike DuckDB's `range()`. Works over datetimes with a timespan step. |
@@ -103,6 +103,7 @@ returns an approximate answer.
 
 | Source | Notes |
 |---|---|
+| `cluster()` | Needs a **mapping** saying which local database stands in for each cluster: `clusters={("c", "d"): "local"}`, or `--cluster-map` for the server. Without one it is refused, because reading it as local would answer a question about somewhere else with data from here. Cluster spellings are normalized (scheme, trailing slash, host case) since Kusto resolves the argument to `https://host/`; a short name is **not** expanded to a domain, because the engine does not expand it either. `cluster(...)` without `.database(...)` is refused, as Kusto refuses it (SEM0048). |
 | `externaldata` | Fetches a URL at query time — out of scope for an offline transpiler. Read the file with DuckDB (`read_csv`, `read_parquet`) and expose it as a view instead. |
 
 ## Statements
@@ -400,7 +401,6 @@ and shipping that would be worse than raising.
 | `series_*` functions | Time-series decomposition, anomaly detection and forecasting. Real algorithms with real parameters; an approximation would be indistinguishable from a result. |
 | `hll`, `tdigest` and their `_merge` / `dcount_hll` / `percentile_tdigest` forms | These serialise a specific sketch **format**. Producing a differently shaped blob under the same name would break anything that stores or merges them. |
 | Plugins (`evaluate` with `python`, `sql_request`, `cosmosdb_sql_request`, …) | They execute code or call out over the network. Out of scope for an offline transpiler by construction. |
-| Cross-**cluster** references (`cluster()`) | There is no cluster. Resolving one against the local database would answer a question about somewhere else with data from here. Cross-*database* references (`database()`) **are** supported — attach the other file and they resolve to a real, local table. |
 
 ## Known divergences
 

@@ -17,6 +17,7 @@ from typing import Any
 
 from . import ir
 from ._antlr.KqlParser import KqlParser
+from .clusters import Resolved
 from .errors import KqlSchemaError, KqlUnsupportedError, SourceSpan
 from .params import ParameterDeclaration, normalize_type
 from .parser import parse
@@ -498,11 +499,13 @@ def _lower_qualified_table(node: Any) -> ir.TableRef | None:
     function = name_nodes[0].getText().lower() if name_nodes else ""
 
     if function == "cluster":
-        raise _unsupported(
-            node,
-            "cluster() — there is no cluster here; attach the database locally "
-            'and reference it as database("Name").Table',
-        )
+        resolved = _lower_cluster_table(call, operations)
+        if resolved is None:
+            raise _unsupported(
+                node,
+                "cluster() — expected cluster(...).database(...).Table",
+            )
+        return resolved
     if function != "database":
         return None
 
@@ -518,6 +521,45 @@ def _lower_qualified_table(node: Any) -> ir.TableRef | None:
     if len(names) != 1:
         return None
     return ir.TableRef(names[0], database=database)
+
+
+def _lower_cluster_table(calls: list[Any], operations: list[Any]) -> ir.TableRef | None:
+    """``cluster("c").database("d").T`` -> ``TableRef("T", database="d", cluster="c")``.
+
+    The cluster is **recorded, not resolved**: whether some local database may
+    stand in for it is a question for `qualify()`, which holds the mapping.
+    Keeping the text lets the refusal quote the reference as the caller wrote it.
+
+    Kusto requires the database — ``cluster("c").T`` is a semantic error
+    (SEM0048, "database name must be explicit if the cluster value is set") — so
+    anything of another shape is not a table reference and returns ``None`` for
+    the caller to report in its own words.
+
+    Both calls sit under the path's *root* as one
+    ``DotCompositeFunctionCallExpression``; only ``.T`` is an operation.
+    """
+    if len(calls) != 2:
+        return None
+    cluster = _single_string_argument(calls[0], "cluster")
+    database = _single_string_argument(calls[1], "database")
+    if cluster is None or database is None:
+        return None
+
+    names = [n for op in operations for n in _find_names(op)]
+    if len(names) != 1:
+        return None
+    return ir.TableRef(names[0], database=database, cluster=cluster)
+
+
+def _single_string_argument(call: Any, expected: str) -> str | None:
+    """The one string argument of ``expected(...)``, or ``None`` if it is not that."""
+    names = _rule_children(call)
+    if not names or names[0].getText().lower() != expected:
+        return None
+    literals = _find_all(call, "StringLiteralExpression")
+    if len(literals) != 1:
+        return None
+    return _literal_string(literals[0])
 
 
 def _literal_string(node: Any) -> str | None:
@@ -1432,7 +1474,11 @@ def _lower_mv_expand(node: Any, kids: list[Any]) -> ir.Operator:
 # ---------------------------------------------------------------------------
 
 
-def qualify(query: ir.Query, database: str | None) -> ir.Query:
+def qualify(
+    query: ir.Query,
+    database: str | None,
+    clusters: Resolved | None = None,
+) -> ir.Query:
     """Give every unqualified table reference *database* as its database.
 
     This is how ``kql(con, q, database="sales")`` targets a database: the name
@@ -1458,48 +1504,98 @@ def qualify(query: ir.Query, database: str | None) -> ir.Query:
       not a table at all. Qualifying it would produce SQL referring to a table
       that does not exist.
     """
-    if database is None:
+    if database is None and clusters is None and not _mentions_cluster(query):
         return query
-    return _qualify_query(query, database, frozenset())
+    return _qualify_query(query, database, frozenset(), clusters)
+
+
+def _mentions_cluster(query: ir.Query) -> bool:
+    """Whether anything in *query* names a cluster.
+
+    Without this, a query containing `cluster(...)` would skip resolution
+    entirely when no `database=` was given and no map was passed — and reach the
+    emitter with an unrenderable reference. Refusing has to happen here, where
+    the reason can be stated.
+    """
+    source = query.source
+    if isinstance(source, ir.TableRef) and source.cluster is not None:
+        return True
+    for op in query.operators:
+        if isinstance(op, (ir.Join, ir.Lookup)) and _mentions_cluster(op.right):
+            return True
+    return any(
+        isinstance(bound, ir.Query) and _mentions_cluster(bound)
+        for _, bound in query.lets
+    )
 
 
 def _qualify_query(
-    query: ir.Query, database: str, bound: frozenset[str]
+    query: ir.Query,
+    database: str | None,
+    bound: frozenset[str],
+    clusters: Resolved | None,
 ) -> ir.Query:
     # A `let` may refer to an earlier one, so names accumulate in order.
     lets: list[tuple[str, ir.Query | ir.Expr]] = []
     seen = set(bound)
     for name, value in query.lets:
         if isinstance(value, ir.Query):
-            lets.append((name, _qualify_query(value, database, frozenset(seen))))
+            lets.append(
+                (name, _qualify_query(value, database, frozenset(seen), clusters))
+            )
         else:
             lets.append((name, value))
         seen.add(name)
     scope = frozenset(seen)
 
     source = query.source
-    if isinstance(source, ir.TableRef) and source.database is None:
-        if source.name not in scope:
-            source = dataclasses.replace(source, database=database)
+    if isinstance(source, ir.TableRef):
+        source = _qualify_table(source, database, scope, clusters)
 
-    operators = [_qualify_operator(op, database, scope) for op in query.operators]
+    operators = [
+        _qualify_operator(op, database, scope, clusters) for op in query.operators
+    ]
 
     out = ir.Query(source, operators, lets, list(query.parameters))
     return out
 
 
+def _qualify_table(
+    source: ir.TableRef,
+    database: str | None,
+    scope: frozenset[str],
+    clusters: Resolved | None,
+) -> ir.TableRef:
+    """Resolve a cluster reference, or apply the default database."""
+    if source.cluster is not None:
+        from .clusters import resolve  # noqa: PLC0415
+
+        target = resolve(source.cluster, source.database or "", clusters)
+        return dataclasses.replace(source, database=target, cluster=None)
+    if source.database is None and database is not None and source.name not in scope:
+        return dataclasses.replace(source, database=database)
+    return source
+
+
 def _qualify_operator(
-    op: ir.Operator, database: str, scope: frozenset[str]
+    op: ir.Operator,
+    database: str | None,
+    scope: frozenset[str],
+    clusters: Resolved | None,
 ) -> ir.Operator:
     if isinstance(op, (ir.Join, ir.Lookup)):
-        return dataclasses.replace(op, right=_qualify_query(op.right, database, scope))
+        return dataclasses.replace(
+            op, right=_qualify_query(op.right, database, scope, clusters)
+        )
     if isinstance(op, ir.Where):
-        return dataclasses.replace(op, predicate=_qualify_expr(op.predicate, database, scope))
+        return dataclasses.replace(
+            op, predicate=_qualify_expr(op.predicate, database, scope, clusters)
+        )
     if isinstance(op, (ir.Project, ir.Extend)):
         return dataclasses.replace(
             op,
             expressions=tuple(
-                dataclasses.replace(e, expr=_qualify_expr(e.expr, database, scope))
+                dataclasses.replace(e, expr=_qualify_expr(e.expr, database, scope, clusters))
                 for e in op.expressions
             ),
         )
@@ -1507,37 +1603,42 @@ def _qualify_operator(
         return dataclasses.replace(
             op,
             aggregates=tuple(
-                dataclasses.replace(a, expr=_qualify_expr(a.expr, database, scope))
+                dataclasses.replace(a, expr=_qualify_expr(a.expr, database, scope, clusters))
                 for a in op.aggregates
             ),
             by=tuple(
-                dataclasses.replace(b, expr=_qualify_expr(b.expr, database, scope))
+                dataclasses.replace(b, expr=_qualify_expr(b.expr, database, scope, clusters))
                 for b in op.by
             ),
         )
     return op
 
 
-def _qualify_expr(expr: ir.Expr, database: str, scope: frozenset[str]) -> ir.Expr:
+def _qualify_expr(
+    expr: ir.Expr,
+    database: str | None,
+    scope: frozenset[str],
+    clusters: Resolved | None,
+) -> ir.Expr:
     """Only subqueries carry table references; everything else is passed through."""
     if isinstance(expr, (ir.InList, ir.HasList)):
         if expr.subquery is not None:
             return dataclasses.replace(
-                expr, subquery=_qualify_query(expr.subquery, database, scope)
+                expr, subquery=_qualify_query(expr.subquery, database, scope, clusters)
             )
         return expr
     if isinstance(expr, ir.BinaryOp):
         return dataclasses.replace(
             expr,
-            left=_qualify_expr(expr.left, database, scope),
-            right=_qualify_expr(expr.right, database, scope),
+            left=_qualify_expr(expr.left, database, scope, clusters),
+            right=_qualify_expr(expr.right, database, scope, clusters),
         )
     if isinstance(expr, ir.UnaryOp):
         return dataclasses.replace(
-            expr, operand=_qualify_expr(expr.operand, database, scope)
+            expr, operand=_qualify_expr(expr.operand, database, scope, clusters)
         )
     if isinstance(expr, ir.FunctionCall):
         return dataclasses.replace(
-            expr, args=tuple(_qualify_expr(a, database, scope) for a in expr.args)
+            expr, args=tuple(_qualify_expr(a, database, scope, clusters) for a in expr.args)
         )
     return expr

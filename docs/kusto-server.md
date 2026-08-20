@@ -88,6 +88,7 @@ duckdb-kql serve [DATABASE] [--init SCRIPT] [-p PORT] [--allow-origin ORIGIN]
 |---|---|
 | `DATABASE` | DuckDB database file to serve. Omit for an empty in-memory one. |
 | `--allow-write` | Permit ingestion commands to modify the database. **Off by default.** |
+| `--cluster-map` | JSON mapping Kusto clusters to local databases, for queries using `cluster()`. |
 | `--init` | A `.sql` script to run before serving. See below. |
 | `-p, --port` | TCP port (default `31415`). |
 | `--allow-origin` | Allow a browser origin. Repeatable; replaces the default list. |
@@ -136,6 +137,39 @@ differ is refused rather than silently redefining the table.
 Not supported: `async` (its result is an operation id to poll, and there is no
 queue here) and `with (...)` properties (`extend_schema` and `recreate_schema`
 would change the result, so the clause is refused rather than ignored).
+
+## Queries written against a real cluster
+
+The Azure Data Explorer UI sends `cluster(...)`, and so do queries copied out of
+a production workbook:
+
+```kql
+cluster('mycluster.eastus.kusto.windows.net').database('mydb').MyTable | count
+```
+
+There is no cluster here, so `--cluster-map` says what stands in for it:
+
+```json
+{
+  "mycluster.eastus.kusto.windows.net": {"mydb": "database1", "otherdb": "database2"},
+  "othercluster.westus.kusto.windows.net": {"mydb": "database3"}
+}
+```
+
+```bash
+duckdb-kql serve --init attach.sql --cluster-map clusters.json
+```
+
+Without the map such a query is **refused**, not answered from whatever happens
+to be local — the point of the map is that the substitution is stated. The
+values are the names the databases are attached under, which `.show databases`
+lists.
+
+Cluster spellings are normalized (scheme, trailing slash, host case), so one
+entry covers every way of writing one host. A short name is not expanded to a
+domain: Kusto resolves `cluster('mycluster')` to `https://mycluster/`, a
+different host from `mycluster.eastus.kusto.windows.net`, so both need entries
+if your queries use both.
 
 ## Several databases at once
 

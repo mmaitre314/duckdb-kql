@@ -43,6 +43,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from .clusters import ClusterMap
 from .errors import (
     Diagnostic,
     KqlError,
@@ -148,6 +149,7 @@ def to_sql(
     parameters: Parameters | None = None,
     database: str | None = None,
     allow_write: bool = True,
+    clusters: ClusterMap | None = None,
 ) -> TranslationResult:
     """Translate *kql* to DuckDB SQL. Requires no connection and no database.
 
@@ -161,6 +163,13 @@ def to_sql(
         parameters: values for the query's declared parameters, by KQL name.
             They are bound as values, never spliced into the SQL, so a value may
             contain any text at all without changing what the query does.
+        clusters: what local database stands in for each Kusto cluster, as
+            ``{("cluster", "kusto_db"): "duckdb_db"}`` or the nested
+            ``{"cluster": {"kusto_db": "duckdb_db"}}``. Omitted, `cluster(...)`
+            is refused — treating it as local would answer a question about
+            production with local data. Cluster spellings are normalized, so one
+            entry covers ``mycluster.example.net``, ``https://mycluster.example.net``
+            and a trailing slash.
         database: the database unqualified table names belong to. Rendered into
             the SQL as ``"db"."T"``, so nothing about the connection is
             changed and the answer cannot drift between translating and
@@ -187,6 +196,7 @@ def to_sql(
     ``.unbound``, and executing is what turns them into an error.
     """
     from . import ir
+    from .clusters import parse_cluster_map
     from .control import COLUMNS, is_control_command, split_command
     from .control import translate_control_command as _command_sql
     from .ingest import is_ingestion_command, parse_ingestion, render_ingestion
@@ -205,7 +215,10 @@ def to_sql(
                 hint="writes are disabled here; see allow_write",
             )
         ingestion = parse_ingestion(kql)
-        rows_sql = _emit(qualify(lower(ingestion.source), database), schema)
+        resolved = parse_cluster_map(clusters)
+        rows_sql = _emit(
+            qualify(lower(ingestion.source), database, resolved), schema
+        )
         return _Result(render_ingestion(ingestion, str(rows_sql), database))
 
     if is_control_command(kql):
@@ -224,9 +237,12 @@ def to_sql(
         # `lower` wants a whole query and the pipeline alone is not one.
         tail = lower(f"__command__ {pipeline}")
         source = ir.CommandSource(head, COLUMNS[command], command)
-        return _emit(qualify(ir.Query(source, tail.operators), database), schema)
+        return _emit(
+            qualify(ir.Query(source, tail.operators), database, parse_cluster_map(clusters)),
+            schema,
+        )
 
-    query = qualify(lower(kql), database)
+    query = qualify(lower(kql), database, parse_cluster_map(clusters))
     result = _emit(query, schema)
     if query.parameters or parameters:
         bound, unbound = bind(query.parameters, parameters)

@@ -167,11 +167,17 @@ class TableRef(Source):
     #: ``None`` means the connection's current database, which is what an
     #: unqualified name means in both languages.
     database: str | None = None
+    #: The cluster a `cluster(...).database(...).Table` reference named, kept as
+    #: written. It is **not** renderable — there is no cluster here — and must be
+    #: resolved to a local database before emitting, or refused. Carried on the
+    #: node so the refusal can quote the reference the way the caller wrote it.
+    cluster: str | None = None
 
     @property
     def qualified(self) -> str:
         """``Orders`` or ``Sales.Orders`` — for messages, not for SQL."""
-        return self.name if self.database is None else f"{self.database}.{self.name}"
+        name = self.name if self.database is None else f"{self.database}.{self.name}"
+        return name if self.cluster is None else f"{self.cluster}.{name}"
 
 
 @dataclass(frozen=True)

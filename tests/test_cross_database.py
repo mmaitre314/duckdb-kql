@@ -97,11 +97,26 @@ def test_cluster_is_refused_rather_than_ignored() -> None:
     would answer a question about production with local data — a wrong answer
     that looks exactly like a right one.
     """
-    with pytest.raises(KqlUnsupportedError) as caught:
+    from duckdb_kql.errors import KqlSchemaError
+
+    with pytest.raises(KqlSchemaError) as caught:
         duckdb_kql.to_sql('cluster("prod").database("Sales").Orders | count', schema=SCHEMA)
-    assert "cluster" in str(caught.value)
-    # And it says what to do instead.
-    assert 'database("Name").Table' in str(caught.value)
+    # Names the reference as written, so the reader can see which one it means.
+    assert 'cluster("prod").database("Sales")' in str(caught.value)
+    # And says what to do instead.
+    assert "clusters=" in str(caught.value)
+
+
+def test_a_mapped_cluster_resolves_to_the_local_database() -> None:
+    """The opt-in half: a stated substitution, not a guessed one."""
+    sql = str(
+        duckdb_kql.to_sql(
+            'cluster("prod").database("Sales").Orders | count',
+            schema=SCHEMA,
+            clusters={("prod", "Sales"): "Sales"},
+        )
+    )
+    assert '"Sales"."Orders"' in sql
 
 
 def test_an_unknown_qualified_table_is_reported_with_its_database() -> None:
