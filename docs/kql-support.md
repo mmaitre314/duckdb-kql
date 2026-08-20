@@ -113,7 +113,7 @@ returns an approximate answer.
 | Statement | Limitations and gotchas |
 |---|---|
 | `let` (scalar) | Substituted into the query before translation. |
-| `let` (tabular) | Becomes a named CTE. |
+| `let` (tabular) | Becomes a named CTE. `x in (A)` resolves the name to that CTE — including inside another `let`, a join's right side, or a union branch. **Residue:** when a *column* in scope has the same name as the tabular `let`, this binds the `let` where Kusto binds the column and then rejects the query (SEM0040); telling them apart needs the input's column names, which lowering does not have. |
 | `declare query_parameters` | Bound as a **value**, never spliced into the SQL. See [Getting started](getting-started.md#query-parameters-and-user-input). |
 
 ### Not supported

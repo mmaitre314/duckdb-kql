@@ -113,3 +113,94 @@ def test_dividing_two_timespans_yields_a_number(con) -> None:
     assert _rows(con, "let dow = dayofweek(datetime(1970-5-12)); print toint(dow / 1d)") == [
         (2,)
     ]
+
+
+# --- `x in (T)` where T is a tabular let -----------------------------------
+#
+# A bare `T` inside `in (...)` parses as a column reference; only once the
+# bindings are known can it be resolved into a subquery. That resolution used
+# to run on the **top-level pipeline only**, so the identical expression one
+# line higher — inside another `let` — reached DuckDB as a column and failed
+# with "Referenced column "values" not found in FROM clause". Every case below
+# is measured against the emulator.
+
+
+def test_in_a_tabular_let_at_the_top_level(con) -> None:
+    assert _rows(con, "let v = T | project a; R | where a in (v)") == [
+        (1, "p"), (9, "q")
+    ]
+
+
+def test_in_a_tabular_let_inside_another_let(con) -> None:
+    """The reported failure: the same expression, one scope in."""
+    assert _rows(
+        con, "let v = T | project a; let n = R | where a in (v); n"
+    ) == [(1, "p"), (9, "q")]
+
+
+def test_not_in_a_tabular_let_inside_another_let(con) -> None:
+    assert _rows(
+        con,
+        "let v = T | project a | where a == 1;"
+        " let n = R | where a !in (v); n",
+    ) == [(9, "q")]
+
+
+def test_in_a_tabular_let_inside_an_extend(con) -> None:
+    assert _rows(
+        con,
+        "let v = T | project a | where a == 1;"
+        " let n = R | extend hit = a in (v) | project a, hit; n",
+    ) == [(1, True), (9, False)]
+
+
+def test_has_any_over_a_tabular_let_inside_a_let(con) -> None:
+    """`has_any` takes the same right-hand side and resolves the same way."""
+    assert _rows(
+        con,
+        "let v = T | project s | where s == 'x';"
+        " let n = R | where r has_any (v) | project r; n",
+    ) == []
+
+
+def test_lets_referring_to_each_other_through_in(con) -> None:
+    assert _rows(
+        con,
+        "let ones = T | project a | where a == 1;"
+        " let step2 = R | where a in (ones) | project a;"
+        " let step3 = R | where a in (step2) | project a; step3",
+    ) == [(1,)]
+
+
+def test_a_column_sharing_a_tabular_lets_name_is_a_known_divergence(con) -> None:
+    """We resolve the `let`; Kusto resolves the **column** and then refuses.
+
+    `in (v)` where `v` names both a tabular `let` and a column in scope is
+    rejected by the emulator with SEM0040 — "failed to cast argument 2 to
+    scalar constant" — because it binds the column and a column is not a
+    constant list. Matching that needs the input's column names at lowering
+    time, which is precisely what lowering does not have: the schema arrives
+    one stage later. Recorded rather than hidden, and it is the mild direction
+    — we accept a query Kusto rejects, not answer a valid one differently.
+    """
+    assert _rows(
+        con,
+        "let v = T | project a | where a == 1;"
+        " let n = R | project v = a | where v in (v); n",
+    ) == [(1,)]
+
+
+def test_in_a_tabular_let_inside_a_joins_right_side(con) -> None:
+    assert _rows(
+        con,
+        "let v = T | project a | where a == 1;"
+        " T | join kind=inner (R | where a in (v)) on a | project a, r",
+    ) == [(1, "p")]
+
+
+def test_in_a_tabular_let_inside_a_union_branch(con) -> None:
+    assert _rows(
+        con,
+        "let v = T | project a | where a == 1;"
+        " let n = union (R | where a in (v)), (R | where a in (v)); n",
+    ) == [(1, "p"), (1, "p")]

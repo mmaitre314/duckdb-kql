@@ -215,7 +215,7 @@ SOURCES: list[tuple[str, str, str]] = [
 
 STATEMENTS: list[tuple[str, str, str]] = [
     ("`let` (scalar)", "let x = 1; print y = x", "Substituted into the query before translation."),
-    ("`let` (tabular)", "let A = T; A | count", "Becomes a named CTE."),
+    ("`let` (tabular)", "let A = T; A | count", "Becomes a named CTE. `x in (A)` resolves the name to that CTE — including inside another `let`, a join's right side, or a union branch. **Residue:** when a *column* in scope has the same name as the tabular `let`, this binds the `let` where Kusto binds the column and then rejects the query (SEM0040); telling them apart needs the input's column names, which lowering does not have."),
     ("`let` (function)", "let f = (x: long) { x + 1 }; print f(1)", "Needs inlining with argument substitution and scope handling. A partial version would translate some calls and silently mis-scope others."),
     ("`declare query_parameters`", "declare query_parameters(p: long = 1); print x = p", "Bound as a **value**, never spliced into the SQL. See [Getting started](getting-started.md#query-parameters-and-user-input)."),
     ("`set`", "set query_now = datetime(2020-01-01); print 1", "Request options as a statement. Silently ignoring one — `query_now`, `truncationmaxrecords` — would change what the caller believes happened, so it raises instead. Same reasoning as [the client's option table](kusto-client.md#request-options)."),

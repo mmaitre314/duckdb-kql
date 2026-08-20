@@ -1000,9 +1000,17 @@ def lower(kql: str) -> ir.Query:
         parts = _rule_children(pipe)
         query = _lower_head(parts[0], parts[1:])
 
+    names = {name for name, _ in tabulars}
     query = _substitute_query(query, scalars)
-    query = _resolve_in_subqueries(query, {name for name, _ in tabulars})
-    query.lets.extend(tabulars)
+    query = _resolve_in_subqueries(query, names)
+    # The bindings need the same pass: `let u = T | where x in (V)` is the same
+    # expression as the top-level form and was previously left unresolved.
+    # Resolved against the whole set rather than the names declared *before*
+    # each one — a forward reference is Kusto's error to give, and refusing to
+    # resolve it here would report it as a missing column instead.
+    query.lets.extend(
+        (name, _resolve_in_subqueries(bound, names)) for name, bound in tabulars
+    )
     query.parameters.extend(declarations)
     return query
 
@@ -1032,6 +1040,12 @@ def _resolve_in_subqueries(query: ir.Query, tabular_names: set[str]) -> ir.Query
     At lowering time a bare `T` is indistinguishable from a column reference;
     only once the `let` bindings are known can it be resolved. Left as a
     ColumnRef it would compare against a column that does not exist.
+
+    Applied to **every** query in the tree — the `let` bindings themselves, a
+    join's or lookup's right side, and each union branch — not just the final
+    pipeline. It used to run on the top level only, so `x in (T)` worked in the
+    query but not one line higher in `let u = ... | where x in (T)`, which is
+    the same expression in a place the walk never reached.
     """
     if not tabular_names:
         return query
@@ -1060,6 +1074,9 @@ def _resolve_in_subqueries(query: ir.Query, tabular_names: set[str]) -> ir.Query
             return dataclasses.replace(node, args=tuple(fix(a) for a in node.args))
         return node
 
+    def recurse(inner: ir.Query) -> ir.Query:
+        return _resolve_in_subqueries(inner, tabular_names)
+
     ops: list[ir.Operator] = []
     for op in query.operators:
         if isinstance(op, ir.Where):
@@ -1071,9 +1088,22 @@ def _resolve_in_subqueries(query: ir.Query, tabular_names: set[str]) -> ir.Query
                     dataclasses.replace(e, expr=fix(e.expr)) for e in op.expressions
                 ),
             ))
+        elif isinstance(op, (ir.Join, ir.Lookup)):
+            ops.append(dataclasses.replace(op, right=recurse(op.right)))
+        elif isinstance(op, ir.Union):
+            ops.append(
+                dataclasses.replace(
+                    op, branches=tuple(recurse(b) for b in op.branches)
+                )
+            )
         else:
             ops.append(op)
-    return ir.Query(query.source, ops, list(query.lets))
+
+    lets: list[tuple[str, ir.Query | ir.Expr]] = [
+        (name, recurse(bound) if isinstance(bound, ir.Query) else bound)
+        for name, bound in query.lets
+    ]
+    return ir.Query(query.source, ops, lets, list(query.parameters))
 
 
 def _find_all(node: Any, class_name: str) -> list[Any]:
