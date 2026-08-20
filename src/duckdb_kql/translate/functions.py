@@ -87,9 +87,17 @@ _DATETIME_FORMATS = (
     "%Y%m%d",
 )
 _FORMAT_LIST = "[" + ", ".join(f"'{f}'" for f in _DATETIME_FORMATS) + "]"
+# The CAST to VARCHAR on the strptime branch is a binding fix, not a
+# conversion. `todatetime(T)` where T is already a datetime is a no-op in KQL,
+# but `try_strptime(TIMESTAMP, VARCHAR[])` has no overload, so the whole
+# expression failed to *bind* — and surfaced as a raw DuckDB BinderException
+# rather than any KQL error. A column carries no type at translation time, so
+# this cannot be decided statically; making the branch bind for both inputs can.
+# On a TIMESTAMP the first branch already succeeds, so the second is never the
+# answer; on a VARCHAR the cast is a no-op.
 _TODATETIME = (
     "COALESCE(TRY_CAST({0} AS TIMESTAMPTZ) AT TIME ZONE 'UTC', "
-    f"try_strptime({{0}}, {_FORMAT_LIST}))"
+    f"try_strptime(CAST({{0}} AS VARCHAR), {_FORMAT_LIST}))"
 )
 
 # A KQL timespan string is `[-][d.]hh:mm:ss[.fffffff]`. DuckDB's INTERVAL cast
@@ -116,8 +124,18 @@ SCALAR_FUNCTIONS: dict[str, FunctionSpec] = {
         _f("trim_start", "native", "regexp_replace({1}, '^' || {0}, '')", (2,)),
         _f("strrep", "native", "repeat({0}, {1})", (2,)),
         _f("reverse", "native", "reverse({0})", (1,)),
-        # KQL substring is 0-based and clamps out-of-range; SQL's is 1-based (R11).
-        _f("substring", "template", "substring({0}, {1} + 1)", (2,), ("R11",)),
+        # KQL substring is 0-based, clamps out of range, and counts a NEGATIVE
+        # start from the end — all measured (R11):
+        #   ('abcdefg', 1, 3)  -> 'bcd'      ('abcdefg', 10, 3) -> ''
+        #   ('abcdefg', -3, 2) -> 'ef'       ('abc',     -10)   -> ''
+        #   ('abcdefg', 1, -1) -> ''         ('abcdefg', 5, 10) -> 'fg'
+        # A start that reaches back past the start of the string is EMPTY, not
+        # clamped to 0 — `substring('abc', -10)` is '' and not 'abc'. Handing
+        # the negative index to DuckDB directly is also wrong: it counts from
+        # the end but pairs the length differently, so the offset is resolved
+        # here and only a non-negative index ever reaches `substring`.
+        # Rendered by `_render_substring`; this row carries the arities.
+        _f("substring", "template", "", (2, 3), ("R11",)),
         _f("split", "native", "str_split({0}, {1})", (2,)),
         _f("replace_string", "native", "replace({0}, {1}, {2})", (3,)),
         _f("indexof", "template", "(position({1} IN {0}) - 1)", (2,), ("R11",)),
@@ -229,7 +247,11 @@ SCALAR_FUNCTIONS: dict[str, FunctionSpec] = {
         # --- math -----------------------------------------------------------
         _f("abs", "native", "abs({0})", (1,)),
         _f("ceiling", "native", "ceil({0})", (1,)),
-        _f("floor", "template", "floor({0})", (1,)),
+        # KQL's `floor` IS `bin` — the emulator refuses `floor(7.9)` with
+        # "SEM0219: bin(): function expects 2 argument(s)", and `floor(-7, 5)`
+        # is -10, the bin answer, not -7. Rendered by `render_bin`; this row
+        # exists so the arity is checked and the name is known.
+        _f("floor", "template", "", (2,), note="alias of bin"),
         _f("exp", "native", "exp({0})", (1,)),
         _f("log", "native", "ln({0})", (1,)),
         _f("log10", "native", "log10({0})", (1,)),

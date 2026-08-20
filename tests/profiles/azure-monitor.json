@@ -339,7 +339,7 @@
    },
    {
     "name": "floor",
-    "probe": "print floor(4.5)"
+    "probe": "print floor(4.5, 1)"
    },
    {
     "name": "ceiling",

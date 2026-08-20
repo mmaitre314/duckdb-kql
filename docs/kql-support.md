@@ -345,7 +345,7 @@ Not supported: `arg_max`, `arg_min`, `binary_all_*`, `buildschema`,
 | `exp10` | — |
 | `exp2` | — |
 | `exp` | — |
-| `floor` | — |
+| `floor` | Alias of bin. |
 | `gamma` | — |
 | `log10` | — |
 | `log2` | — |

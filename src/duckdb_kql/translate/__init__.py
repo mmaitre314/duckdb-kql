@@ -205,8 +205,12 @@ def render_expr(node: ir.Expr) -> str:
         return render_has_list(node)
 
     if isinstance(node, ir.FunctionCall):
-        if node.name.lower() == "bin":
-            return render_bin(node)
+        if node.name.lower() in ("bin", "floor"):
+            # `floor` IS `bin` in KQL, two arguments and all — the emulator
+            # refuses `floor(7.9)` with "bin(): function expects 2 argument(s)"
+            # and answers -10 for `floor(-7, 5)`. Mapping it to SQL's `floor`
+            # answered a query Kusto rejects, and would have answered -7.
+            return render_bin(node, name=node.name.lower())
         if node.name.lower() == "tostring" and len(node.args) == 1:
             return render_kql_tostring(node.args[0])
         if node.name.lower() == "reverse" and len(node.args) == 1:
@@ -248,6 +252,13 @@ def render_expr(node: ir.Expr) -> str:
             for nxt in args[1:]:
                 folded = f"list_concat({folded}, {nxt})"
             return f"CAST({folded} AS JSON)"
+        if node.name.lower() == "todatetime" and len(node.args) == 1:
+            # `todatetime(T)` where T is already a datetime is a no-op in KQL,
+            # but the string-parsing template does not bind against a TIMESTAMP
+            # — it reached DuckDB as `try_strptime(TIMESTAMP, VARCHAR[])` and
+            # came back as a raw BinderException rather than any KQL error.
+            if _is_datetime_expr(node.args[0]):
+                return render_expr(node.args[0])
         if node.name.lower() in ("totimespan", "timespan") and len(node.args) == 1:
             # `totimespan(4d)` hands us an INTERVAL, not a string — the string
             # parser would fail to bind. Converting an already-converted value
@@ -269,7 +280,7 @@ def render_expr(node: ir.Expr) -> str:
     raise KqlUnsupportedError(f"expression:{type(node).__name__}")
 
 
-def render_bin(node: ir.FunctionCall) -> str:
+def render_bin(node: ir.FunctionCall, name: str = "bin") -> str:
     """``bin(value, roundTo)`` — round *down* to a multiple of *roundTo*.
 
     Two different computations share one KQL name, and which applies is decided
@@ -282,7 +293,7 @@ def render_bin(node: ir.FunctionCall) -> str:
     Doing the arithmetic on epoch seconds avoids the origin question entirely.
     """
     if len(node.args) != 2:
-        raise KqlUnsupportedError("bin", hint="expects (value, roundTo)")
+        raise KqlUnsupportedError(name, hint="expects (value, roundTo)")
     value, round_to = node.args
     v, r = render_expr(value), render_expr(round_to)
 
@@ -1675,6 +1686,44 @@ def _render_case(node: ir.FunctionCall) -> str:
     return f"CASE {' '.join(parts)} ELSE {args[-1]} END"
 
 
+def _render_substring(node: ir.FunctionCall) -> str:
+    """``substring(source, start [, length])`` — 0-based, clamping, R11.
+
+    Every rule measured on the emulator, and none of them is SQL's:
+
+        ('abcdefg', 1, 3)  -> 'bcd'     0-based, not 1-based
+        ('abcdefg', 10, 3) -> ''        past the end clamps to empty
+        ('abcdefg', 5, 10) -> 'fg'      an over-long length clamps
+        ('abcdefg', 1, -1) -> ''        a negative length is empty
+        ('abcdefg', -3, 2) -> 'ef'      a negative start counts from the END
+        ('abc', -10)       -> ''        ...and reaching past the start is EMPTY
+
+    That last pair is the trap. A negative start is not clamped to zero — going
+    back further than the string is long gives nothing, where clamping would
+    give the whole string. So the offset is resolved here and only a
+    non-negative index is ever handed to DuckDB, whose own negative-start
+    handling pairs the length differently again.
+
+    Character-oriented throughout: `substring('héllo', 1, 3)` is 'éll' (R11).
+    """
+    if len(node.args) not in (2, 3):
+        raise KqlUnsupportedError(
+            "substring", hint="expects (source, start) or (source, start, length)"
+        )
+    source = render_expr(node.args[0])
+    start = render_expr(node.args[1])
+    # `start` is repeated, so a volatile expression would be evaluated twice.
+    # Every KQL function that could be volatile here (`rand`) returns a real,
+    # which is not a legal index, so this cannot change an answer.
+    offset = f"(CASE WHEN {start} < 0 THEN length({source}) + {start} ELSE {start} END)"
+    if len(node.args) == 2:
+        taken = f"substring({source}, {offset} + 1)"
+    else:
+        # A negative length clamps to zero rather than counting backwards.
+        taken = f"substring({source}, {offset} + 1, greatest({render_expr(node.args[2])}, 0))"
+    return f"(CASE WHEN {offset} < 0 THEN '' ELSE {taken} END)"
+
+
 def _render_countof(node: ir.FunctionCall) -> str:
     """``countof(text, search [, kind])`` — occurrences, not characters.
 
@@ -1836,6 +1885,7 @@ def _render_round(node: ir.FunctionCall) -> str:
 
 _SPECIAL_FORMS = {
     "case": _render_case,
+    "substring": _render_substring,
     "round": _render_round,
     "countof": _render_countof,
     "zip": _render_zip,
