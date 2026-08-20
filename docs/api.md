@@ -241,22 +241,30 @@ Requires `duckdb`; `pandas` for the DataFrame helper. A drop-in for
 option and why it is implemented, a no-op, or refused — is in
 [Kusto SDK compatibility](kusto-client.md); this is the surface.
 
-### `KustoClient(kcsb, database=None)`
+### `KustoClient(kcsb, database=None, *, allow_write=True)`
 
 *kcsb* may be a DuckDB database path, a `KustoConnectionStringBuilder`, or an
 existing `duckdb` connection. A connection the client opened is closed with the
 client; one you passed in is left alone.
 
+`allow_write` gates the ingestion commands, matching `duckdb_kql.kql()`. It
+defaults to allowing them because this client runs in your own process against
+your own connection; `duckdb-kql serve` defaults the other way because it is
+reachable over a socket.
+
 | Method | Behaviour |
 |---|---|
 | `execute(database, query, properties=None)` | Dispatches on the leading `.` to `execute_mgmt` or `execute_query`. |
 | `execute_query(database, query, properties=None)` | Translates and runs KQL. Returns `KustoResponseDataSet`. |
-| `execute_mgmt(database, command, properties=None)` | `.show version`, `.show databases`, `.show tables`. Everything else raises `KustoUnsupportedError`. |
+| `execute_mgmt(database, command, properties=None)` | `.show version`, `.show databases`, `.show tables`, and the ingestion commands `.set` / `.append` / `.set-or-append` / `.set-or-replace` (subject to `allow_write`). Everything else raises `KustoUnsupportedError`. |
 | `close()` / context manager | Closes an owned connection. Idempotent. |
 
 `database` selects an ATTACHed DuckDB catalog when one matches. A name that
 matches nothing and conflicts with the client's configured database raises
-rather than silently answering from the wrong one.
+rather than silently answering from the wrong one. An ingestion command writes
+into the matched catalog, naming it in the SQL; when the name matches no
+catalog it writes to the current database, exactly as a query would read from
+it.
 
 ### `KustoConnectionStringBuilder(connection_string)`
 

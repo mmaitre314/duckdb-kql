@@ -517,6 +517,115 @@ def test_unimplemented_control_commands_are_refused(client, command: str) -> Non
         client.execute("db", command)
 
 
+# ---------------------------------------------------------------------------
+# Ingestion
+# ---------------------------------------------------------------------------
+#
+# `.set-or-replace` reached `execute_mgmt`, which only knew the read-only
+# command table, so the client refused a command `duckdb_kql.kql()` on the very
+# same connection ran happily. The two entry points have to agree: the whole
+# premise of this layer is that SDK code works unchanged.
+
+DT = "datatable(a:long, b:string) [1, 'x', 2, 'y']"
+
+
+@pytest.fixture
+def writable():
+    con = duckdb.connect()
+    con.execute("ATTACH ':memory:' AS MyDatabase")
+    c = KustoClient(con)
+    yield c
+    c.close()
+    con.close()
+
+
+def _extents(response):
+    return response.primary_results[0]
+
+
+def test_set_or_replace_ingests(writable) -> None:
+    table = _extents(writable.execute("MyDatabase", f".set-or-replace T <| {DT}"))
+    assert [c.column_name for c in table.columns] == [
+        "ExtentId", "OriginalSize", "ExtentSize",
+        "CompressedSize", "IndexSize", "RowCount",
+    ]
+    assert table[0]["RowCount"] == 2
+    assert writable.execute("MyDatabase", "T | count").primary_results[0][0][0] == 2
+
+
+def test_ingestion_lands_in_the_named_database(writable) -> None:
+    writable.execute("MyDatabase", f".set-or-replace T <| {DT}")
+    rows = writable._connection.execute(
+        "SELECT database_name FROM duckdb_tables() WHERE table_name = 'T'"
+    ).fetchall()
+    assert rows == [("MyDatabase",)]
+
+
+def test_a_placeholder_database_name_is_not_qualified_with(writable) -> None:
+    # The SDK requires a database argument, so single-database callers pass a
+    # placeholder. Qualifying with it would write to a schema of that name.
+    table = _extents(writable.execute("db", f".set-or-replace T <| {DT}"))
+    assert table[0]["RowCount"] == 2
+    assert writable.execute("db", "T | count").primary_results[0][0][0] == 2
+
+
+def test_set_or_replace_replaces_rather_than_appends(writable) -> None:
+    writable.execute("MyDatabase", f".set-or-replace T <| {DT}")
+    writable.execute("MyDatabase", f".set-or-replace T <| {DT}")
+    assert writable.execute("MyDatabase", "T | count").primary_results[0][0][0] == 2
+
+
+def test_set_or_append_appends(writable) -> None:
+    writable.execute("MyDatabase", f".set-or-replace T <| {DT}")
+    writable.execute("MyDatabase", f".set-or-append T <| {DT}")
+    assert writable.execute("MyDatabase", "T | count").primary_results[0][0][0] == 4
+
+
+def test_append_to_a_missing_table_is_an_error(writable) -> None:
+    with pytest.raises(KustoServiceError):
+        writable.execute("MyDatabase", f".append NoSuchTable <| {DT}")
+
+
+def test_set_onto_an_existing_table_is_an_error(writable) -> None:
+    writable.execute("MyDatabase", f".set-or-replace T <| {DT}")
+    with pytest.raises(KustoServiceError):
+        writable.execute("MyDatabase", f".set T <| {DT}")
+
+
+def test_ingesting_nothing_reports_no_extent(writable) -> None:
+    table = _extents(
+        writable.execute("MyDatabase", ".set-or-replace Empty <| datatable(a:long)[]")
+    )
+    assert len(table) == 0
+
+
+def test_the_client_and_kql_agree(writable) -> None:
+    """The bug in one sentence: these two ran the same command differently."""
+    import duckdb_kql  # noqa: PLC0415
+
+    con = writable._connection
+    duckdb_kql.kql(con, f".set-or-replace ViaKql <| {DT}", database="MyDatabase")
+    writable.execute("MyDatabase", f".set-or-replace ViaClient <| {DT}")
+    assert (
+        writable.execute("MyDatabase", "ViaKql | count").primary_results[0][0][0]
+        == writable.execute("MyDatabase", "ViaClient | count").primary_results[0][0][0]
+    )
+
+
+def test_allow_write_false_refuses_ingestion(writable) -> None:
+    con = writable._connection
+    read_only = KustoClient(con, allow_write=False)
+    with pytest.raises(KustoUnsupportedError):
+        read_only.execute("MyDatabase", f".set-or-replace T <| {DT}")
+
+
+def test_allow_write_false_still_reads(writable) -> None:
+    con = writable._connection
+    writable.execute("MyDatabase", f".set-or-replace T <| {DT}")
+    read_only = KustoClient(con, allow_write=False)
+    assert read_only.execute("MyDatabase", "T | count").primary_results[0][0][0] == 2
+
+
 def test_a_refused_command_did_not_run(client) -> None:
     with pytest.raises(KustoUnsupportedError):
         client.execute("db", ".drop table StormEvents")

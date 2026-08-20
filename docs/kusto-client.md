@@ -148,7 +148,8 @@ too, and both go through the same translation
 | `.show version` | `BuildVersion`, `BuildTime`, `ServiceType`, `ProductVersion`, `ServiceOffering` | This package's version, and DuckDB's in `ProductVersion`. `BuildTime` is null — there is no build timestamp to report. |
 | `.show databases` | `DatabaseName`, `PersistentStorage`, `Version`, `IsCurrent`, `DatabaseAccessMode`, `PrettyName`, `ReservedSlot1`, `DatabaseId`, `InTransitionTo`, `SuspensionState` | The DuckDB catalogs attached to the connection. `Version` is DuckDB's; `DatabaseId` and the cluster-only columns are null. |
 | `.show tables` | `TableName`, `DatabaseName`, `Folder`, `DocString` | Tables **and views** in the current database — a view is a queryable table as far as KQL is concerned. `Folder` and `DocString` are null. |
-| everything else | — | `KustoUnsupportedError`, naming the three that work. |
+| `.set` / `.append` / `.set-or-append` / `.set-or-replace` | `ExtentId`, `OriginalSize`, `ExtentSize`, `CompressedSize`, `IndexSize`, `RowCount` | Ingests the command's KQL body into the table. Only `RowCount` and a generated `ExtentId` are real; the sizes describe a cluster's storage layout and are null. Gated by `allow_write`, which defaults to on here and off in `duckdb-kql serve`. |
+| everything else | — | `KustoUnsupportedError`, naming the ones that work. |
 
 A command's result can be **piped into query operators**, as it can in Kusto:
 
@@ -168,9 +169,15 @@ callers index into them by name and a plausible subset breaks at the point of
 use rather than at the point of translation.
 
 Where a column describes something a cluster has and a DuckDB file does not, it
-is **null** rather than filled with something plausible. Ingestion, policy and
+is **null** rather than filled with something plausible. Policy and
 schema-management commands administer a cluster, and there is no cluster; a stub
 returning an empty table would look like a command that worked.
+
+Ingestion is the exception, because it describes *data* rather than a cluster:
+the four commands above load a KQL body into a table, which is how a test suite
+seeds fixtures. `KustoClient.execute()` and `duckdb_kql.kql()` run them
+identically — the client used to refuse a command that `kql()` on the same
+connection accepted.
 
 ## Databases
 

@@ -208,11 +208,19 @@ class KustoClient:
         self,
         kcsb: KustoConnectionStringBuilder | str | DuckDBPyConnection,
         database: str | None = None,
+        *,
+        allow_write: bool = True,
     ) -> None:
         self._is_closed = False
         self._lock = threading.Lock()
         self._owns_connection = True
         self.default_database = database
+        #: Whether ingestion commands may run. True by default, matching
+        #: :func:`duckdb_kql.kql` — this client runs in the caller's own process
+        #: against their own connection, so a write here is a write they asked
+        #: for. `duckdb-kql serve` defaults the other way because it is reachable
+        #: over a socket.
+        self.allow_write = allow_write
         self._connection: DuckDBPyConnection
 
         if hasattr(kcsb, "execute") and hasattr(kcsb, "sql"):
@@ -329,10 +337,11 @@ class KustoClient:
     ) -> KustoResponseDataSet:
         """Execute a control command.
 
-        Only the handful below are implemented. The rest — ingestion, policy,
-        schema management — describe a cluster's administration, and there is no
-        cluster; a stub returning an empty table would look like a command that
-        worked.
+        Ingestion (`.set` / `.append` / `.set-or-append` / `.set-or-replace`)
+        and the handful of `.show` commands are implemented. The rest — policy,
+        schema management, cluster administration — describe running a cluster,
+        and there is no cluster; a stub returning an empty table would look like
+        a command that worked.
         """
         self._check_open()
         con = self._select_database(database)
@@ -343,6 +352,15 @@ class KustoClient:
         # shape of breakage that only shows up in a caller indexing by name.
         from ..control import UNSUPPORTED_HINT, translate_control_command
         from ..errors import KqlUnsupportedError
+        from ..ingest import is_ingestion_command
+
+        if is_ingestion_command(query):
+            # Ingestion is the one control command whose body is a whole KQL
+            # query, so it goes through `to_sql` rather than the command table.
+            # Routing it here used to be missing entirely, and the command came
+            # back as "unsupported by duckdb-kql" even though
+            # `duckdb_kql.kql(con, same_command, database=...)` ran it.
+            return self._execute_ingestion(con, database, query, properties)
 
         try:
             sql = translate_control_command(query)
@@ -359,6 +377,63 @@ class KustoClient:
         with self._deadline(properties):
             try:
                 with self._lock:
+                    rel = con.sql(sql)
+                    columns = list(rel.columns)
+                    types = [kusto_type(t) for t in rel.types]
+                    rows = rel.fetchall()
+            except Exception as exc:  # noqa: BLE001 - any engine failure is the answer
+                raise KustoServiceError(str(exc)) from exc
+
+        return self._response(query, columns, types, rows, properties)
+
+    def _execute_ingestion(
+        self,
+        con: Any,
+        database: str | None,
+        query: str,
+        properties: ClientRequestProperties | None,
+    ) -> KustoResponseDataSet:
+        """Run one ingestion command, returning Kusto's extents table.
+
+        The target is qualified with *database* rather than left to the ``USE``
+        that `_select_database` just issued. Both would write to the same place
+        today, but a name in the SQL cannot be retargeted by anything that
+        touches the connection afterwards — the same reason ``serve`` resolves a
+        request's database by qualification.
+
+        Only a name that really is an attached catalog is used, matching what
+        `_select_database` did with it a moment ago: the SDK requires a database
+        argument, so single-database callers pass a placeholder, and qualifying
+        with that would turn `.set-or-replace T <| …` into a write to a schema
+        named after the placeholder.
+        """
+        from .. import to_sql
+        from ..engine import schema
+        from ..errors import KqlUnsupportedError
+
+        if not self.allow_write:
+            raise KustoUnsupportedError(
+                f"ingestion command {query.strip().split()[0]}",
+                hint="this client was constructed with allow_write=False",
+            )
+
+        try:
+            sql = str(
+                to_sql(query, schema=schema(con), database=self._attached(database))
+            )
+        except KqlUnsupportedError as exc:
+            raise KustoUnsupportedError(
+                f"ingestion command {query.strip()!r}", hint=str(exc)
+            ) from exc
+        except KqlError as exc:
+            raise _semantic_error(exc) from exc
+
+        with self._deadline(properties):
+            try:
+                with self._lock:
+                    # `render_ingestion` emits several `;`-separated statements
+                    # (create-if-absent, delete, insert, then the extents row).
+                    # DuckDB runs them all and returns the last result.
                     rel = con.sql(sql)
                     columns = list(rel.columns)
                     types = [kusto_type(t) for t in rel.types]
@@ -385,13 +460,7 @@ class KustoClient:
         if not database:
             return self._connection
 
-        attached = {
-            name
-            for (name,) in self._connection.execute(
-                "SELECT database_name FROM duckdb_databases() WHERE NOT internal"
-            ).fetchall()
-        }
-        if database in attached:
+        if self._attached(database) is not None:
             # `database` is already gated by exact membership above, so this is
             # not a vector — but it was the one identifier reaching SQL without
             # the doubling helper, and that is not a property to leave to luck.
@@ -410,6 +479,18 @@ class KustoClient:
         # No catalog by that name and no conflicting default: the caller is
         # naming the one database there is.
         return self._connection
+
+    def _attached(self, database: str | None) -> str | None:
+        """*database* if it is an attached DuckDB catalog, else ``None``."""
+        if not database:
+            return None
+        attached = {
+            name
+            for (name,) in self._connection.execute(
+                "SELECT database_name FROM duckdb_databases() WHERE NOT internal"
+            ).fetchall()
+        }
+        return database if database in attached else None
 
     def _deadline(self, properties: ClientRequestProperties | None) -> _Deadline:
         """Enforce ``servertimeout`` by interrupting the query.

@@ -175,8 +175,9 @@ UNSUPPORTED_HINT = (
     "supported control commands are "
     + ", ".join(SUPPORTED)
     + "; ingestion (.set / .append / .set-or-append / .set-or-replace) is "
-    "handled separately, by duckdb_kql.kql() and by `duckdb-kql serve "
-    "--allow-write`; the rest administer a cluster, and there is no cluster here"
+    "handled separately, by duckdb_kql.kql(), by KustoClient.execute(), and by "
+    "`duckdb-kql serve --allow-write`; the rest administer a cluster, and there "
+    "is no cluster here"
 )
 
 _WHITESPACE = re.compile(r"\s+")
