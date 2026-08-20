@@ -358,6 +358,27 @@ def output_name(named: ir.NamedExpr, position: int) -> str:
 # ---------------------------------------------------------------------------
 
 
+def render_wildcard(source: ir.WildcardTableRef, schema: Schema | None) -> str:
+    """``UT*`` — the matching tables, unioned by name.
+
+    Expanded here rather than at lowering because only this stage knows the
+    catalog. Kusto refuses a pattern matching nothing, so `match_wildcard` does.
+    """
+    from ..schema import match_wildcard
+
+    names = match_wildcard(source, schema)
+    parts = [f"SELECT * FROM {_qualified_name(name)}" for name in names]
+    return "(" + "\nUNION ALL BY NAME ".join(parts) + ")"
+
+
+def _qualified_name(name: str) -> str:
+    """``Sales.Orders`` -> ``"Sales"."Orders"``; a bare name stays bare."""
+    database, _, table = name.rpartition(".")
+    if not database:
+        return quote_ident(table)
+    return f"{quote_ident(database)}.{quote_ident(table)}"
+
+
 def render_table_ref(source: ir.TableRef) -> str:
     """``"Orders"`` or ``"Sales"."Orders"``.
 
@@ -371,9 +392,12 @@ def render_table_ref(source: ir.TableRef) -> str:
     return f"{quote_ident(source.database)}.{quote_ident(source.name)}"
 
 
-def render_source(source: ir.Source) -> str:
+def render_source(source: ir.Source, schema: Schema | None = None) -> str:
     if isinstance(source, ir.TableRef):
         return f"SELECT * FROM {render_table_ref(source)}"
+
+    if isinstance(source, ir.WildcardTableRef):
+        return f"SELECT * FROM {render_wildcard(source, schema)}"
 
     if isinstance(source, ir.PrintSource):
         cols = [
@@ -542,10 +566,14 @@ def render_operator(op: ir.Operator, prev: str, cols: list[str] | None = None) -
     if isinstance(op, ir.Sort):
         return f"SELECT * FROM {prev} ORDER BY {render_sort_keys(op.keys)}"
 
-    if isinstance(op, (ir.Join, ir.Lookup)):
+    if isinstance(op, (ir.Join, ir.Lookup, ir.Union)):
         # These need both sides' columns, so they are rendered by to_sql(),
         # which threads the schema. Reaching here means a bug, not a gap.
-        name = "lookup" if isinstance(op, ir.Lookup) else "join"
+        name = (
+            "union" if isinstance(op, ir.Union)
+            else "lookup" if isinstance(op, ir.Lookup)
+            else "join"
+        )
         raise KqlUnsupportedError(
             name, hint=f"internal: {name} must be rendered by to_sql"
         )
@@ -596,7 +624,7 @@ def to_sql(query: ir.Query, schema: Schema | None = None) -> TranslationResult:
         if isinstance(bound, ir.Query)
     ]
 
-    stages = [render_source(query.source)]
+    stages = [render_source(query.source, schema)]
     # Resolved up front rather than on first join: `extend` needs it too, to
     # keep a replaced column in its original position. A `datatable`/`print`/
     # `range` source carries its columns in the IR, so this succeeds with no
@@ -604,9 +632,16 @@ def to_sql(query: ir.Query, schema: Schema | None = None) -> TranslationResult:
     # then has to fail.
     cols = _known_source_cols(query.source, schema)
 
-    for op in query.operators:
+    for index, op in enumerate(query.operators):
         prev = f"_s{len(stages) - 1}"
-        if isinstance(op, (ir.Join, ir.Lookup)):
+        if isinstance(op, ir.Union):
+            from ..schema import union_output_columns
+
+            if cols is None:
+                cols = _source_cols(query, schema)
+            stages.append(render_union(op, prev, cols, query, schema, index == 0))
+            cols = union_output_columns(op, cols, schema)
+        elif isinstance(op, (ir.Join, ir.Lookup)):
             # Only these force us to resolve columns, so only these can fail for
             # lack of a schema.
             if cols is None:
@@ -681,7 +716,7 @@ def _source_cols(query: ir.Query, schema: Schema | None) -> list[str]:
 
     cols = _source_columns(query.source, schema)
     for op in query.operators:
-        if isinstance(op, ir.Join):
+        if isinstance(op, (ir.Join, ir.Lookup, ir.Union)):
             break
         cols = _operator_columns(op, cols, schema)
     return cols
@@ -1086,6 +1121,112 @@ def render_join(
         f"SELECT {projection} FROM {left} AS _l "
         f"{sql_type} JOIN ({right_sql}) AS _r ON {on}"
     )
+
+
+def render_union(
+    op: ir.Union,
+    prev: str,
+    left_cols: list[str],
+    query: ir.Query,
+    schema: Schema | None,
+    leading: bool,
+) -> str:
+    """Render ``union`` (docs/TRANSLATION.md R15).
+
+    ``UNION ALL BY NAME`` is the whole trick: it matches branches by column name
+    and fills the gaps with null, which is exactly Kusto's *outer* union. A
+    plain ``UNION ALL`` matches positionally and would pair unrelated columns
+    whenever two branches list the same names in a different order.
+
+    ``ALL``, not ``UNION``: Kusto does not de-duplicate. Measured —
+    `union UT1, UT1` returns the row twice.
+
+    The final projection is not redundant. Column order is user-visible (R1),
+    ``kind=inner`` has to drop the columns BY NAME just added as null, and
+    naming the columns explicitly means the order comes from
+    `union_output_columns` — measured against the emulator — rather than from
+    DuckDB's own rule for what BY NAME puts where.
+    """
+    from ..schema import surviving_branches, union_output_columns
+
+    out_cols = union_output_columns(op, left_cols, schema)
+    let_names = frozenset(name for name, _ in query.lets)
+
+    arms = _left_arms(op, prev, query, schema, leading, let_names)
+    for index, branch in enumerate(surviving_branches(op, schema), start=1):
+        arms += _branch_arms(branch, index, schema, let_names)
+
+    selects = []
+    for sql, label in arms:
+        projection = "*"
+        if op.with_source:
+            projection = f"{quote_string(label)} AS {quote_ident(op.with_source)}, *"
+        selects.append(f"SELECT {projection} FROM ({sql})")
+
+    body = "\nUNION ALL BY NAME ".join(selects)
+    keep = ", ".join(quote_ident(c) for c in out_cols)
+    return f"SELECT {keep} FROM ({body})"
+
+
+def _left_arms(
+    op: ir.Union,
+    prev: str,
+    query: ir.Query,
+    schema: Schema | None,
+    leading: bool,
+    let_names: frozenset[str],
+) -> list[tuple[str, str]]:
+    """The arms for the union's left side — the query so far.
+
+    `union A, B` and `A | union B` lower to the same IR, so the left side is
+    branch 0 either way and gets branch 0's `withsource` label.
+    """
+    if leading and isinstance(query.source, ir.WildcardTableRef):
+        return _wildcard_arms(query.source, schema)
+    label = "union_arg0"
+    if leading and isinstance(query.source, ir.TableRef):
+        label = _table_label(query.source, let_names) or label
+    return [(f"SELECT * FROM {prev}", label)]
+
+
+def _branch_arms(
+    branch: ir.Query, index: int, schema: Schema | None, let_names: frozenset[str]
+) -> list[tuple[str, str]]:
+    if not branch.operators and isinstance(branch.source, ir.WildcardTableRef):
+        return _wildcard_arms(branch.source, schema)
+    label = f"union_arg{index}"
+    if not branch.operators and isinstance(branch.source, ir.TableRef):
+        label = _table_label(branch.source, let_names) or label
+    return [(str(to_sql(branch, schema)), label)]
+
+
+def _wildcard_arms(
+    source: ir.WildcardTableRef, schema: Schema | None
+) -> list[tuple[str, str]]:
+    """One arm per matched table, each labelled with its own name.
+
+    Measured: `union withsource=Src UT*` reports `UT1` and `UT2`, not one shared
+    label for the pattern — so a wildcard cannot be rendered as a single arm.
+    """
+    from ..schema import match_wildcard
+
+    return [
+        (f"SELECT * FROM {_qualified_name(name)}", name.rpartition(".")[2])
+        for name in match_wildcard(source, schema)
+    ]
+
+
+def _table_label(source: ir.TableRef, let_names: frozenset[str]) -> str | None:
+    """The `withsource` label for a bare table branch, or None for `union_argN`.
+
+    The bare table name, with any database qualifier stripped — measured,
+    `database('NetDefaultDB').UT2` reports `UT2`. A `let`-bound name is *not* a
+    table and does not get its name: `let A = ...; union withsource=Src UT1, A`
+    reports `union_arg1` for the second branch.
+    """
+    if source.name in let_names:
+        return None
+    return source.name
 
 
 def _renamed(left_cols: list[str], right_cols: list[str]) -> list[str]:

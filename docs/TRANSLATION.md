@@ -409,6 +409,64 @@ matrix.
 
 ---
 
+### R15 — `union` matches columns by **name**, not by position
+
+*Trap: `tests/test_union.py`*
+
+> A KQL `union` pairs each branch's columns **by name** and pads what is missing
+> with null. SQL's `UNION ALL` pairs them **by position**.
+
+Rendered with DuckDB's **`UNION ALL BY NAME`**, which is the same rule. Plain
+`UNION ALL` would line up two branches that list the same names in a different
+order and answer with a string in a float column; plain `UNION` would also
+de-duplicate, and KQL does not — measured, `union UT1, UT1` returns each row
+twice.
+
+The rest was read off the emulator, because none of it is guessable:
+
+| | behaviour |
+|---|---|
+| default kind | **`outer`** — the *union* of the branches' columns |
+| `kind=inner` | the *intersection* of the column names |
+| column order | **first appearance, left to right** — `union A, B` gives `x, y, z`; `union B, A` gives `x, z, y` |
+| `withsource=Col` | one leading column naming each row's branch |
+| `isfuzzy=true` | a branch whose **table does not exist** is dropped instead of failing |
+| `union UT*` | every table matching the pattern; matching *nothing* is an error (SEM0100), not an empty result |
+
+Column order is user-visible (R1), so the emitter names the output columns
+explicitly rather than inheriting whatever `BY NAME` produces.
+
+**`withsource` labels are positional unless the branch is a bare table.** A bare
+table reports its own name with any database qualifier stripped
+(`database('D').UT2` → `UT2`); a wildcard reports each *matched* table's name,
+so it cannot be rendered as one arm. Everything else — a subquery branch, a
+piped left side, and, measured, a **`let`-bound name** — is `union_argN`,
+counting the left side as branch 0.
+
+`union A, B` and `A | union B` return identical results, so both lower to one
+`ir.Union` whose left side is branch 0. Two code paths here would be two things
+that must never disagree.
+
+`isfuzzy` deliberately does not fire when no schema was supplied: "I have no
+catalog" is not "this table does not exist", and conflating them would drop
+every branch and return a short answer that looks like data.
+
+**Known residue**, both about columns rather than rows:
+
+* Two branches giving the **same column name a different type** diverge: Kusto
+  splits them (`c_string`, `c_real`), DuckDB casts both into one column.
+  Detecting it needs column *types*, which the schema does not carry — the same
+  limit as R14's null-string residue.
+* A **wildcard expands in name order** here and in **creation order** in Kusto.
+  Measured: tables made as `Zed`, `Alpha`, `Mid` give `union *` the columns
+  `z1, a1, m1` there, `a1, m1, z1` here. A DuckDB catalog does not record
+  creation order, so this is deterministic rather than faithful; the rows are
+  identical either way, and only the column order of the outer union moves.
+
+See the support matrix.
+
+---
+
 ## 5. Tabular operator conventions
 
 | KQL | DuckDB rendering |
@@ -426,14 +484,15 @@ matrix.
 | `count` | `SELECT count(*) AS "Count"` |
 | `summarize …  by …` | `GROUP BY` (R12 naming, R4 null handling) |
 | `join` | R5 — kind-dependent |
-| `union [kind=]` | column-unifying `UNION ALL` (see below) |
+| `union [kind=]` | `UNION ALL BY NAME` with an explicit output column list (R15) |
 | `datatable(...)` / `print` / `range` | `VALUES` / `SELECT` / `range()` — self-contained, ideal for corpus tests |
 
 **`union` column unification:** KQL unions produce the **superset** of columns,
 filling missing ones with null — unlike SQL `UNION ALL`, which requires matching
-arity. Compute the unified column set, then emit explicit
-`SELECT col1, col2, NULL AS col3 …` per branch. `kind=inner` restricts to common
-columns. `union` is **not** deduplicating → `UNION ALL`.
+arity *and* pairs columns positionally. DuckDB's `UNION ALL BY NAME` does both
+halves of that, so branches are emitted as-is and the final projection names the
+unified column set in KQL's order. `kind=inner` restricts to common columns.
+`union` is **not** deduplicating → `UNION ALL`. Full rules in R15.
 
 ## 6. Scalar function registry
 

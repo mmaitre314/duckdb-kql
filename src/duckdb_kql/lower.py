@@ -640,6 +640,9 @@ def _lower_operator(node: Any) -> ir.Operator | None:
             raise _unsupported(node, "project-rename")
         return ir.ProjectRename(tuple(renames))
 
+    if kind == "UnionOperator":
+        return _lower_union(node, kids)
+
     if kind == "JoinOperator":
         return _lower_join(node, kids)
 
@@ -794,19 +797,89 @@ def _lower_lookup(node: Any, kids: list[Any]) -> ir.Lookup:
     return ir.Lookup(_lower_join_right(right_node), tuple(keys), kind)
 
 
+#: `union` parameters this understands. Anything else is refused rather than
+#: ignored, because `kind` and `withsource` both change the result shape.
+_UNION_KINDS = ("outer", "inner")
+
+
+def _lower_union(node: Any, kids: list[Any]) -> ir.Union:
+    """Lower ``union [kind=] [withsource=] [isfuzzy=] A, B, ...`` (R15)."""
+    kind = "outer"
+    with_source: str | None = None
+    isfuzzy = False
+    branches: list[ir.Query] = []
+
+    for k in kids:
+        cls = _cls(k)
+        if cls in ("RelaxedQueryOperatorParameter", "QueryOperatorParameter"):
+            text = k.getText()
+            name, _, value = text.partition("=")
+            key = name.strip().lower()
+            value = value.strip()
+            if key == "kind":
+                if value.lower() not in _UNION_KINDS:
+                    raise _unsupported(k, f"union kind:{value}")
+                kind = value.lower()
+            elif key in ("withsource", "with_source"):
+                # Both spellings are accepted by the emulator.
+                with_source = _string_value(value) if value[:1] in "\"'" else value
+            elif key == "isfuzzy":
+                isfuzzy = value.lower() == "true"
+            elif key.startswith("hint."):
+                # Distribution only; cannot change the result.
+                continue
+            else:
+                raise _unsupported(k, f"union parameter:{name.strip()}")
+        elif cls == "UnionOperatorExpression":
+            branches.append(_lower_union_branch(k))
+
+    if not branches:
+        raise _unsupported(node, "union")
+    return ir.Union(tuple(branches), kind, with_source, isfuzzy)
+
+
+def _lower_union_branch(node: Any) -> ir.Query:
+    """One `union` branch: a table, a wildcard pattern, or a parenthesized query."""
+    inner = _collapse(node)
+
+    # `UT*` — kept as a pattern; expanding it needs the catalog.
+    if _cls(inner) == "WildcardedName" or _find_all(inner, "WildcardedName"):
+        found = inner if _cls(inner) == "WildcardedName" else _find_all(inner, "WildcardedName")[0]
+        return ir.Query(_lower_wildcard(found, node))
+
+    # `database("D").T` inside a union parses as a *wildcarded* path even with no
+    # wildcard in it, so it never reaches the path handler `_lower_source` uses.
+    if _cls(inner) == "WildcardedPathExpression":
+        qualified = _lower_qualified_table(inner)
+        if qualified is not None:
+            return ir.Query(qualified)
+
+    return _lower_query_node(inner)
+
+
+def _lower_wildcard(node: Any, whole: Any) -> ir.WildcardTableRef:
+    """``UT*`` or ``database("D").UT*``.
+
+    The pattern is kept verbatim; `to_sql` matches it against the schema, since
+    only there is the set of tables known.
+    """
+    pattern = node.getText()
+    database = None
+    # `database("D").UT*` — the database is a string literal on the whole branch.
+    literals = _find_all(whole, "StringLiteralExpression")
+    if len(literals) > 1:
+        # `cluster("C").database("D").UT*` — two literals, and guessing which is
+        # which would resolve to the wrong database silently. Blocked rather
+        # than half-implemented; a wildcard carries no cluster through the IR.
+        raise _unsupported(whole, "union wildcard across clusters")
+    if literals:
+        database = _literal_string(literals[0])
+    return ir.WildcardTableRef(pattern, database)
+
+
 def _lower_join_right(node: Any) -> ir.Query:
     """The joined side is a parenthesised tabular expression."""
-    inner = _collapse(node)
-    while _cls(inner) == "ParenthesizedExpression":
-        rules = _rule_children(inner)
-        if not rules:
-            break
-        inner = _collapse(rules[0])
-
-    if _cls(inner) == "PipeExpression":
-        parts = _rule_children(inner)
-        return ir.Query(_lower_source(parts[0]), _lower_operators(parts[1:]))
-    return ir.Query(_lower_source(inner))
+    return _lower_query_node(node)
 
 
 def _lower_join_key(node: Any) -> ir.JoinKey:
@@ -922,16 +995,35 @@ def lower(kql: str) -> ir.Query:
     pipe = _collapse(statements[0])
     if _cls(pipe) != "PipeExpression":
         # A source with no pipeline at all, e.g. `print 1` or `datatable(...)[]`.
-        query = ir.Query(_lower_source(pipe))
+        query = _lower_head(pipe, [])
     else:
         parts = _rule_children(pipe)
-        query = ir.Query(_lower_source(parts[0]), _lower_operators(parts[1:]))
+        query = _lower_head(parts[0], parts[1:])
 
     query = _substitute_query(query, scalars)
     query = _resolve_in_subqueries(query, {name for name, _ in tabulars})
     query.lets.extend(tabulars)
     query.parameters.extend(declarations)
     return query
+
+
+def _lower_head(head: Any, rest: list[Any]) -> ir.Query:
+    """Build the query from its first element and the operators piped onto it.
+
+    Exists for `union`, which is the one construct that can *start* a query and
+    is also an operator. `union A, B` and `A | union B` return identical results
+    — measured — so the leading form becomes the piped one here rather than
+    being modelled a second time, and every later stage sees one shape.
+    """
+    head = _collapse(head)
+    if _cls(head) == "UnionOperator":
+        union = _lower_union(head, _rule_children(head))
+        first, *others = union.branches
+        query = ir.Query(first.source, list(first.operators))
+        query.operators.append(dataclasses.replace(union, branches=tuple(others)))
+        query.operators.extend(_lower_operators(rest))
+        return query
+    return ir.Query(_lower_source(head), _lower_operators(rest))
 
 
 def _resolve_in_subqueries(query: ir.Query, tabular_names: set[str]) -> ir.Query:
@@ -1077,6 +1169,9 @@ def _parameter_default(node: Any, kind: str) -> Any:
 #: Node kinds that make a `let` value tabular rather than scalar.
 _TABULAR_VALUE = {
     "PipeExpression", "DataTableExpression", "RangeExpression", "PrintOperator",
+    # `union` is the one operator that can also *start* a query, so a `let`
+    # bound to one is tabular even though nothing pipes into it.
+    "UnionOperator",
 }
 
 
@@ -1086,7 +1181,13 @@ def _is_tabular_value(node: Any, scalars: Scalars) -> bool:
     A pipeline or an inline table is unambiguous. A bare identifier is an alias
     for another table — unless it names a scalar `let` already in scope, in
     which case it is that scalar.
+
+    Parentheses are stripped first. `let U = (T | where x == 1)` is legal KQL and
+    was being read as a *scalar* binding, so it failed with "unsupported
+    construct PipeExpression" — an error about the pipeline, when the only
+    problem was the brackets around it.
     """
+    node = _unparenthesize(node)
     kind = _cls(node)
     if kind in _TABULAR_VALUE:
         return True
@@ -1096,13 +1197,29 @@ def _is_tabular_value(node: Any, scalars: Scalars) -> bool:
     return False
 
 
-def _lower_query_node(node: Any) -> ir.Query:
-    """Lower a tabular expression node into a Query."""
+def _unparenthesize(node: Any) -> Any:
+    """Strip redundant brackets around a tabular expression."""
     node = _collapse(node)
+    while _cls(node) == "ParenthesizedExpression":
+        rules = _rule_children(node)
+        if not rules:
+            break
+        node = _collapse(rules[0])
+    return node
+
+
+def _lower_query_node(node: Any) -> ir.Query:
+    """Lower a tabular expression node into a Query.
+
+    Goes through `_lower_head` rather than `_lower_source` so that a subquery
+    *starting* with `union` — a `let` binding, a join's right side, a nested
+    union branch — lowers the same way a top-level one does.
+    """
+    node = _unparenthesize(node)
     if _cls(node) == "PipeExpression":
         parts = _rule_children(node)
-        return ir.Query(_lower_source(parts[0]), _lower_operators(parts[1:]))
-    return ir.Query(_lower_source(node))
+        return _lower_head(parts[0], parts[1:])
+    return _lower_head(node, [])
 
 
 def _lower_operators(nodes: list[Any]) -> list[ir.Operator]:
@@ -1216,6 +1333,10 @@ def _substitute_operator(op: ir.Operator, scalars: Scalars) -> ir.Operator:
         )
     if isinstance(op, (ir.Join, ir.Lookup)):
         return dataclasses.replace(op, right=_substitute_query(op.right, scalars))
+    if isinstance(op, ir.Union):
+        return dataclasses.replace(
+            op, branches=tuple(_substitute_query(b, scalars) for b in op.branches)
+        )
     return op
 
 
@@ -1523,6 +1644,8 @@ def _mentions_cluster(query: ir.Query) -> bool:
     for op in query.operators:
         if isinstance(op, (ir.Join, ir.Lookup)) and _mentions_cluster(op.right):
             return True
+        if isinstance(op, ir.Union) and any(_mentions_cluster(b) for b in op.branches):
+            return True
     return any(
         isinstance(bound, ir.Query) and _mentions_cluster(bound)
         for _, bound in query.lets
@@ -1551,6 +1674,12 @@ def _qualify_query(
     source = query.source
     if isinstance(source, ir.TableRef):
         source = _qualify_table(source, database, scope, clusters)
+    elif (
+        isinstance(source, ir.WildcardTableRef)
+        and source.database is None
+        and database is not None
+    ):
+        source = dataclasses.replace(source, database=database)
 
     operators = [
         _qualify_operator(op, database, scope, clusters) for op in query.operators
@@ -1586,6 +1715,13 @@ def _qualify_operator(
     if isinstance(op, (ir.Join, ir.Lookup)):
         return dataclasses.replace(
             op, right=_qualify_query(op.right, database, scope, clusters)
+        )
+    if isinstance(op, ir.Union):
+        return dataclasses.replace(
+            op,
+            branches=tuple(
+                _qualify_query(b, database, scope, clusters) for b in op.branches
+            ),
         )
     if isinstance(op, ir.Where):
         return dataclasses.replace(

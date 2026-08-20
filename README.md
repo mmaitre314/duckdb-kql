@@ -124,14 +124,14 @@ Correctness measured against the real KQL engine (the [Kusto Emulator](https://l
 
 | | |
 |---|---|
-| Doc-corpus cases matching ground truth | **264** of 1036 (0 mismatches) |
+| Doc-corpus cases matching ground truth | **266** of 1036 (0 mismatches) |
 | [Azure Monitor's published KQL subset](https://github.com/mmaitre314/duckdb-kql/blob/main/docs/azure-monitor-profile.md) | **114 / 119 (96%)** |
-| Tabular operators | **17 / 41** |
+| Tabular operators | **18 / 41** |
 | Scalar functions / aggregates / binary operators | **111 / 19 / 33** |
 
 Supported operators: `where`, `project`, `project-away`, `project-rename`,
 `extend`, `summarize`, `join`, `mv-expand`, `distinct`, `count`,
-`sort` / `order by`, `take` / `limit`, `lookup`, `render`; sources `print`, `datatable`,
+`sort` / `order by`, `take` / `limit`, `union`, `lookup`, `render`; sources `print`, `datatable`,
 `range`, and tables; plus `let` and `declare query_parameters`.
 
 [The support matrix](https://github.com/mmaitre314/duckdb-kql/blob/main/docs/kql-support.md)
@@ -149,7 +149,7 @@ limitations and Kusto discrepancies for each.
 | [API reference](https://github.com/mmaitre314/duckdb-kql/blob/main/docs/api.md) | Every public function and type |
 | [Kusto SDK compatibility](https://github.com/mmaitre314/duckdb-kql/blob/main/docs/kusto-client.md) | What Layer 2 implements, no-ops, and refuses |
 | [Azure Monitor profile](https://github.com/mmaitre314/duckdb-kql/blob/main/docs/azure-monitor-profile.md) | Coverage against a published KQL subset |
-| [`docs/TRANSLATION.md`](https://github.com/mmaitre314/duckdb-kql/blob/main/docs/TRANSLATION.md) | Normative KQL→DuckDB mapping spec (R1–R14) |
+| [`docs/TRANSLATION.md`](https://github.com/mmaitre314/duckdb-kql/blob/main/docs/TRANSLATION.md) | Normative KQL→DuckDB mapping spec (R1–R15) |
 | [`docs/implementation-plan.md`](https://github.com/mmaitre314/duckdb-kql/blob/main/docs/implementation-plan.md) | Architecture and milestones |
 | [`docs/test-plan.md`](https://github.com/mmaitre314/duckdb-kql/blob/main/docs/test-plan.md) | Corpus harvesting, oracle, divergence catalog |
 | [`docs/kql-on-duckdb-landscape.md`](https://github.com/mmaitre314/duckdb-kql/blob/main/docs/kql-on-duckdb-landscape.md) | Survey of existing KQL-on-DuckDB work |

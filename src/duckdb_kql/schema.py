@@ -13,11 +13,14 @@ and only queries containing a ``join`` require one at all.
 
 from __future__ import annotations
 
+import fnmatch
+
 from . import ir
 from .errors import KqlSchemaError
 
 __all__ = [
     "Schema", "output_columns", "join_output_columns", "lookup_output_columns",
+    "union_output_columns", "match_wildcard", "surviving_branches",
     "disambiguate",
 ]
 
@@ -48,7 +51,52 @@ def output_columns(query: ir.Query, schema: Schema | None = None) -> list[str]:
     return cols
 
 
+def match_wildcard(source: ir.WildcardTableRef, schema: Schema | None) -> list[str]:
+    """Table names matching ``UT*``, in name order.
+
+    Kusto refuses a pattern that matches nothing (SEM0100), so this does too —
+    an empty union would otherwise return an empty result and look like data.
+
+    **Name order is a deliberate divergence.** Measured: Kusto expands a
+    wildcard in its own *creation* order — tables made as Zed, Alpha, Mid give
+    columns ``z1, a1, m1``, not ``a1, m1, z1``. A DuckDB catalog does not record
+    that order, and inventing an ordering that happens to agree on some
+    databases would be worse than one that is always explainable. The rows are
+    the same either way; only the outer union's column *order* differs, and only
+    when the matched tables have different columns. See docs/TRANSLATION.md R15.
+    """
+    if schema is None:
+        raise KqlSchemaError(
+            source.pattern,
+            hint="union with a wildcard needs the table list; use duckdb_kql.kql() "
+            "or pass schema=",
+        )
+    prefix = f"{source.database}." if source.database else ""
+    names = sorted(
+        name
+        for name in schema
+        if name.startswith(prefix)
+        and "." not in name[len(prefix):]
+        and fnmatch.fnmatchcase(name[len(prefix):], source.pattern)
+    )
+    if not names:
+        where = f" in database {source.database!r}" if source.database else ""
+        raise KqlSchemaError(
+            source.pattern,
+            hint=f"union wildcard matched no table{where}; known: {sorted(schema)}",
+        )
+    return names
+
+
 def _source_columns(source: ir.Source, schema: Schema | None) -> list[str]:
+    if isinstance(source, ir.WildcardTableRef):
+        matched = match_wildcard(source, schema)
+        columns: list[str] = []
+        for name in matched:
+            for column in _table_columns(name, schema):
+                if column not in columns:
+                    columns.append(column)
+        return columns
     if isinstance(source, ir.TableRef):
         # `Sales.Orders` when qualified, `Orders` when not — the same string
         # `engine.schema` keys attached databases by.
@@ -107,6 +155,8 @@ def _operator_columns(
     if isinstance(op, ir.Join):
         left, right = cols, output_columns(op.right, schema)
         return join_output_columns(left, right, op.kind)
+    if isinstance(op, ir.Union):
+        return union_output_columns(op, cols, schema)
     if isinstance(op, ir.Lookup):
         right = output_columns(op.right, schema)
         return lookup_output_columns(cols, right, [k.right for k in op.keys])
@@ -137,6 +187,59 @@ def join_output_columns(left: list[str], right: list[str], kind: str) -> list[st
         out.append(disambiguate(name, taken))
         taken.append(out[-1])
     return out
+
+
+def union_output_columns(
+    op: ir.Union, left: list[str], schema: Schema | None
+) -> list[str]:
+    """Column names a ``union`` produces (R15).
+
+    ``outer`` (the default) is the **union** of every branch's columns in order
+    of first appearance; ``inner`` is the intersection, in the same order.
+    Measured: `union A, B` gives ``x, y, z`` and `union B, A` gives ``x, z, y``,
+    so the order follows the branches rather than being sorted.
+
+    ``withsource=Name`` prepends one column, and it survives ``kind=inner`` —
+    the intersection is taken over the *data* columns only.
+    """
+    per_branch = [list(left)]
+    for branch in surviving_branches(op, schema):
+        per_branch.append(output_columns(branch, schema))
+
+    if op.kind == "inner":
+        shared = set(per_branch[0]).intersection(*(set(b) for b in per_branch[1:]))
+        out = [c for c in per_branch[0] if c in shared]
+    else:
+        out = []
+        for branch_columns in per_branch:
+            for name in branch_columns:
+                if name not in out:
+                    out.append(name)
+
+    return ([op.with_source] if op.with_source else []) + out
+
+
+def surviving_branches(op: ir.Union, schema: Schema | None) -> tuple[ir.Query, ...]:
+    """The branches that actually resolve, honouring ``isfuzzy=true``.
+
+    `isfuzzy` tolerates a **missing table** and nothing else: measured,
+    `union isfuzzy=true UT1, NoSuchTable` returns UT1's rows instead of failing.
+
+    It deliberately does not fire when no schema was supplied. "I cannot resolve
+    this branch because I was given no catalog" is not "this table does not
+    exist", and treating it as such would silently drop every branch and return
+    a plausible-looking short answer.
+    """
+    if not op.isfuzzy or schema is None:
+        return op.branches
+    kept = []
+    for branch in op.branches:
+        try:
+            output_columns(branch, schema)
+        except KqlSchemaError:
+            continue
+        kept.append(branch)
+    return tuple(kept)
 
 
 def lookup_output_columns(

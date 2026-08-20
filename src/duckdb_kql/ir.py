@@ -30,9 +30,10 @@ __all__ = [
     "Literal", "ColumnRef", "BinaryOp", "UnaryOp", "FunctionCall", "NamedExpr",
     "InList", "HasList", "PathAccess", "PathStep", "Parameter",
     # sources
-    "TableRef", "DataTable", "PrintSource", "RangeSource",
+    "TableRef", "WildcardTableRef", "DataTable", "PrintSource", "RangeSource",
     # operators
-    "Summarize", "Join", "JoinKey", "Lookup", "MvExpand", "ProjectAway", "ProjectRename",
+    "Summarize", "Join", "JoinKey", "Lookup", "Union", "MvExpand", "ProjectAway",
+    "ProjectRename",
     "Where", "Project", "Extend", "Take", "Sort", "SortKey", "Count", "Distinct",
 ]
 
@@ -178,6 +179,19 @@ class TableRef(Source):
         """``Orders`` or ``Sales.Orders`` — for messages, not for SQL."""
         name = self.name if self.database is None else f"{self.database}.{self.name}"
         return name if self.cluster is None else f"{self.cluster}.{name}"
+
+
+@dataclass(frozen=True)
+class WildcardTableRef(Source):
+    """``union UT*`` — a pattern standing for every table whose name matches.
+
+    Kept as a pattern rather than expanded during lowering, because expanding it
+    needs the catalog and lowering has no connection. `to_sql` resolves it
+    against the schema it is given.
+    """
+
+    pattern: str
+    database: str | None = None
 
 
 @dataclass(frozen=True)
@@ -433,6 +447,27 @@ class Lookup(Operator):
     right: Query
     keys: tuple[JoinKey, ...]
     kind: str = "leftouter"
+
+
+@dataclass(frozen=True)
+class Union(Operator):
+    """``union [kind=] [withsource=] A, B, ...`` (docs/TRANSLATION.md R15).
+
+    The leading form and the piped form are the *same thing*: measured on the
+    emulator, `union A, B` and `A | union B` return identical results, so
+    lowering makes the first branch the query's source and the rest these
+    branches. Modelling them separately would be two code paths that must not
+    disagree.
+    """
+
+    branches: tuple[Query, ...]
+    #: `outer` keeps the union of column names, `inner` the intersection.
+    kind: str = "outer"
+    #: `withsource=Name` adds a leading column naming each row's branch.
+    with_source: str | None = None
+    #: `isfuzzy=true` drops branches whose table does not exist rather than
+    #: failing. Only a missing *table* is tolerated; nothing else is.
+    isfuzzy: bool = False
 
 
 @dataclass(frozen=True)

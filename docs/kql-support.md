@@ -33,7 +33,7 @@ returns an approximate answer.
 
 ## Tabular operators
 
-17 of 41 supported.
+18 of 41 supported.
 
 ### Supported
 
@@ -54,6 +54,7 @@ returns an approximate answer.
 | `take` | Which rows come back is **not defined** without a preceding `sort` (R10). |
 | `limit` | Synonym for `take`. |
 | `render` | Parsed and **ignored**: there is no chart to draw. The rows are unchanged, so a query ending in `render` still returns its data. |
+| `union` | Branches are matched by column **name**, not position, and are never de-duplicated (R15). The default `kind=outer` keeps the union of the branches' columns with nulls for the gaps; `kind=inner` keeps the intersection. Column order is first appearance, left to right. `withsource=` names a branch by its table name, but a subquery, a `let`-bound name and a piped left side are all `union_argN`, counting the left side as 0. `isfuzzy=true` drops a branch whose table is missing; a wildcard matching no table is an error, not an empty result. **Residue:** two branches giving one name two different types are split into two columns by Kusto and merged by DuckDB — undetectable without column types. A wildcard also expands in *name* order here and in *creation* order in Kusto, so the columns of `union UT*` can be ordered differently; the rows are the same. |
 | `lookup` | Defaults to **`leftouter`**, not `join`'s `innerunique`, and only `leftouter` and `inner` exist — every other kind is refused, as Kusto refuses it. The right side's **key columns are dropped**, so there is no `Key1`; non-key collisions still get the `1` suffix (R14). Needs the input schema, like `join`. As with any outer join, an unmatched `string` column is null here but `''` in Kusto, so a downstream `!= ""` differs — `isempty()` is the portable test. |
 | `getschema` | Reports `ColumnName`, `ColumnOrdinal` (0-based), `DataType` and `ColumnType`, verified against the emulator including the non-obvious .NET names (`bool` is `System.SByte`, `decimal` is `System.Data.SqlTypes.SqlDecimal`). Types are DuckDB's, named as Kusto names them, so a DuckDB type with no Kusto counterpart reports as `dynamic` (composites) or `string` (everything else) rather than inventing a name. |
 
@@ -62,7 +63,6 @@ returns an approximate answer.
 | Operator | Notes |
 |---|---|
 | `top` | Needs sort-plus-limit with KQL's descending default and its undefined tie-breaking. `sort by X desc \| take n` is supported and equivalent apart from ties. |
-| `union` | Needs column-set unification across branches — KQL widens the schema rather than erroring on a mismatch — plus wildcard table resolution. |
 | `parse` | Needs a pattern-to-regex compiler covering the greedy/lazy `*` forms and typed captures. The largest single gap — around 27 corpus cases. `extract()` and `extract_all()` cover the regex cases meanwhile. |
 | `parse-where` | The same pattern compiler as `parse`, plus dropping non-matching rows. |
 | `project-keep` | Wildcard column selection against the input schema. The plumbing `project-away` uses would cover it. |
@@ -417,4 +417,4 @@ starts passing fails the build and has to leave the list.
 
 Coverage against a published external subset:
 [Azure Monitor profile](azure-monitor-profile.md). The normative mapping spec,
-including the full text of R1–R14: [`TRANSLATION.md`](TRANSLATION.md).
+including the full text of R1–R15: [`TRANSLATION.md`](TRANSLATION.md).
