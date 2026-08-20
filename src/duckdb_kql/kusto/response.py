@@ -65,3 +65,18 @@ class KustoResponseDataSet:
 
     def __len__(self) -> int:
         return self.tables_count
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        names = ", ".join(str(n) for n in self.tables_names)
+        return f"KustoResponseDataSet({self.tables_count} tables: {names})"
+
+    def _repr_html_(self) -> str:
+        """Render in a notebook, the way `duckdb_kql.kql()`'s relation does.
+
+        Without this, `client.execute(...)` in a Jupyter cell printed
+        ``<...KustoResponseDataSet object at 0x...>`` — the data was all there
+        and none of it was visible.
+        """
+        from ._display import response_html
+
+        return response_html(self)

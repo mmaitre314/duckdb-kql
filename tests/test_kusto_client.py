@@ -626,6 +626,118 @@ def test_allow_write_false_still_reads(writable) -> None:
     assert read_only.execute("MyDatabase", "T | count").primary_results[0][0][0] == 2
 
 
+# ---------------------------------------------------------------------------
+# Notebook rendering
+# ---------------------------------------------------------------------------
+#
+# `duckdb_kql.kql()` returns a relation, which Jupyter renders as a table.
+# `client.execute()` rendered as `<...KustoResponseDataSet object at 0x...>` —
+# the same data, invisible. These cover the display path only; nothing here
+# affects a value anyone reads.
+
+
+def test_a_response_renders_as_html(client) -> None:
+    html = client.execute("db", "StormEvents | take 3")._repr_html_()
+    assert "<table" in html and "</table>" in html
+    assert "State" in html  # a column name from the result
+    # Count in the primary table only; the metadata tables have rows too.
+    primary = html.split("<details")[0]
+    assert primary.count("<tr>") == 3 + 1  # three rows plus the header
+
+
+def test_the_result_table_renders_on_its_own(client) -> None:
+    table = client.execute("db", "StormEvents | take 2").primary_results[0]
+    assert "<table" in table._repr_html_()
+
+
+def test_str_of_a_table_is_still_the_sdks_json(client) -> None:
+    """`_repr_html_` is an addition; `str()` is what drop-in code logs."""
+    table = client.execute("db", "StormEvents | take 1").primary_results[0]
+    payload = json.loads(str(table))
+    assert payload["name"] == "PrimaryResult"
+    assert "<table" not in str(table)
+
+
+def test_column_types_are_shown(client) -> None:
+    html = client.execute("db", "print a = 1, b = 'x'")._repr_html_()
+    assert "long" in html and "string" in html
+
+
+def test_cell_values_are_escaped(client) -> None:
+    """A string column holding markup is data, not markup."""
+    html = client.execute("db", "print s = '<script>alert(1)</script>'")._repr_html_()
+    assert "<script>alert(1)</script>" not in html
+    assert "&lt;script&gt;" in html
+
+
+def test_a_column_name_is_escaped(client) -> None:
+    html = client.execute("db", "print ['<img src=x onerror=1>'] = 1")._repr_html_()
+    assert "<img" not in html
+    assert "&lt;img src=x onerror=1&gt;" in html
+
+
+def test_null_and_empty_string_are_distinguishable(client) -> None:
+    """R4's whole point: `isnull` and `isempty` are different questions."""
+    html = client.execute("db", "print n = '', y = dynamic(null)")._repr_html_()
+    assert "null" in html
+    assert "&quot;&quot;" in html
+
+
+def test_dynamic_renders_as_json_not_a_python_repr(client) -> None:
+    """A `dynamic` arrives parsed; `str()` on it would print Python, not JSON."""
+    html = client.execute("db", "print d = dynamic({'k': true, 'n': null})")._repr_html_()
+    assert "&quot;k&quot;: true" in html
+    assert "'k'" not in html
+
+
+def test_a_long_table_is_truncated_with_a_count(client) -> None:
+    from duckdb_kql.kusto._display import MAX_ROWS  # noqa: PLC0415
+
+    total = MAX_ROWS + 25
+    html = client.execute("db", f"range i from 1 to {total} step 1")._repr_html_()
+    assert f"{total - MAX_ROWS} more rows not shown" in html
+    assert html.count("<tr>") <= MAX_ROWS + 10  # + headers and the aux tables
+
+
+def test_a_long_cell_is_elided(client) -> None:
+    from duckdb_kql.kusto._display import MAX_CELL  # noqa: PLC0415
+
+    html = client.execute("db", f"print s = strrep('x', {MAX_CELL + 50})")._repr_html_()
+    assert "…" in html
+    assert "x" * (MAX_CELL + 1) not in html
+
+
+def test_metadata_tables_do_not_bury_the_answer(client) -> None:
+    """The two tables Kusto sends alongside a result go in a <details>."""
+    html = client.execute("db", "print a = 1")._repr_html_()
+    assert "<details" in html
+    assert "QueryCompletionInformation" in html
+    # The answer is before the collapsed section, not inside it.
+    assert html.index('class="dkql-result"') < html.index("<details")
+
+
+def test_reprs_say_what_the_object_holds(client) -> None:
+    response = client.execute("db", "StormEvents | take 3")
+    assert "KustoResponseDataSet" in repr(response)
+    assert "PrimaryResult" in repr(response)
+    assert "rows=3" in repr(response.primary_results[0])
+
+
+def test_rendering_does_not_need_pandas(client, monkeypatch) -> None:
+    """pandas is an optional extra; a response must still print without it."""
+    import builtins  # noqa: PLC0415
+
+    real_import = builtins.__import__
+
+    def no_pandas(name, *args, **kwargs):
+        if name == "pandas" or name.startswith("pandas."):
+            raise ImportError("pandas is not installed")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", no_pandas)
+    assert "<table" in client.execute("db", "print a = 1")._repr_html_()
+
+
 def test_a_refused_command_did_not_run(client) -> None:
     with pytest.raises(KustoUnsupportedError):
         client.execute("db", ".drop table StormEvents")

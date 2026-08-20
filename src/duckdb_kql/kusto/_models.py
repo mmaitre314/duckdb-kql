@@ -399,10 +399,25 @@ class KustoResultTable:
         return self.rows[key]
 
     def __str__(self) -> str:
+        # The SDK's own form — JSON. Left alone deliberately: `_repr_html_`
+        # below is what makes a notebook readable, and changing `str()` would
+        # change what drop-in code writes to a log.
         d = self.to_dict()
         if d["kind"] is not None:
             d["kind"] = d["kind"].value
         return json.dumps(d, default=str)
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return (
+            f"KustoResultTable(name={self.table_name!r}, "
+            f"rows={self.rows_count}, columns={self.columns_count})"
+        )
+
+    def _repr_html_(self) -> str:
+        """Render in a notebook. See duckdb_kql.kusto._display."""
+        from ._display import _STYLE, table_html
+
+        return _STYLE + table_html(self)
 
 
 def _register_with_sdk() -> None:

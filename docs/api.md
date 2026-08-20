@@ -259,6 +259,9 @@ reachable over a socket.
 | `execute_mgmt(database, command, properties=None)` | `.show version`, `.show databases`, `.show tables`, and the ingestion commands `.set` / `.append` / `.set-or-append` / `.set-or-replace` (subject to `allow_write`). Everything else raises `KustoUnsupportedError`. |
 | `close()` / context manager | Closes an owned connection. Idempotent. |
 
+The returned `KustoResponseDataSet` and its result tables render as HTML tables
+in Jupyter — see [Notebook display](kusto-client.md#notebook-display).
+
 `database` selects an ATTACHed DuckDB catalog when one matches. A name that
 matches nothing and conflicts with the client's configured database raises
 rather than silently answering from the wrong one. An ingestion command writes

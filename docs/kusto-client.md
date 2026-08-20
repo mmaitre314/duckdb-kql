@@ -179,6 +179,20 @@ seeds fixtures. `KustoClient.execute()` and `duckdb_kql.kql()` run them
 identically — the client used to refuse a command that `kql()` on the same
 connection accepted.
 
+## Notebook display
+
+A response renders as a table in Jupyter: the query's own output inline, with
+`@ExtendedProperties` and `QueryCompletionInformation` folded into a collapsed
+`<details>` so the metadata does not bury the answer. Column types are shown
+under the column names, `null` and `""` are drawn differently — `isnull` and
+`isempty` are different questions (R4) — and long tables are cut short with a
+count of what was left out.
+
+This is an **addition**, not a fidelity claim: the real `azure-kusto-data`
+renders as `<...KustoResponseDataSet object at 0x...>`, so a notebook that looks
+good here will look plainer against a real cluster. `str()` on a result table is
+untouched and still produces the SDK's JSON. The rendering needs no pandas.
+
 ## Databases
 
 A DuckDB connection has one database unless others are attached. The `database`
