@@ -205,7 +205,17 @@ SCALAR_FUNCTIONS: dict[str, FunctionSpec] = {
         _f("parse_json", "template", "TRY_CAST({0} AS JSON)", (1,), ("R9",)),
         _f("todynamic", "template", "TRY_CAST({0} AS JSON)", (1,), ("R9",)),
         _f("gettype", "template", "lower(json_type({0}))", (1,), ("R9",)),
-        _f("array_length", "template", "json_array_length({0})", (1,), ("R9",)),
+        # Two divergences in one row, both measured. DuckDB's json_array_length
+        # returns **UBIGINT**, so `array_length(x) - 1` widened to HUGEINT and
+        # `generate_series` had no overload for it — a `range` over an array's
+        # length failed to bind. KQL's array_length is a `long`, so the CAST is
+        # fidelity, not defensiveness. And a non-array is **null** in KQL, where
+        # json_array_length answers 0: `array_length(dynamic({'a':1}))` and
+        # `array_length(dynamic(null))` are both null on the emulator, and 0 is
+        # the kind of wrong answer a loop bound silently swallows.
+        _f("array_length", "template",
+           "(CASE WHEN json_type({0}) = 'ARRAY' "
+           "THEN CAST(json_array_length({0}) AS BIGINT) END)", (1,), ("R9",)),
         # list_concat is binary in DuckDB, so a variadic KQL call has to fold.
         _f("array_concat", "template", "", (), ("R9",), "variadic:fold-list_concat"),
         # array_index_of returns -1 when absent, NOT null: `== -1` is how KQL

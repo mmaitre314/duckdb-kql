@@ -1472,11 +1472,28 @@ def render_range(source: ir.RangeSource) -> str:
     Both endpoints are **inclusive**, which is what ``generate_series`` gives
     (``range`` in DuckDB excludes the stop, so the near-identical name is a
     trap). A backwards range yields no rows in both engines.
+
+    A **numeric** range casts its bounds to BIGINT. ``generate_series`` is
+    overloaded on exact types and has no HUGEINT form, so an expression that
+    merely widens made the whole query fail to bind — `array_length(x) - 1` did,
+    because DuckDB's json_array_length returns UBIGINT.
+
+    A **temporal** range must not be cast: `generate_series(TIMESTAMP,
+    TIMESTAMP, INTERVAL)` is its own overload, and casting a datetime to BIGINT
+    does not even convert. So the cast is skipped the moment any bound is
+    visibly temporal — a `range` over dates steps by a timespan, which makes
+    that easy to see.
     """
+    bounds = [source.start, source.stop, source.step]
+    temporal = any(
+        _is_datetime_expr(e) or _is_timespan_expr(e) for e in bounds
+    )
+    rendered = ", ".join(
+        render_expr(e) if temporal else f"CAST({render_expr(e)} AS BIGINT)"
+        for e in bounds
+    )
     return (
-        f"SELECT UNNEST(generate_series("
-        f"{render_expr(source.start)}, {render_expr(source.stop)}, "
-        f"{render_expr(source.step)})) AS {quote_ident(source.name)}"
+        f"SELECT UNNEST(generate_series({rendered})) AS {quote_ident(source.name)}"
     )
 
 

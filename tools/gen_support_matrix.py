@@ -118,6 +118,7 @@ SPECIFIC_GOTCHAS: dict[str, str] = {
     "indexof": "**0-based**, and returns `-1` when not found, where SQL's `position` is 1-based and returns `0`.",
     "strlen": "Counts **characters**, not bytes — a multi-byte string is shorter than its `octet_length`.",
     "substring": "**0-based**, and clamps out-of-range or negative input instead of erroring. SQL's `substring` is 1-based.",
+    "array_length": "Counts an array's elements as a `long`. A **non-array is null**, not 0 — `array_length(dynamic({'a':1}))` and `array_length(dynamic(null))` are both null, where DuckDB's json_array_length answers 0. The result is cast to BIGINT because it is otherwise unsigned, which widens `array_length(x) - 1` past what `range` can bind.",
     "split": "Returns a dynamic array. An empty separator and an out-of-range index both yield null rather than an error.",
     "isempty": "True for null **or** the empty string — not the same as `isnull`.",
     "isnotempty": "The negation of `isempty`, so a null is *not* non-empty.",

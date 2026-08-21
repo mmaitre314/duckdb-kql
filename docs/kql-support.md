@@ -256,7 +256,7 @@ Not supported: `arg_max`, `arg_min`, `binary_all_*`, `buildschema`,
 |---|---|
 | `array_concat` | Variadic in KQL; folded over DuckDB's binary `list_concat`. |
 | `array_index_of` | A missing property or out-of-range index is **null**, never an error. |
-| `array_length` | A missing property or out-of-range index is **null**, never an error. |
+| `array_length` | Counts an array's elements as a `long`. A **non-array is null**, not 0 — `array_length(dynamic({'a':1}))` and `array_length(dynamic(null))` are both null, where DuckDB's json_array_length answers 0. The result is cast to BIGINT because it is otherwise unsigned, which widens `array_length(x) - 1` past what `range` can bind. |
 | `array_reverse` | A missing property or out-of-range index is **null**, never an error. |
 | `array_slice` | A missing property or out-of-range index is **null**, never an error. |
 | `array_sort_asc` | A missing property or out-of-range index is **null**, never an error. |
