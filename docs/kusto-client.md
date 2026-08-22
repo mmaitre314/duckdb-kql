@@ -150,6 +150,7 @@ too, and both go through the same translation
 | `.show tables` | `TableName`, `DatabaseName`, `Folder`, `DocString` | Tables **and views** in the current database — a view is a queryable table as far as KQL is concerned. `Folder` and `DocString` are null. |
 | `.set` / `.append` / `.set-or-append` / `.set-or-replace` | `ExtentId`, `OriginalSize`, `ExtentSize`, `CompressedSize`, `IndexSize`, `RowCount` | Ingests the command's KQL body into the table. Only `RowCount` and a generated `ExtentId` are real; the sizes describe a cluster's storage layout and are null. Gated by `allow_write`, which defaults to on here and off in `duckdb-kql serve`. |
 | `.show entity_groups` | `Name`, `Entities` | The `entity_groups=` mapping this client was given, since a named group is cluster-side state and there is no cluster. `Entities` is a **string** holding a JSON array of the references, measured. No mapping means no rows. |
+| `.create database` / `.attach database` / `.detach database` | `DatabaseName`, `PersistentPath`, `Created`, `StoresMetadata`, `StoresData` (`Result` for detach) | Mapped onto DuckDB's `ATTACH` / `DETACH`: `volatile` is `:memory:`, `persist (<path>)` names a **file**. Gated by `allow_write`. See [`.create database`](create-database.md) for the grammar and what is refused. |
 | everything else | — | `KustoUnsupportedError`, naming the ones that work. |
 
 A command's result can be **piped into query operators**, as it can in Kusto:
@@ -173,6 +174,14 @@ Where a column describes something a cluster has and a DuckDB file does not, it
 is **null** rather than filled with something plausible. Policy and
 schema-management commands administer a cluster, and there is no cluster; a stub
 returning an empty table would look like a command that worked.
+
+Database lifecycle is the other exception, for the same reason: `.create`,
+`.attach` and `.detach` describe *where the data lives*, which a DuckDB file
+has an answer for. Kusto persists into folders — conventionally one for
+metadata and one for data — where DuckDB uses a single file for both, so a
+command giving several paths uses the first and reports it back in
+`PersistentPath`. A remote blob URI is refused; there is nothing local behind
+it.
 
 Ingestion is the exception, because it describes *data* rather than a cluster:
 the four commands above load a KQL body into a table, which is how a test suite

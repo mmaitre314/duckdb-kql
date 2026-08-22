@@ -150,7 +150,8 @@ limitations and Kusto discrepancies for each.
 | [API reference](https://github.com/mmaitre314/duckdb-kql/blob/main/docs/api.md) | Every public function and type |
 | [Kusto SDK compatibility](https://github.com/mmaitre314/duckdb-kql/blob/main/docs/kusto-client.md) | What Layer 2 implements, no-ops, and refuses |
 | [Azure Monitor profile](https://github.com/mmaitre314/duckdb-kql/blob/main/docs/azure-monitor-profile.md) | Coverage against a published KQL subset |
-| [`docs/TRANSLATION.md`](https://github.com/mmaitre314/duckdb-kql/blob/main/docs/TRANSLATION.md) | Normative KQL→DuckDB mapping spec (R1–R15) |
+| [`docs/TRANSLATION.md`](https://github.com/mmaitre314/duckdb-kql/blob/main/docs/TRANSLATION.md) | Normative KQL→DuckDB mapping spec (R1–R16) |
+| [`docs/create-database.md`](https://github.com/mmaitre314/duckdb-kql/blob/main/docs/create-database.md) | Reference notes for `.create database`, reconstructed from the KQL parser |
 | [`docs/implementation-plan.md`](https://github.com/mmaitre314/duckdb-kql/blob/main/docs/implementation-plan.md) | Architecture and milestones |
 | [`docs/test-plan.md`](https://github.com/mmaitre314/duckdb-kql/blob/main/docs/test-plan.md) | Corpus harvesting, oracle, divergence catalog |
 | [`docs/kql-on-duckdb-landscape.md`](https://github.com/mmaitre314/duckdb-kql/blob/main/docs/kql-on-duckdb-landscape.md) | Survey of existing KQL-on-DuckDB work |

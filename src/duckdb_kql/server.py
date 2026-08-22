@@ -703,6 +703,12 @@ def _declared_schema(csl: str) -> tuple[CommandColumn, ...] | None:
     the query operators over it and the answer is typed like any other query —
     so only the bare form gets the transcribed labels.
     """
+    from .databases import database_command_schema, is_database_command  # noqa: PLC0415
+
+    if is_database_command(csl):
+        # A lifecycle command is not in `SCHEMA` — it takes arguments, so it is
+        # parsed rather than looked up — but it declares a shape just the same.
+        return database_command_schema(csl)
     if not is_control_command(csl):
         return None
     command, pipeline = split_command(csl)

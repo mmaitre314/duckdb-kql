@@ -358,8 +358,15 @@ class KustoClient:
         # `.show databases` reported three of Kusto's ten columns, which is the
         # shape of breakage that only shows up in a caller indexing by name.
         from ..control import UNSUPPORTED_HINT, translate_control_command
+        from ..databases import is_database_command
         from ..errors import KqlUnsupportedError
         from ..ingest import is_ingestion_command
+
+        if is_database_command(query):
+            # Creating or attaching a database writes, so it goes through the
+            # same gate ingestion does — and through `to_sql`, which is where
+            # the command is parsed.
+            return self._execute_write(con, database, query, properties, "database")
 
         if is_ingestion_command(query):
             # Ingestion is the one control command whose body is a whole KQL
@@ -367,7 +374,7 @@ class KustoClient:
             # Routing it here used to be missing entirely, and the command came
             # back as "unsupported by duckdb-kql" even though
             # `duckdb_kql.kql(con, same_command, database=...)` ran it.
-            return self._execute_ingestion(con, database, query, properties)
+            return self._execute_write(con, database, query, properties, "ingestion")
 
         try:
             sql = translate_control_command(query, self.entity_groups)
@@ -393,14 +400,19 @@ class KustoClient:
 
         return self._response(query, columns, types, rows, properties)
 
-    def _execute_ingestion(
+    def _execute_write(
         self,
         con: Any,
         database: str | None,
         query: str,
         properties: ClientRequestProperties | None,
+        kind: str,
     ) -> KustoResponseDataSet:
-        """Run one ingestion command, returning Kusto's extents table.
+        """Run one command that writes — ingestion, or a database lifecycle one.
+
+        Both take arguments and both are translated by `to_sql` rather than
+        looked up in the command table, so they share this path; *kind* only
+        names the family in an error.
 
         The target is qualified with *database* rather than left to the ``USE``
         that `_select_database` just issued. Both would write to the same place
@@ -420,7 +432,7 @@ class KustoClient:
 
         if not self.allow_write:
             raise KustoUnsupportedError(
-                f"ingestion command {query.strip().split()[0]}",
+                f"{kind} command {query.strip().split()[0]}",
                 hint="this client was constructed with allow_write=False",
             )
 
@@ -430,7 +442,7 @@ class KustoClient:
             )
         except KqlUnsupportedError as exc:
             raise KustoUnsupportedError(
-                f"ingestion command {query.strip()!r}", hint=str(exc)
+                f"{kind} command {query.strip()!r}", hint=str(exc)
             ) from exc
         except KqlError as exc:
             raise _semantic_error(exc) from exc

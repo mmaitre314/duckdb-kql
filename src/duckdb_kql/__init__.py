@@ -210,6 +210,11 @@ def to_sql(
     from .clusters import effective_clusters
     from .control import COLUMNS, is_control_command, split_command
     from .control import translate_control_command as _command_sql
+    from .databases import (
+        is_database_command,
+        parse_database_command,
+        render_database_command,
+    )
     from .entity_groups import effective_entity_groups
     from .ingest import is_ingestion_command, parse_ingestion, render_ingestion
     from .lower import lower, qualify
@@ -232,6 +237,17 @@ def to_sql(
             qualify(lower(ingestion.source), database, resolved), schema
         )
         return _Result(render_ingestion(ingestion, str(rows_sql), database))
+
+    if is_database_command(kql):
+        # A lifecycle command WRITES — it creates or opens a database — so it
+        # sits behind the same gate ingestion does rather than with the
+        # read-only `.show` family.
+        if not allow_write:
+            raise KqlUnsupportedError(
+                f"database command {kql.strip().split()[0]}",
+                hint="writes are disabled here; see allow_write",
+            )
+        return _Result(render_database_command(parse_database_command(kql)))
 
     if is_control_command(kql):
         # A different dialect (see duckdb_kql.control), and one that composes
