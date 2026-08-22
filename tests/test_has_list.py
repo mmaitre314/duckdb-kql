@@ -300,3 +300,92 @@ def test_the_boundary_applies_only_at_term_character_edges(con) -> None:
     con.execute("INSERT INTO E2 VALUES ('a b'),('xa b'),('x ab y'),('x a-b y')")
     assert _col(con, 'E2 | where s has "a "') == ["a b"]
     assert _col(con, 'E2 | where s has " a"') == ["x a-b y"]
+
+
+# ---------------------------------------------------------------------------
+# The folded term pattern — correctness, then the cost of getting it wrong
+# ---------------------------------------------------------------------------
+
+
+def test_python_agrees_with_duckdb_about_what_a_term_character_is(con) -> None:
+    """`is_term_char` reimplements RE2's ``[\\pL\\pN]``, so it must be exact.
+
+    This is the one correctness risk in deciding the term boundary at
+    translation time instead of emitting a ``CASE`` for DuckDB to evaluate. It
+    is worth an exhaustive check rather than a sampled one: a single
+    disagreement would silently change what `has` matches, for one alphabet,
+    on one row in a million.
+    """
+    from duckdb_kql.translate.functions import is_term_char  # noqa: PLC0415
+
+    chars = (
+        [chr(i) for i in range(1, 0x2FFF)]
+        + [chr(i) for i in range(0x3000, 0x33FF)]
+        + [chr(i) for i in range(0xFB00, 0xFFFF)]
+        + [chr(i) for i in (0x1D400, 0x1F600, 0x10140, 0x1D7CE)]
+    )
+    chars = [c for c in chars if c not in ("'", "\\", "\x00")]
+    con.execute("CREATE TABLE C AS SELECT unnest($1::VARCHAR[]) AS ch", [chars])
+    duck = dict(con.execute(
+        r"SELECT ch, regexp_matches(ch, '[\pL\pN]') FROM C"
+    ).fetchall())
+
+    disagree = [c for c in chars if duck[c] != is_term_char(c)]
+    assert not disagree, [f"U+{ord(c):04X}" for c in disagree[:20]]
+    assert len(chars) > 14_000  # the check is only worth anything if it is wide
+
+
+def test_a_literal_needle_produces_a_constant_pattern(con) -> None:
+    """No ``CASE`` in the pattern — that is the whole point.
+
+    Not a style assertion. A pattern concatenated from ``CASE`` expressions is
+    not a constant, so RE2 rebuilds and recompiles it **per row**; folding it
+    here took one corpus query from 51ms to 15ms and a `has_any` over a literal
+    array from 28 *seconds* to 29 milliseconds.
+    """
+    for kql in ('T | where s has "alpha"', 'T | where s has_any ("a", "b")',
+                'T | where s has_any (dynamic(["a", "b"]))'):
+        sql = str(duckdb_kql.to_sql(kql))
+        assert "CASE WHEN regexp_matches" not in sql, sql
+        assert "list_filter" not in sql, sql
+
+
+def test_a_runtime_needle_still_gets_the_case_form(con) -> None:
+    """The fold is an optimisation for literals, not a change of rule.
+
+    A needle that is a column, or an array this cannot read, must keep the
+    emitted boundary test — otherwise the term rule would simply be wrong there.
+    """
+    sql = str(duckdb_kql.to_sql("T | where s has_any (dynamic([1, 2]))"))
+    assert "list_filter" in sql, sql
+    two_columns = str(duckdb_kql.to_sql("T | where s has t"))
+    assert "CASE WHEN regexp_matches" in two_columns, two_columns
+
+
+@pytest.mark.parametrize(
+    ("predicate", "expected"),
+    [
+        # A null needle matches ANYTHING, exactly as `has ""` does. Measured on
+        # the emulator; `list_filter` used to drop the null predicate and lose
+        # the row instead, which was a silent wrong answer.
+        ('has_any (dynamic([null]))', ["alpha beta", "alpha", "beta gamma", "", "a_b"]),
+        ('has_all (dynamic([null]))', ["alpha beta", "alpha", "beta gamma", "", "a_b"]),
+        ('has_any (dynamic(["zz", null]))',
+         ["alpha beta", "alpha", "beta gamma", "", "a_b"]),
+        # ...and under `has_all` it simply drops out of the conjunction.
+        ('has_all (dynamic(["alpha", null]))', ["alpha beta", "alpha"]),
+        ('has_all (dynamic(["zz", null]))', []),
+    ],
+)
+def test_a_null_needle_matches_anything(con, predicate: str, expected: list) -> None:
+    assert _col(con, f"T | where s {predicate}") == expected
+
+
+def test_a_degenerate_literal_array_keeps_the_runtime_shape(con) -> None:
+    """`has_all (dynamic([]))` is **true** and `has_any (dynamic([]))` false.
+
+    The unroll has no needles to write out, so an empty array stays on the
+    ``len(...) = len(...)`` path where those two answers fall out.
+    """
+    assert len(_col(con, "T | where s has_all (dynamic([]))")) == 5
+    assert _col(con, "T | where s has_any (dynamic([]))") == []

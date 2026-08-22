@@ -179,6 +179,12 @@ but not its meaning: each item is a whole-**term** match like `has`, so
 value list, a `dynamic` array, or a subquery. Kusto has no `!has_any`,
 `!has_all` or `has_any_cs`, and neither does this — they are refused.
 
+Two degenerate needle sets, both measured: a **null** needle matches
+anything, exactly as `has ""` does — so `has_any (dynamic([null]))` is
+true for every row, while under `has_all` the null simply drops out of
+the conjunction. And `has_all` over an **empty** list is **true** (the
+empty conjunction) where `has_any` over one is false.
+
 Not supported: `between` / `!between`, and the term-prefix forms
 `hasprefix` / `hassuffix`.
 

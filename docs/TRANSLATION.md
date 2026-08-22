@@ -179,6 +179,33 @@ array, or a tabular subquery; all three were confirmed accepted.
 There is **no** `!has_any`, `!has_all` or `has_any_cs` — Kusto rejects all
 three, so they are refused here too.
 
+**Two degenerate needle sets, both measured, neither guessable:**
+
+| form | Kusto |
+|---|---|
+| `has_any (dynamic([null]))`, `has_any (dynamic(['a', null]))` | **every row** — a null needle matches anything, exactly as `has ""` does |
+| `has_all (dynamic(['a', null]))` | the rows matching `'a'` — the null drops out of the conjunction |
+| `has_all (dynamic([]))`, `has_all (T)` for an empty `T` | **every row** — the empty conjunction is true |
+| `has_any (dynamic([]))` | no rows |
+
+Both were wrong here until the term pattern was folded: `list_filter` drops a
+null predicate rather than keeping the row, and `bool_and` over zero rows is
+NULL, which the R4 coalesce turned into false.
+
+**The term pattern must be a constant wherever the needle is.** A literal needle
+lets the boundary be decided at translation time (`is_term_char`, checked
+exhaustively against RE2's `[\pL\pN]`), so RE2 compiles the pattern once; built
+from `CASE` expressions instead it is rebuilt and recompiled **per row**, and
+inside a `list_filter` lambda per *(row, needle)*. Measured on a 5,000-row
+table: `has_all` over four literal needles went from **28 seconds** to 29ms.
+A literal `dynamic([...])` array is therefore unrolled into one constant test
+per needle rather than filtered at run time.
+
+For a **tabular** right-hand side the needles are real runtime data and cannot
+be folded, so that form uses `EXISTS` (which short-circuits and decorrelates
+into a semi-join) behind a `contains` prefilter — sound because a term match
+implies a case-insensitive substring match. Measured: 3415ms → 45ms.
+
 **`not()` is a function, not the `!` prefix.** It is also the one member of this
 neighbourhood that does *not* get R4's totality treatment: `not(bool(null))` is
 **null**, not true, so SQL's `NOT` maps across directly. `not(1)` is `false`, so

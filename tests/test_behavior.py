@@ -15,6 +15,7 @@ from __future__ import annotations
 import functools
 import json
 import os
+import time
 from pathlib import Path
 
 import pytest
@@ -35,9 +36,13 @@ pytestmark = pytest.mark.skipif(not CORPUS.is_file(), reason=f"no corpus at {COR
 #: The **floor**, not the typical count. One corpus case (`in-cs-operator-04`)
 #: contains a `top` whose cut falls inside a tie, so it sometimes matches the
 #: frozen expectation and sometimes is classified nondeterministic by the
-#: reproducibility check in `_run` — the count is legitimately 277 or 278. A
+#: reproducibility check in `_run` — the count is legitimately 280 or 281. A
 #: ratchet set at the higher number would fail on the runs that get the other.
-BASELINE_PASSING = 277
+#:
+#: Went 277 -> 280 with the `has_any`/`has_all` rewrite: a null needle matches
+#: anything and `has_all` over an empty needle set is true, neither of which the
+#: old `list_filter` / `bool_and` shapes could express.
+BASELINE_PASSING = 280
 
 #: Cases we translate but knowingly get wrong, with the reason. This is an
 #: **admission of a bug**, not a waiver: each entry is a real KQL↔DuckDB gap
@@ -81,6 +86,10 @@ def _connection():
     # to_sql() directly, so it must set it itself.
     con.execute("SET TimeZone='UTC'")
     fixtures.load_duckdb(con)
+    # Warm DuckDB's first-query overhead — measured at ~200ms, and otherwise
+    # charged to whichever case happens to run first, which pytest-randomly
+    # reshuffles every run. It would land on `SLOWEST_QUERY_BUDGET` as noise.
+    con.execute("SELECT count(*) FROM StormEvents WHERE State = $s", {"s": "X"})
     return con
 
 
@@ -93,6 +102,24 @@ def _schema() -> dict:
 def _frozen_cases() -> tuple[dict, ...]:
     data = json.loads(CORPUS.read_text(encoding="utf-8"))["cases"]
     return tuple(c for c in data if c.get("expected") is not None)
+
+
+#: Case id -> seconds DuckDB spent on it, filled in as the sweep runs.
+ELAPSED: dict[str, float] = {}
+
+#: How long one corpus query may take against the 5,000-row fixture.
+#:
+#: The corpus is the only place a generated-SQL performance bug is visible at
+#: all — everything else here runs on a handful of rows, where a mapping that is
+#: 300x too slow still finishes instantly and looks correct. It has happened:
+#: `has_any` over a literal array put the term pattern inside a `list_filter`
+#: lambda, so RE2 recompiled it per (row, needle) and one query took **28
+#: seconds**. Nothing failed. It was 63% of this suite's runtime and would have
+#: been far worse on a real table.
+#:
+#: Set well above the current worst (~40ms) and well below anything anyone would
+#: notice as a bug, so it catches the class without flapping on a slow runner.
+SLOWEST_QUERY_BUDGET = 1.0
 
 
 def _run(case: dict) -> tuple[str, str]:
@@ -116,10 +143,15 @@ def _run(case: dict) -> tuple[str, str]:
         # rather than letting one abort the whole sweep.
         return "crash", f"{type(e).__name__}: {e}"
 
+    started = time.perf_counter()
     try:
         actual = _execute(sql)
     except Exception as e:  # noqa: BLE001 - any DuckDB failure is a real signal
         return "sql_error", f"{type(e).__name__}: {e}"
+    finally:
+        # Timed here rather than in `_execute` so the reproducibility re-runs,
+        # which only happen for a case that already failed, stay out of it.
+        ELAPSED[case["id"]] = time.perf_counter() - started
 
     opts = ComparisonOptions.for_query(case["kql"])
     result = compare(case["expected"], actual, opts)
@@ -237,12 +269,35 @@ def test_coverage_has_not_regressed() -> None:
     )
 
 
+def test_no_query_is_pathologically_slow() -> None:
+    """A correct answer that takes 28 seconds is still a bug.
+
+    This is the only test in the suite that can see one: every other fixture is
+    small enough that a mapping doing 60,000 regex compilations per query still
+    returns instantly. See :data:`SLOWEST_QUERY_BUDGET`.
+    """
+    _results()  # populates ELAPSED
+    over = sorted(
+        ((d, cid) for cid, d in ELAPSED.items() if d > SLOWEST_QUERY_BUDGET),
+        reverse=True,
+    )
+    detail = "\n".join(f"  {d:7.2f}s  {cid}" for d, cid in over[:10])
+    assert not over, (
+        f"{len(over)} queries took longer than {SLOWEST_QUERY_BUDGET}s against a "
+        f"5,000-row fixture — the generated SQL, not the data, is the problem:\n"
+        f"{detail}"
+    )
+
+
 def test_report_coverage(capsys: pytest.CaptureFixture) -> None:
     """Not an assertion — prints the coverage breakdown for visibility."""
     r = _results()
     total = sum(len(v) for v in r.values())
+    slowest = max(ELAPSED.items(), key=lambda kv: kv[1], default=("-", 0.0))
     with capsys.disabled():
         print(
+            f"\n  L3 slowest query: {slowest[1] * 1000:.0f}ms ({slowest[0]})"
+            f" | budget {SLOWEST_QUERY_BUDGET * 1000:.0f}ms"
             f"\n  L3 coverage: {len(r['pass'])}/{total} match ground truth"
             f" | {len(r['unsupported'])} not yet supported"
             f" | {len(r['sql_error'])} sql errors"

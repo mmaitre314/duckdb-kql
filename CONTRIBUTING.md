@@ -21,6 +21,13 @@ pytest
 A dev container is included (`.devcontainer/`) if you would rather not install
 Docker, DuckDB and the emulator yourself.
 
+While iterating, skip the corpus sweep — it is a third of the runtime and only
+moves when a mapping does:
+
+```bash
+pytest --ignore=tests/test_behavior.py    # ~55s, everything but ground truth
+```
+
 Before opening a pull request:
 
 ```bash
@@ -30,6 +37,21 @@ pytest
 ```
 
 All three run in CI on every pull request.
+
+### If the suite gets slow
+
+Profile before optimising the harness — it has been the *generated SQL* both
+times, not pytest:
+
+```bash
+pytest --durations=25
+```
+
+`tests/test_behavior.py` is the only place a slow mapping is visible at all,
+because it is the only fixture with 5,000 rows; everywhere else a query doing
+60,000 regex compilations still returns instantly. It prints its slowest query
+and fails above `SLOWEST_QUERY_BUDGET`, so that class of bug should announce
+itself now rather than being found in a profile.
 
 ## Adding a mapping
 

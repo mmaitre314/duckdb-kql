@@ -11,11 +11,18 @@ Every rule marked ``Rn`` below is a semantic invariant from ``TRANSLATION.md``
 from __future__ import annotations
 
 import dataclasses
+import json
 from typing import TYPE_CHECKING, Any
 
 from .. import ir
 from ..errors import KqlUnsupportedError
-from .functions import _TODATETIME, BINARY_OPERATORS, lookup, lookup_aggregate
+from .functions import (
+    _TODATETIME,
+    BINARY_OPERATORS,
+    lookup,
+    lookup_aggregate,
+    term_match_sql,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -206,7 +213,7 @@ def render_expr(node: ir.Expr) -> str:
         left, right = render_expr(node.left), render_expr(node.right)
 
         def build(sqls: Sequence[str]) -> str:
-            rendered = spec.template.format(*sqls)
+            rendered = _render_term_operator(node, sqls) or spec.template.format(*sqls)
             if spec.null_result is None:
                 return rendered
             return _apply_null_semantics(
@@ -1583,33 +1590,32 @@ def render_has_list(node: ir.HasList) -> str:
 
 
 def _render_has_list(node: ir.HasList, value: str) -> str:
-    from .functions import term_match_sql
-
     joiner = " AND " if node.require_all else " OR "
 
     if node.subquery is not None:
-        # A tabular right-hand side. Rendered as a scalar subquery over the
-        # first column so the term test stays the same one used everywhere else.
-        inner = str(to_sql(node.subquery))
-        needle = "_needle"
-        test = term_match_sql(value, f"CAST({needle} AS VARCHAR)")
-        agg = "bool_and" if node.require_all else "bool_or"
-        sql = (
-            f"(SELECT coalesce({agg}({test}), FALSE) FROM "
-            f"(SELECT COLUMNS(*) AS {needle} FROM ({inner})) )"
-        )
-        return _has_list_result(sql, node)
+        return _render_has_subquery(node, node.subquery, value)
 
     parts = []
     for item in node.items:
         if _is_dynamic(item):
-            # `has_any (dynamic(["a","b"]))` is a list *inside one item*, so the
-            # needles are only known at runtime and cannot be unrolled here.
+            unrolled = _unrolled_needles(node, value, item)
+            if unrolled is not None:
+                parts.append(unrolled)
+                continue
+            # A list whose needles are only known at run time — a column, a
+            # bound parameter, or a literal array this cannot read (see
+            # `_literal_needles`). One `list_filter`, and the term pattern is
+            # rebuilt per row because the lambda variable is not a constant.
             arr = f"CAST({render_expr(item)} AS VARCHAR[])"
             test = term_match_sql(value, "t")
             matched = f"len(list_filter({arr}, t -> {test}))"
             parts.append(f"({matched} = len({arr}))" if node.require_all
                          else f"({matched} > 0)")
+        elif isinstance(item, ir.Literal) and item.kind == "string":
+            parts.append(
+                term_match_sql(value, quote_string(str(item.value)),
+                               needle_text=str(item.value))
+            )
         else:
             parts.append(term_match_sql(value, f"CAST({render_expr(item)} AS VARCHAR)"))
 
@@ -1619,6 +1625,144 @@ def _render_has_list(node: ir.HasList, value: str) -> str:
 
     sql = f"({joiner.join(parts)})"
     return _has_list_result(sql, node)
+
+
+def _render_has_subquery(node: ir.HasList, subquery: ir.Query, value: str) -> str:
+    """``x has_any (T)`` / ``x has_all (T)`` — a **tabular** right-hand side.
+
+    KQL tests against the subquery's first column. The needles are real runtime
+    data here, so the pattern cannot be folded the way `_unrolled_needles` folds
+    a literal array, and RE2 recompiles it for every *(row, needle)* pair.
+
+    Two things make that affordable:
+
+    * **`EXISTS`, not an aggregate.** ``bool_or`` over a correlated scalar
+      subquery visits every pair; `EXISTS` stops at the first hit and DuckDB
+      turns it into a semi-join.
+    * **A substring prefilter.** A whole-term match implies a case-insensitive
+      substring match, so ``contains`` is a sound cheap gate in front of the
+      regex — and it rejects almost every pair without compiling anything.
+
+    Measured together on the corpus fixture: 3415ms -> 45ms, same 44 groups.
+
+    It also **fixes** the degenerate case. ``has_all`` over an empty subquery is
+    true on the emulator, matching ``has_all (dynamic([]))``; the old
+    ``bool_and`` over zero rows gave NULL and the coalesce turned it into false.
+    ``NOT EXISTS`` over nothing is true, which is the measured answer.
+    """
+    inner = str(to_sql(subquery))
+    needle = "CAST(_needle AS VARCHAR)"
+    # Sound because `has` implies `contains`, case-insensitively (R3).
+    prefilter = f"contains(lower({value}), lower({needle}))"
+    matched = f"({prefilter} AND {term_match_sql(value, needle)})"
+    source = f"({inner}) AS _q(_needle)"
+    if not node.require_all:
+        return _has_list_result(f"EXISTS (SELECT 1 FROM {source} WHERE {matched})", node)
+    # "every needle matches" is "no needle fails". The left operand has to be
+    # tested separately: a null haystack finds no failures, so NOT EXISTS would
+    # answer true where KQL answers false (R4).
+    return _has_list_result(
+        f"({value} IS NOT NULL AND NOT EXISTS "
+        f"(SELECT 1 FROM {source} WHERE NOT coalesce({matched}, TRUE)))",
+        node,
+    )
+
+
+#: The `has` family, and whether each is case-sensitive and negated. Only these
+#: build a term pattern; the rest of the string operators are LIKE-based.
+_TERM_OPERATORS = {
+    "has": (False, False),
+    "!has": (False, True),
+    "has_cs": (True, False),
+    "!has_cs": (True, True),
+}
+
+
+def _render_term_operator(node: ir.BinaryOp, sqls: Sequence[str]) -> str | None:
+    """`has` against a **literal** needle, with the term pattern folded.
+
+    Returns ``None`` for anything else, leaving the operator table's template —
+    which builds the pattern from two ``CASE`` expressions — to handle a needle
+    that is genuinely unknown until the query runs.
+
+    Worth the special case because the folded form is a constant RE2 compiles
+    once: measured on the 5,000-row corpus fixture, `Text has 'x'` went from
+    51ms to 15ms. The same fold inside `has_any`'s list is worth far more; see
+    :func:`_unrolled_needles`.
+    """
+    spec = _TERM_OPERATORS.get(node.op)
+    if spec is None:
+        return None
+    if not (isinstance(node.right, ir.Literal) and node.right.kind == "string"):
+        return None
+    case_sensitive, negated = spec
+    matched = term_match_sql(
+        sqls[0],
+        quote_string(str(node.right.value)),
+        case_sensitive=case_sensitive,
+        needle_text=str(node.right.value),
+    )
+    return f"NOT {matched}" if negated else matched
+
+
+def _literal_needles(item: ir.Expr) -> list[str | None] | None:
+    """The needles of ``dynamic([...])`` when they can be read at translation time.
+
+    ``None`` — meaning "leave it to run time" — unless the item is a **literal**
+    array whose every element is a string or a JSON null. Numbers and booleans
+    are excluded on purpose: DuckDB's ``JSON -> VARCHAR[]`` cast renders them
+    (`1`, `true`, `1.5`) and reproducing that formatting here would be a second
+    implementation to keep in step, for needles nobody writes. An empty array is
+    excluded too, so the ``len(...) = len(...)`` shape keeps deciding the
+    degenerate `has_all (dynamic([]))`, which is **true**.
+    """
+    if not (isinstance(item, ir.Literal) and item.kind == "dynamic"):
+        return None
+    try:
+        value = json.loads(str(item.value))
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(value, list) or not value:
+        return None
+    if not all(v is None or isinstance(v, str) for v in value):
+        return None
+    return list(value)
+
+
+def _unrolled_needles(node: ir.HasList, value: str, item: ir.Expr) -> str | None:
+    """``has_any``/``has_all`` over a literal array, one constant test per needle.
+
+    **This is the difference between 28 milliseconds and 28 seconds.** The
+    run-time form puts the term test inside ``list_filter(arr, t -> …)``, where
+    the regex pattern is concatenated from the lambda variable — so RE2 has no
+    constant to compile and rebuilds the pattern for every *(row, needle)* pair.
+    On the 5,000-row corpus fixture, `has_all` over four needles meant ~60,000
+    regex compilations and 28.6 **seconds**; unrolled it is 28.6 milliseconds,
+    for identical results. It was 98% of the acceptance suite's query time.
+
+    A **null** needle matches anything, exactly as `has ""` does. Measured:
+    ``'x' has_any (dynamic(['a', null]))`` is true on the emulator and was false
+    here, because ``list_filter`` drops a null predicate rather than keeping the
+    row — a silent wrong answer that only became visible while unrolling.
+
+        has_any (dynamic([null]))          all rows
+        has_any (dynamic(['a', null]))     all rows
+        has_all (dynamic(['a', null]))     the rows matching 'a'
+        has_all (dynamic([null]))          all rows
+    """
+    needles = _literal_needles(item)
+    if needles is None:
+        return None
+    if not node.require_all and any(n is None for n in needles):
+        return "TRUE"
+    present = [n for n in needles if n is not None]
+    if not present:
+        return "TRUE"  # `has_all` of nothing but nulls
+    tests = [
+        term_match_sql(value, quote_string(n), needle_text=n) for n in present
+    ]
+    joiner = " AND " if node.require_all else " OR "
+    return f"({joiner.join(tests)})"
 
 
 def _has_list_result(sql: str, node: ir.HasList) -> str:

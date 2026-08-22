@@ -14,7 +14,8 @@ from typing import Any
 
 __all__ = [
     "FunctionSpec", "SCALAR_FUNCTIONS", "lookup", "BINARY_OPERATORS", "BinarySpec",
-    "AggregateSpec", "AGGREGATE_FUNCTIONS", "lookup_aggregate",
+    "AggregateSpec", "AGGREGATE_FUNCTIONS", "lookup_aggregate", "term_match_sql",
+    "is_term_char",
 ]
 
 
@@ -413,7 +414,30 @@ _TERM_START = r"(?:^|[^\pL\pN])"
 _TERM_END = r"(?:$|[^\pL\pN])"
 
 
-def term_match_sql(haystack: str, needle: str, *, case_sensitive: bool = False) -> str:
+def is_term_char(char: str) -> bool:
+    """Whether *char* is a Kusto **term** character — RE2's ``[\\pL\\pN]``.
+
+    ``\\pL`` is Unicode's Letter categories and ``\\pN`` its Number ones, which
+    is exactly ``str.isalpha()`` and ``str.isnumeric()``. Not ``isalnum()``,
+    which also admits Nd-adjacent oddities, and not ``\\w``, which admits the
+    underscore — the whole reason `has` cannot be written with ``\\b``.
+
+    Checked character by character against DuckDB's own
+    ``regexp_matches(ch, '[\\pL\\pN]')`` over 14,590 code points spanning the
+    BMP and four astral samples: **zero** disagreements
+    (``tests/test_has_list.py``). That equality is what lets the boundary be
+    decided here instead of by the database.
+    """
+    return bool(char) and (char.isalpha() or char.isnumeric())
+
+
+def term_match_sql(
+    haystack: str,
+    needle: str,
+    *,
+    case_sensitive: bool = False,
+    needle_text: str | None = None,
+) -> str:
     """SQL testing whether *needle* occurs in *haystack* as a whole term.
 
     Shared by `has`/`has_cs` and the `has_any`/`has_all` list forms, so the term
@@ -434,12 +458,25 @@ def term_match_sql(haystack: str, needle: str, *, case_sensitive: bool = False) 
     ======================  =========  ==========================================
 
     Wrapping an all-delimiter needle in boundaries makes ``has " "`` false where
-    Kusto says true, so the two ``CASE`` arms are load-bearing rather than
-    defensive. They are emitted rather than decided here because the needle can
-    be a column or a bound parameter, unknown until the query runs; for the
-    usual string literal DuckDB folds them away.
+    Kusto says true, so the two arms are load-bearing rather than defensive.
+
+    **Pass `needle_text` whenever the needle is a literal.** The pattern is then
+    a constant and RE2 compiles it once; otherwise it is concatenated from two
+    ``CASE`` expressions and DuckDB rebuilds — and recompiles — it **per row**.
+    An earlier version left this to the optimizer on the theory that "for the
+    usual string literal DuckDB folds them away". It does not: measured on the
+    5,000-row corpus fixture, folding here took one `has_any` from 52ms to 15ms,
+    and the same missing fold inside a `list_filter` lambda (where the needle
+    genuinely is per-row) cost **28 seconds**. See `_render_has_list`.
     """
     flag = "" if case_sensitive else "(?i)"
+    if needle_text is not None:
+        lead = _TERM_START if is_term_char(needle_text[:1]) else ""
+        trail = _TERM_END if is_term_char(needle_text[-1:]) else ""
+        pattern = f"'{flag}{lead}' || regexp_escape({needle})"
+        if trail:
+            pattern += f" || '{trail}'"
+        return f"regexp_matches({haystack}, {pattern})"
     lead = f"CASE WHEN regexp_matches({needle}, '^[\\pL\\pN]') THEN '{_TERM_START}' ELSE '' END"
     trail = f"CASE WHEN regexp_matches({needle}, '[\\pL\\pN]$') THEN '{_TERM_END}' ELSE '' END"
     return (
