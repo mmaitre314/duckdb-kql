@@ -34,10 +34,6 @@ BASELINE_SUPPORTED = 114
 #: starts passing fails the build (remove it), and an unlisted failure fails the
 #: build too (it is a regression or a newly-published feature).
 KNOWN_GAPS = {
-    "parse": (
-        "The `parse` operator needs a pattern-to-regex compiler. Worth doing — "
-        "it is also ~27 corpus cases — but it is a feature, not a mapping."
-    ),
     "columnifexists": (
         "Needs the input schema at translation time to decide whether the "
         "column exists. The schema plumbing exists (join uses it); this just "

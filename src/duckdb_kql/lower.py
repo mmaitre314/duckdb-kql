@@ -631,6 +631,9 @@ def _lower_operator(node: Any) -> ir.Operator | None:
     if kind in ("MvexpandOperator", "MvExpandOperator"):
         return _lower_mv_expand(node, kids)
 
+    if kind in ("ParseOperator", "ParseWhereOperator"):
+        return _lower_parse(node, kids, drop_unmatched=kind == "ParseWhereOperator")
+
     if kind == "RenderOperator":
         # `render` is a *visualization* directive. The emulator returns the
         # primary result table unchanged and puts the chart hint in a separate
@@ -1968,6 +1971,77 @@ def _lower_path(node: Any) -> ir.Expr:
     if not steps:
         return base
     return ir.PathAccess(base, tuple(steps))
+
+
+def _lower_parse(node: Any, kids: list[Any], *, drop_unmatched: bool) -> ir.Operator:
+    """``parse [kind=k [flags=f]] Expression with <pattern>`` / ``parse-where``.
+
+    The grammar already shapes the pattern into segments — each one an optional
+    `*`, a string literal, and an optional column — so the arrangement rules
+    Kusto's binder enforces by hand are true by construction here. The one it
+    still has to check is a *leading* column, which the grammar permits and the
+    binder rejects (a column must follow a literal).
+    """
+    kind, flags = "simple", None
+    pattern = None
+    expression = None
+    for k in kids:
+        cls = _cls(k)
+        if cls == "ParseOperatorKindClause":
+            text = k.getText()
+            kind = text.split("=", 1)[1].split("flags")[0].strip().lower()
+            for f in _rule_children(k):
+                if _cls(f) == "ParseOperatorFlagsClause":
+                    flags = f.getText().split("=", 1)[1].strip()
+        elif cls == "ParseOperatorPattern":
+            pattern = k
+        elif expression is None:
+            expression = k
+
+    if expression is None or pattern is None:
+        raise _unsupported(node, "parse")
+
+    parts = _rule_children(pattern)
+    for part in parts:
+        if _cls(part) != "ParseOperatorPatternSegment":
+            # `(LeadingColumn)?` — a column before any literal. Kusto rejects
+            # it too ("name does not follow a string literal"), because there
+            # is nothing to anchor the capture against.
+            raise _unsupported(part, "parse", )
+    segments = [_lower_parse_segment(p) for p in parts]
+    if not segments:
+        raise _unsupported(node, "parse", )
+
+    # `(TrailingStar='*')?` is a token, not a rule: it is whatever is left of
+    # the pattern once every segment's text is accounted for.
+    consumed = "".join(p.getText() for p in parts)
+    trailing_star = pattern.getText()[len(consumed):].strip() == "*"
+    return ir.Parse(
+        _lower_expr(expression), tuple(segments), kind, flags, drop_unmatched,
+        trailing_star,
+    )
+
+
+def _lower_parse_segment(node: Any) -> ir.ParseSegment:
+    literal = None
+    name = col_type = None
+    for k in _rule_children(node):
+        cls = _cls(k)
+        if cls == "StringLiteralExpression":
+            literal = _string_value(k.getText())
+        elif cls == "ParseOperatorNameAndOptionalType":
+            names = _find_names(k)
+            if not names:
+                raise _unsupported(k, "parse")
+            name = names[0]
+            for t in _rule_children(k):
+                if _cls(t) == "ScalarType":
+                    col_type = t.getText().strip().lower()
+    if literal is None:
+        raise _unsupported(node, "parse")
+    # The `*` is a token, not a rule, so it is read off the segment's text.
+    skip = node.getText().lstrip().startswith("*")
+    return ir.ParseSegment(literal, skip, name, col_type)
 
 
 #: `kind=`/`bagexpansion=` values, mapped to "expand a bag to [key, value]".

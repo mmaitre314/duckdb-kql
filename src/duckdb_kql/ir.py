@@ -33,6 +33,7 @@ __all__ = [
     "TableRef", "WildcardTableRef", "DataTable", "PrintSource", "RangeSource",
     # operators
     "Summarize", "Join", "JoinKey", "Lookup", "Union", "MvExpand", "MvExpandTarget",
+    "Parse", "ParseSegment",
     "ProjectAway",
     "ProjectRename",
     "Where", "Project", "Extend", "Take", "Sort", "SortKey", "Top", "Count",
@@ -422,6 +423,42 @@ class PathAccess(Expr):
 
     base: Expr
     steps: tuple[PathStep, ...]
+
+
+@dataclass(frozen=True)
+class ParseSegment(Node):
+    """One *(optional skip, literal, optional column)* of a `parse` pattern.
+
+    The grammar groups the pattern this way — `('*')? Text=stringLiteral
+    (Column=nameAndOptionalType)?` — which is a friendlier shape than the flat
+    list Kusto's own binder walks, because it makes "a column follows a
+    literal" and "a `*` precedes a literal" true by construction.
+    """
+
+    literal: str
+    skip: bool = False
+    name: str | None = None
+    type: str | None = None
+
+
+@dataclass(frozen=True)
+class Parse(Operator):
+    """``parse [kind=] Expression with <pattern>`` and ``parse-where``.
+
+    `drop_unmatched` is `parse-where`: same pattern, but a row that does not
+    match — or whose declared conversions do not all succeed — is dropped
+    rather than blanked.
+    """
+
+    expression: Expr
+    segments: tuple[ParseSegment, ...]
+    #: ``simple`` (the default), ``regex`` or ``relaxed``.
+    kind: str = "simple"
+    flags: str | None = None
+    drop_unmatched: bool = False
+    #: A trailing `*` — parsed, and semantically a no-op: the pattern is not
+    #: anchored at the end, so "skip the rest" is what already happens.
+    trailing_star: bool = False
 
 
 @dataclass(frozen=True)

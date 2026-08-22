@@ -212,7 +212,7 @@ def test_an_unsupported_construct_is_an_error_not_a_guess(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     bad = tmp_path / "unsupported.kql"
-    bad.write_text("StormEvents | parse State with * 'x' *\n", encoding="utf-8")
+    bad.write_text("StormEvents | mv-apply State on (where true)\n", encoding="utf-8")
     assert main(["translate", str(bad)]) == EXIT_TRANSLATION_ERROR
     assert "error:" in capsys.readouterr().err
 

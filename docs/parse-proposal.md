@@ -1,10 +1,42 @@
 # Proposal — the `parse` family
 
-> **Status: proposal.** Nothing here is implemented. Every behavioural claim was
-> measured on the pinned Kusto Emulator and the measurement is quoted beside it;
-> every structural claim is cited to `microsoft/Kusto-Query-Language` at commit
-> `12608cc`, read under the attribution terms
-> [`column-types-proposal.md`](column-types-proposal.md) §2.0 settles.
+> **Status: phases 1–3 implemented** (`kind=simple`, `parse-where`,
+> `kind=relaxed`) — 5 of the 11 corpus cases, with the rules written up as
+> **R19** in `TRANSLATION.md` and `tests/test_parse.py` holding the
+> measurements. Phase 4 (`kind=regex`, worth the other 6) and phase 5
+> (`parse-kv`) are outstanding and refuse rather than guess. Every behavioural
+> claim was measured on the pinned Kusto Emulator and the measurement is quoted
+> beside it; every structural claim is cited to
+> `microsoft/Kusto-Query-Language` at commit `12608cc`, read under the
+> attribution terms [`column-types-proposal.md`](column-types-proposal.md) §2.0
+> settles.
+>
+> **Four things this document got wrong**, all found by implementing it and all
+> now corrected in place:
+>
+> 1. **A capture is not always `.*?`.** Immediately before a `*` — the one
+>    position with nothing to stop it — a **typed** column matches its *type's
+>    shape* (`\s*[-+]?\d+` for an integer, and so on). That is *why* Kusto
+>    allows `*` after a typed column and refuses it after a string one; §3 had
+>    the refusal recorded without the reason, and the reason turns out to be the
+>    implementation. A **trailing** `*` is a no-op and makes the shape optional.
+> 2. **The conversions are not `TRY_CAST`.** Three ways DuckDB is too generous,
+>    each a silent wrong answer if taken: `'1.5'` as a long is **2** (it rounds)
+>    where Kusto says null; `'yes'` as a bool is **true** where Kusto says null;
+>    and `'02/17/2016 08:40:01'` as a datetime is **null** where Kusto parses it
+>    — the corpus depends on that last one, and a bare cast blanked whole rows.
+> 3. **`decimal` cannot be supported** while `todecimal` is unmapped: DuckDB
+>    renders `DECIMAL(38,9)` as `1.000000000`, not `1`.
+> 4. **`: string` written explicitly** is the same column as a bare name and
+>    earns the same `*`-after-it refusal. Missing that produced 57 sweep
+>    failures in one run.
+>
+> **A bug found in shipped code on the way.** `tolong('1.5')` answers **1** here
+> and **null** on a cluster; `toint`, `toreal`'s neighbours and `tobool('2')`
+> are the same family. `parse` can be exact because what it converts is always
+> *text*; `tolong` cannot, because it must also serve `tolong(1.5)` — which
+> really is 2 — and telling those apart needs
+> [column types](column-types-proposal.md). Recorded, not fixed.
 
 ## 0. Why this one
 
@@ -270,9 +302,9 @@ parse-where kind=regex     2     (parse-where-operator-03, -04;  -04 uses flags)
 
 | Phase | Scope | Corpus |
 |---|---|---|
-| 1 | `kind=simple` (the default): segments, `*`, typed columns, the not-matched rule, the all-or-nothing rule, replace-in-place output columns | 3 of 11 |
-| 2 | `parse-where` (`_ok` in a `WHERE`), and refusing `parse-where kind=relaxed` | +1 |
-| 3 | `kind=relaxed` | +1 |
+| ~~1~~ | **Done.** `kind=simple` (the default): segments, `*`, typed columns, the not-matched rule, the all-or-nothing rule, replace-in-place output columns | 3 of 11 |
+| ~~2~~ | **Done.** `parse-where` (`_ok` in a `WHERE`), and refusing `parse-where kind=relaxed` | +1 |
+| ~~3~~ | **Done.** `kind=relaxed` — which turned out to relax the *pattern* too, not only the atomicity: an anchored typed column captures lazily there | +1 |
 | 4 | `kind=regex` + `flags=i/s/U`, the capturing-group scanner, the differential sweep of §4 | **+6** |
 | 5 | `parse-kv` | 0 today |
 

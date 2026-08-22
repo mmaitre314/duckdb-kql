@@ -1,7 +1,14 @@
-"""Parser tests — test-plan layer L1.
+"""L5 trap tests — the `parse` family (`docs/parse-proposal.md`).
 
-These cover the public parse surface and the Wave-1 syntax shapes. The
-large-corpus L1 regression lives in ``test_corpus.py``.
+`parse` turns unstructured text into columns, and almost none of how it does
+that is guessable. Every expectation here was measured on the pinned Kusto
+Emulator; the ones that corrected the proposal while it was being implemented
+are called out, because they are the ones a re-implementation would get wrong
+the same way.
+
+The single most surprising rule: **`kind=simple` is all-or-nothing.** If any
+declared column fails to convert, the whole row is blanked — including columns
+that converted perfectly well.
 """
 
 from __future__ import annotations
@@ -9,121 +16,291 @@ from __future__ import annotations
 import pytest
 
 import duckdb_kql
-from duckdb_kql import KqlSyntaxError, KqlUnsupportedError
+from duckdb_kql.errors import KqlUnsupportedError
 
-# Shapes Wave 1 must be able to parse (docs/frequency-scan-results.md).
-WAVE1_QUERIES = [
-    pytest.param('Logs | where Level == "Error"', id="where"),
-    pytest.param("Logs | project a, b = c * 2", id="project"),
-    pytest.param("Logs | project-away Secret", id="project-away"),
-    pytest.param("Logs | extend z = a + b", id="extend"),
-    pytest.param("Logs | summarize Count = count() by Component", id="summarize-by"),
-    pytest.param(
-        "Logs | summarize Count = count() by bin(Timestamp, 1h), Component",
-        id="summarize-bin",
-    ),
-    pytest.param("Logs | count", id="count"),
-    pytest.param("A | join kind=leftouter (B) on Key", id="join-kind"),
-    pytest.param("A | join (B) on Key", id="join-default-innerunique"),
-    pytest.param("A | union B", id="union"),
-    pytest.param("Logs | sort by Timestamp asc", id="sort-asc"),
-    pytest.param("Logs | order by Timestamp", id="order-default-desc"),
-    pytest.param("Logs | top 5 by Count", id="top"),
-    pytest.param("Logs | take 10", id="take"),
-    pytest.param("Logs | limit 10", id="limit"),
-    pytest.param("Logs | distinct Component", id="distinct"),
-    pytest.param('datatable(a:int, b:string)[1, "x"]', id="datatable"),
-    pytest.param("print x = 1 + 1", id="print"),
-    pytest.param("range i from 1 to 10 step 1", id="range"),
-    pytest.param("let T = datatable(x:long)[1, 2]; T | summarize s = sum(x)", id="let"),
-    pytest.param(
-        "let a = ago(5h); let b = a + 2h; T | where t > a and t < b", id="let-multi"
-    ),
-]
-
-# The R2/R3 string-operator family (docs/TRANSLATION.md) — these are the
-# highest-risk mappings, so make sure every spelling at least parses.
-STRING_OPERATORS = [
-    "==", "!=", "=~", "!~",
-    "has", "!has", "has_cs", "!has_cs",
-    "contains", "!contains", "contains_cs", "!contains_cs",
-    "startswith", "!startswith", "startswith_cs",
-    "endswith", "!endswith", "endswith_cs",
-    "hasprefix", "hassuffix",
-]
+duckdb = pytest.importorskip("duckdb")
 
 
-@pytest.mark.parametrize("kql", WAVE1_QUERIES)
-def test_wave1_shapes_parse(kql: str) -> None:
-    assert duckdb_kql.parse(kql).ok
+@pytest.fixture
+def con():
+    c = duckdb.connect()
+    c.execute("SET TimeZone='UTC'")
+    return c
 
 
-@pytest.mark.parametrize("op", STRING_OPERATORS)
-def test_string_operator_family_parses(op: str) -> None:
-    assert duckdb_kql.parse(f'T | where Text {op} "x"').ok
+def _rows(con, kql: str):
+    return duckdb_kql.kql(con, kql).fetchall()
+
+
+def _one(con, table: str, clause: str):
+    return _rows(con, f"{table} | {clause}")
+
+
+# ---------------------------------------------------------------------------
+# The shape of the output
+# ---------------------------------------------------------------------------
+
+
+def test_a_non_match_keeps_the_row_with_empty_strings(con) -> None:
+    """Not null, and not dropped — `''` for a string column, null for a typed one."""
+    q = ("datatable(s:string)['a=1, b=xy', 'nomatch'] "
+         '| parse s with "a=" a ", b=" b')
+    assert _rows(con, q) == [("a=1, b=xy", "1", "xy"), ("nomatch", "", "")]
+
+
+def test_parse_where_drops_the_non_matching_row_instead(con) -> None:
+    q = ("datatable(s:string)['a=1, b=xy', 'nomatch'] "
+         '| parse-where s with "a=" a ", b=" b')
+    assert _rows(con, q) == [("a=1, b=xy", "1", "xy")]
+
+
+def test_a_declared_name_replaces_an_existing_column_in_place(con) -> None:
+    """`extend`'s rule — the third operator in this codebase to want it, hence
+    `schema.replacing`. Column order is user-visible (R1)."""
+    rel = duckdb_kql.kql(
+        con, "datatable(s:string, a:string)['a=1', 'zz'] | parse s with \"a=\" a"
+    )
+    assert list(rel.columns) == ["s", "a"]
+    assert rel.fetchall() == [("a=1", "1")]
+
+
+def test_new_columns_are_appended_in_declaration_order(con) -> None:
+    rel = duckdb_kql.kql(
+        con, "datatable(s:string, z:long)['a=1,b=2', 9] "
+        '| parse s with "a=" a ",b=" b'
+    )
+    assert list(rel.columns) == ["s", "z", "a", "b"]
+
+
+# ---------------------------------------------------------------------------
+# What a capture matches
+# ---------------------------------------------------------------------------
+
+
+def test_a_column_is_lazy_and_stops_at_the_first_following_literal(con) -> None:
+    """`"a" v "c"` over `aXcYc` is `X`, not `XcY` — the first `c`, not the last."""
+    q = "datatable(s:string)['aXcYc'] | parse s with \"a\" v \"c\" *"
+    assert _rows(con, q) == [("aXcYc", "X")]
+
+
+def test_a_star_skips_to_the_first_match_too(con) -> None:
+    q = "datatable(s:string)['y=1,x=2,x=9'] | parse s with * \"x=\" v \",\" *"
+    assert _rows(con, q) == [("y=1,x=2,x=9", "2")]
+
+
+def test_a_trailing_column_runs_to_the_end(con) -> None:
+    q = "datatable(s:string)['a=1, b=xy'] | parse s with \"a=\" a"
+    assert _rows(con, q) == [("a=1, b=xy", "1, b=xy")]
+
+
+def test_literals_are_escaped_not_treated_as_regex(con) -> None:
+    """`"a.b"` must not match `axbZ`. `kind=regex` is where the dot is a
+    metacharacter, and that mode is not implemented."""
+    q = "datatable(s:string)['a.bZ', 'axbZ'] | parse s with \"a.b\" v"
+    assert _rows(con, q) == [("a.bZ", "Z"), ("axbZ", "")]
+
+
+def test_literals_are_case_sensitive(con) -> None:
+    assert _rows(con, "datatable(s:string)['A=1'] | parse s with \"a=\" v") == [
+        ("A=1", "")
+    ]
 
 
 @pytest.mark.parametrize(
-    "kql",
+    ("value", "expected"),
     [
-        pytest.param(
-            "StormEvents | where State in (PopulationData | project State)",
-            id="in-tabular-subquery",
-        ),
-        pytest.param(
-            "StormEvents | where State in~ (PopulationData | project State)",
-            id="in~-tabular-subquery",
-        ),
-        pytest.param('T | where x in ("a", "b", "c")', id="in-value-list"),
+        # A typed column before a `*` uses a **type-shaped** capture — the one
+        # position where a lazy wildcard has nothing to stop it. This is *why*
+        # Kusto allows `*` after a typed column and refuses it after a string
+        # one (SEM0476).
+        ("n=27 junk m=23", (27, 23)),
+        # ...and when the shape cannot match, the whole pattern fails.
+        ("n=xx junk m=23", (None, None)),
     ],
 )
-def test_in_operator_forms(kql: str) -> None:
-    """Covers local grammar PATCH duckdb-kql/001 (grammar/UPSTREAM.md)."""
-    assert duckdb_kql.parse(kql).ok
+def test_a_typed_column_before_a_star_is_shaped(con, value: str, expected) -> None:
+    q = (f"datatable(s:string)['{value}'] "
+         '| parse s with "n=" n: long * "m=" m: long | project n, m')
+    assert _rows(con, q) == [expected]
 
 
-def test_syntax_error_raises_with_diagnostics() -> None:
-    with pytest.raises(KqlSyntaxError) as excinfo:
-        duckdb_kql.parse("T | wherex zzz ====")
-    assert excinfo.value.diagnostics
-    assert excinfo.value.diagnostics[0].span.line == 1
+def test_a_trailing_star_makes_the_shape_optional(con) -> None:
+    """A `*` at the very end is a no-op, so the shape may match nothing.
 
-
-def test_validate_does_not_raise() -> None:
-    assert duckdb_kql.validate("T | where x == 1") == []
-    assert duckdb_kql.validate("T | wherex ====")
-
-
-def test_parse_rejects_non_string() -> None:
-    with pytest.raises(TypeError):
-        duckdb_kql.parse(42)  # type: ignore[arg-type]
-
-
-def test_translation_entry_points_translate() -> None:
-    """Wave 1 constructs go all the way to SQL through the public API."""
-    sql = duckdb_kql.to_sql("T | count")
-    assert "count(*)" in sql
-    assert '"T"' in sql  # R7: identifiers are quoted, never case-folded
-
-
-def test_translation_refuses_constructs_outside_the_wave() -> None:
-    """Anything unimplemented must refuse, never return something plausible.
-
-    ``KqlUnsupportedError`` is the contract: callers can distinguish "not yet"
-    from "your query is wrong", and a silent wrong answer is impossible.
+    Measured: `"p|" a: string "-q|" b: long *` over `p|1-q|xx` answers
+    `('1', null)` — the pattern still matched. The same `*` in the *middle*
+    is not optional and blanks the row.
     """
-    for kql in (
-        "T | partition by a (take 1)",  # operator not yet implemented
-        "T | evaluate bag_unpack(a)",  # operator not yet implemented
-        "let f = (a:int) { a + 1 }; print f(1)",  # user-defined functions
-        "T | where a == totimespan_unmapped(1)",  # unmapped function
-        "T | summarize unmapped_agg(a)",  # unmapped aggregate
-    ):
-        with pytest.raises(KqlUnsupportedError):
-            duckdb_kql.to_sql(kql)
+    q = ("datatable(s:string)['p|1-q|xx'] "
+         '| parse kind=relaxed s with "p|" a: string "-q|" b: long * | project a, b')
+    assert _rows(con, q) == [("1", None)]
 
 
-def test_translation_entry_points_still_report_syntax_errors() -> None:
-    """A bad query should fail as a syntax error, not as 'not implemented'."""
-    with pytest.raises(KqlSyntaxError):
-        duckdb_kql.to_sql("T | wherex ====")
+def test_an_anchored_typed_column_is_not_shaped(con) -> None:
+    """With a literal after it there is nothing to disambiguate, so the capture
+    is the same lazy wildcard a string column gets.
+
+    Measured through `relaxed`, which is the only mode that can show it: the
+    pattern still matches and only the conversion fails.
+    """
+    q = ("datatable(s:string)['n=xx,m=23'] "
+         '| parse kind=relaxed s with "n=" n: long ",m=" m: long | project n, m')
+    assert _rows(con, q) == [(None, 23)]
+
+
+# ---------------------------------------------------------------------------
+# The all-or-nothing rule — the trap
+# ---------------------------------------------------------------------------
+
+
+def test_simple_blanks_the_whole_row_when_any_conversion_fails(con) -> None:
+    """Three columns are needed to see this; two are ambiguous.
+
+    `a=1` converts perfectly well and is blanked anyway, because `c=zz` did
+    not. A two-column example cannot tell "stop at the failure" from "blank
+    the row", which is how the proposal came to say the wrong one.
+    """
+    q = ("datatable(s:string)['a=1,b=2,c=zz,d=4'] "
+         '| parse s with "a=" a: long ",b=" b ",c=" c: long ",d=" d'
+         " | project a, b, c, d")
+    assert _rows(con, q) == [(None, "", None, "")]
+
+
+def test_relaxed_converts_each_column_independently(con) -> None:
+    q = ("datatable(s:string)['a=1,b=2,c=zz,d=4'] "
+         '| parse kind=relaxed s with "a=" a: long ",b=" b ",c=" c: long ",d=" d'
+         " | project a, b, c, d")
+    assert _rows(con, q) == [(1, "2", None, "4")]
+
+
+def test_an_empty_capture_into_a_typed_column_is_a_failure_too(con) -> None:
+    """No "empty is not a failure" exception — measured, and the draft had it
+    wrong until it was."""
+    q = "datatable(s:string)['a=,b=2'] | parse s with \"a=\" a: long \",b=\" b"
+    assert _rows(con, q) == [("a=,b=2", None, "")]
+    untyped = "datatable(s:string)['a=,b=2'] | parse s with \"a=\" a \",b=\" b"
+    assert _rows(con, untyped) == [("a=,b=2", "", "2")]
+
+
+def test_parse_where_is_matched_and_every_conversion_succeeded(con) -> None:
+    q = ("datatable(s:string)['a=1,b=2', 'a=zz,b=2', 'nope'] "
+         '| parse-where s with "a=" a: long ",b=" b | project a, b')
+    assert _rows(con, q) == [(1, "2")]
+
+
+# ---------------------------------------------------------------------------
+# Conversions — where DuckDB's cast is not KQL's
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("2", 2), ("-3", -3), ("+5", 5), (" 9", 9), ("012", 12),
+        # DuckDB's TRY_CAST *rounds* these; Kusto answers null. The integer
+        # shape test is what keeps them null.
+        ("1.5", None), (".5", None), ("1e3", None), ("xx", None),
+    ],
+)
+def test_an_integer_column_takes_integer_text_only(con, value: str, expected) -> None:
+    q = f"datatable(s:string)['n={value}|'] | parse s with \"n=\" n: long \"|\""
+    assert _rows(con, q)[0][1] == expected
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("true", True), ("TRUE", True), ("false", False),
+        # A whole number decides by being nonzero...
+        ("2", True), ("-1", True), ("0", False),
+        # ...but a fractional one is null, not true, which is why this cannot
+        # be a bare TRY_CAST to BIGINT (that would round 1.5 to 2).
+        ("1.5", None), ("0.0", None), ("yes", None), ("", None),
+    ],
+)
+def test_a_bool_column_takes_true_false_or_a_whole_number(con, value, expected) -> None:
+    q = f"datatable(s:string)['b={value}|'] | parse s with \"b=\" b: bool \"|\""
+    assert _rows(con, q)[0][1] == expected
+
+
+def test_a_datetime_column_accepts_the_formats_todatetime_does(con) -> None:
+    """Including `MM/DD/YYYY`, which a bare `TRY_CAST` rejects.
+
+    The corpus depends on it, and a bare cast made the conversion fail — which
+    under the all-or-nothing rule blanked the entire row rather than one column.
+    """
+    q = ("datatable(s:string)['t=02/17/2016 08:40:01|'] "
+         '| parse s with "t=" t: date "|"')
+    assert _rows(con, q)[0][1].isoformat() == "2016-02-17T08:40:01"
+
+
+def test_type_aliases_are_accepted(con) -> None:
+    """`date` for `datetime`, and the rest of the alias table Kusto ships."""
+    # The grammar accepts a narrower set here than TYPE_MAP knows.
+    for alias in ("long", "int64", "int", "int8"):
+        q = f"datatable(s:string)['n=5|'] | parse s with \"n=\" n: {alias} \"|\""
+        assert _rows(con, q)[0][1] == 5
+
+
+# ---------------------------------------------------------------------------
+# Refusals
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "clause",
+    [
+        'parse s with "n=" n * "m=" m',            # bare name
+        'parse s with "n=" n: string * "m=" m',    # explicit :string, same thing
+        'parse s with "n=" n *',                   # trailing star counts
+    ],
+)
+def test_a_star_after_a_string_column_is_refused(clause: str) -> None:
+    """Two lazy wildcards in a row have no defined split, and Kusto says so —
+    SEM0476, "Using '*' after string column is ambiguous"."""
+    with pytest.raises(KqlUnsupportedError) as exc:
+        duckdb_kql.to_sql(f"T | {clause}")
+    assert "ambiguous" in str(exc.value)
+
+
+def test_parse_where_kind_relaxed_is_refused() -> None:
+    """Kusto refuses it too — SEM0477."""
+    with pytest.raises(KqlUnsupportedError) as exc:
+        duckdb_kql.to_sql('T | parse-where kind=relaxed s with "a=" a')
+    assert "SEM0477" in str(exc.value)
+
+
+@pytest.mark.parametrize(
+    "clause",
+    [
+        'parse kind=regex s with "a=" a',
+        'parse kind=regex flags=i s with "a=" a',
+        'parse s with "a=" a: decimal ","',
+        'parse s with "a=" a: datetime * "b=" b',
+    ],
+)
+def test_the_unimplemented_surface_refuses_rather_than_guessing(clause: str) -> None:
+    """`kind=regex` splices user regex into a pattern RE2 runs where Kusto runs
+    .NET; `decimal` renders its scale (`1.000000000`, not `1`); a `datetime`
+    before a `*` has no measured shape. Each is a refusal, not a guess."""
+    with pytest.raises(KqlUnsupportedError):
+        duckdb_kql.to_sql(f"T | {clause}")
+
+
+def test_a_repeated_column_name_is_refused() -> None:
+    with pytest.raises(KqlUnsupportedError) as exc:
+        duckdb_kql.to_sql('T | parse s with "a=" a ",a=" a')
+    assert "twice" in str(exc.value)
+
+
+# ---------------------------------------------------------------------------
+# Layer 0
+# ---------------------------------------------------------------------------
+
+
+def test_it_translates_without_a_schema() -> None:
+    """No connection, no column list — the `COLUMNS(...)` form handles both the
+    replace and the append case, at the cost of `extend`'s position residue."""
+    sql = str(duckdb_kql.to_sql('T | parse s with "a=" a ",b=" b'))
+    assert "regexp_extract" in sql
+    assert "COLUMNS(" in sql

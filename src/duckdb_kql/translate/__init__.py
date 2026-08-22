@@ -12,12 +12,14 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import re
 from typing import TYPE_CHECKING, Any
 
 from .. import ir
 from ..errors import KqlUnsupportedError
 from .functions import (
     _TODATETIME,
+    _TOTIMESPAN,
     BINARY_OPERATORS,
     lookup,
     lookup_aggregate,
@@ -36,18 +38,33 @@ __all__ = ["to_sql", "TranslationResult"]
 Parameters = dict[str, Any]
 
 #: KQL type name -> DuckDB type (docs/TRANSLATION.md §2).
+#:
+#: Aliases included. KQL accepts several spellings for most types and they are
+#: not decoration — the documentation's own examples use them, and `parse … t:
+#: date` in the corpus is one. Transcribed from `Symbols/ScalarTypes.cs`
+#: (`PrimitiveSymbol`'s second argument) rather than guessed, so the set is the
+#: same one a cluster accepts. Note `int` and its unsigned/narrow aliases all
+#: map to INTEGER: KQL has no unsigned or narrow integer *type*, only names
+#: that mean `int`.
 TYPE_MAP = {
     "bool": "BOOLEAN",
     "boolean": "BOOLEAN",
     "int": "INTEGER",
+    "int32": "INTEGER", "uint": "INTEGER", "uint32": "INTEGER",
+    "int8": "INTEGER", "uint8": "INTEGER", "int16": "INTEGER", "uint16": "INTEGER",
     "long": "BIGINT",
+    "int64": "BIGINT", "ulong": "BIGINT", "uint64": "BIGINT",
     "real": "DOUBLE",
     "double": "DOUBLE",
+    "float": "DOUBLE",
     "decimal": "DECIMAL(38,9)",
     "string": "VARCHAR",
     "datetime": "TIMESTAMP",
+    "date": "TIMESTAMP",
     "timespan": "INTERVAL",
+    "time": "INTERVAL",
     "guid": "UUID",
+    "uuid": "UUID", "uniqueid": "UUID",
     "dynamic": "JSON",
 }
 
@@ -606,6 +623,9 @@ def render_operator(op: ir.Operator, prev: str, cols: list[str] | None = None) -
 
     if isinstance(op, ir.MvExpand):
         return render_mv_expand(op, prev, cols)
+
+    if isinstance(op, ir.Parse):
+        return render_parse(op, prev, cols)
 
     if isinstance(op, ir.Summarize):
         return render_summarize(op, prev)
@@ -2036,6 +2056,344 @@ def _json_path_key(name: str) -> str:
         return name
     escaped = name.replace('"', '\\"')
     return f'"{escaped}"'
+
+
+#: `flags=` letters -> the RE2 inline flag that means the same thing. `m` and
+#: `x` are parsed by Kusto and left out on purpose: neither produced a measured
+#: difference on the emulator, so mapping them would be a guess (see
+#: docs/parse-proposal.md §2.4).
+_PARSE_FLAGS = {"i": "i", "s": "s", "U": "U"}
+
+#: The struct one `regexp_extract` produces, holding every captured column.
+_PARSE_CAPTURES = "_parse"
+
+
+def render_parse(op: ir.Parse, prev: str, cols: list[str] | None = None) -> str:
+    """``parse Expression with <pattern>`` and ``parse-where``.
+
+    The whole pattern becomes **one** regex with a named group per declared
+    column, matched once per row by ``regexp_extract(s, pattern, [names])``,
+    which answers a struct. Each column is then a field of that struct with its
+    conversion applied.
+
+    Three of DuckDB's behaviours make this an unusually close fit, and all three
+    are load-bearing rather than convenient:
+
+    * a **non-match returns the empty string in every field**, which is exactly
+      what Kusto gives an unmatched *string* column — measured, `'nomatch'`
+      parsed with `"a=" a` yields `''`, not null;
+    * RE2's inline ``(?i)``/``(?s)``/``(?U)`` are Kusto's `i`/`s`/`U` flags;
+    * ``regexp_matches`` over the same pattern gives `parse-where` its
+      predicate.
+
+    See :func:`_parse_pattern` for how the pattern is built and
+    :func:`_parse_row_ok` for the all-or-nothing conversion rule, which is the
+    part that is not guessable.
+    """
+    if op.kind not in ("simple", "relaxed"):
+        # `kind=regex` splices the user's regex into a pattern RE2 runs while
+        # Kusto runs .NET, so agreement is a question about two backtracking
+        # engines rather than about this mapping (docs/parse-proposal.md §4).
+        raise KqlUnsupportedError(
+            f"parse kind={op.kind}",
+            hint="kind=simple and kind=relaxed are implemented; see "
+            "docs/parse-proposal.md",
+        )
+    if op.kind == "relaxed" and op.drop_unmatched:
+        # Kusto refuses this outright — SEM0477, "parse-where: only simple or
+        # regex modes are supported" — so accepting it would answer a query a
+        # cluster rejects.
+        raise KqlUnsupportedError(
+            "parse-where kind=relaxed",
+            hint="Kusto refuses it too (SEM0477): parse-where supports only "
+            "simple and regex",
+        )
+    if op.flags:
+        raise KqlUnsupportedError(
+            f"parse flags={op.flags}", hint="flags apply to kind=regex, not yet supported"
+        )
+
+    source = render_expr(op.expression)
+    declared = [s for s in op.segments if s.name]
+    names = [s.name for s in declared]
+    if len(set(names)) != len(names):
+        # Kusto refuses a repeated declaration; DuckDB would silently keep one.
+        raise KqlUnsupportedError("parse", hint="a column is declared twice")
+    _refuse_unanchored_string_column(op)
+
+    pattern = quote_string(_parse_pattern(op))
+    if names:
+        name_list = ", ".join(quote_string(str(n)) for n in names)
+        captures = f"regexp_extract({source}, {pattern}, [{name_list}])"
+    else:
+        # `regexp_extract` refuses an empty name list, and a pattern that
+        # declares nothing is only a filter anyway.
+        captures = "NULL"
+
+    ok = _parse_row_ok(op, source, pattern)
+    rendered = {
+        str(s.name): _parse_column(s, ok) for s in declared
+    }
+    if cols is not None:
+        from ..schema import replacing
+
+        select = [rendered.get(c, quote_ident(c)) for c in cols]
+        select += [rendered[n] for n in replacing(cols, list(rendered)) if n not in cols]
+    else:
+        # Without a schema a declared name may or may not already exist, and
+        # `EXCLUDE` errors in the case it does not. `COLUMNS(...)` filters
+        # dynamically and is correct either way — but it appends, so a replaced
+        # column moves to the end. Same residual divergence as `extend`.
+        excluded = ", ".join(quote_string(str(n)) for n in names)
+        keep = f"COLUMNS(x -> x NOT IN ({excluded}))" if names else "*"
+        select = [keep, *rendered.values()]
+
+    inner = f"SELECT *, {captures} AS {quote_ident(_PARSE_CAPTURES)} FROM {prev}"
+    sql = f"SELECT {', '.join(select)} FROM ({inner}) AS _p"
+    if op.drop_unmatched and ok is not None:
+        sql += f" WHERE {ok}"
+    return sql
+
+
+#: `name: T` compiles to a **type-shaped** capture, not a wildcard. Measured by
+#: putting the column before a `*` — which lets the capture take as much as its
+#: shape allows — and reading back what it took:
+#:
+#:     v: long  over 'v=  12abc'   ->  12     leading space ok, '+ 12' is not
+#:     v: real  over 'v=1e3abc'    ->  1.0    the exponent is NOT part of it
+#:     v: bool  over 'v=2x'        ->  true   a number counts, 'yes' does not
+#:     v: guid  over 'v=74BE…3642x'->  the guid, hyphenated or not
+#:
+#: This is *why* Kusto refuses `*` after a **string** column and allows it after
+#: a typed one (SEM0476): a typed capture knows where to stop on its own, and a
+#: string capture only knows "up to the next literal".
+_PARSE_TYPE_PATTERNS = {
+    "long": r"\s*[-+]?\d+",
+    "int": r"\s*[-+]?\d+",
+    "int32": r"\s*[-+]?\d+", "int64": r"\s*[-+]?\d+",
+    "uint": r"\s*[-+]?\d+", "uint32": r"\s*[-+]?\d+", "uint64": r"\s*[-+]?\d+",
+    "ulong": r"\s*[-+]?\d+", "int8": r"\s*[-+]?\d+", "uint8": r"\s*[-+]?\d+",
+    "int16": r"\s*[-+]?\d+", "uint16": r"\s*[-+]?\d+",
+    # No exponent: `1e3` captured `1`, so `e` terminates the shape.
+    "real": r"\s*[-+]?(?:\d+\.?\d*|\.\d+)",
+    "double": r"\s*[-+]?(?:\d+\.?\d*|\.\d+)",
+    "float": r"\s*[-+]?(?:\d+\.?\d*|\.\d+)",
+    "decimal": r"\s*[-+]?(?:\d+\.?\d*|\.\d+)",
+    "bool": r"\s*(?:[tT][rR][uU][eE]|[fF][aA][lL][sS][eE]|[-+]?\d+)",
+    "boolean": r"\s*(?:[tT][rR][uU][eE]|[fF][aA][lL][sS][eE]|[-+]?\d+)",
+    "guid": r"\s*[0-9a-fA-F]{8}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}"
+            r"-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{12}",
+    "uuid": r"\s*[0-9a-fA-F]{8}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}"
+            r"-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{12}",
+}
+
+
+def _refuse_unanchored_string_column(op: ir.Parse) -> None:
+    """`*` directly after a **string** column is ambiguous, and Kusto says so.
+
+    Measured: `parse s with "n=" n * "m=" m` answers SEM0476, *"Using '*' after
+    string column is ambiguous"*, while the same pattern with `n: long` is fine
+    (see `_PARSE_TYPE_PATTERNS` for why). Two lazy wildcards in a row have no
+    defined split, so accepting it would be picking an answer rather than
+    reproducing one.
+
+    A trailing `*` counts, and so does a string column that simply ends the
+    pattern with a `*` after it.
+    """
+    for index, segment in enumerate(op.segments):
+        if segment.name is None or segment.type not in (None, "string"):
+            continue
+        following = op.segments[index + 1] if index + 1 < len(op.segments) else None
+        if (following is not None and following.skip) or (
+            following is None and op.trailing_star
+        ):
+            raise KqlUnsupportedError(
+                "parse", hint=f"using '*' after the string column {segment.name!r} "
+                "is ambiguous; Kusto refuses it too (SEM0476). Give the column a "
+                "type, or anchor it with a literal",
+            )
+
+
+def _parse_capture(op: ir.Parse, index: int) -> str:
+    """The regex a declared column compiles to.
+
+    A **string** column is `.*?` and needs the next literal to stop it — lazy,
+    measured: `"a" v "c"` over `aXcYc` gives `X`, the first `c` and not the last.
+
+    A **typed** column uses its shape only where a ``*`` follows — the one
+    position with nothing to stop the capture. Everywhere else the shape is not
+    merely unnecessary but *wrong*: measured, `"q=" b: bool` over `q=12x`
+    answers null, where a shaped capture would have taken `12` and answered
+    true. `datetime` and `timespan` have no measured shape, so they are refused
+    in that one position and work everywhere else.
+    """
+    segment = op.segments[index]
+    if not _followed_by_skip(op, index):
+        # Something concrete follows — the next segment's literal, or the end of
+        # the input — so a lazy wildcard knows where to stop and no shape is
+        # needed even for a typed column. Measured both ways:
+        #
+        #   relaxed, `"n=" n: long ",m=" m: long` over `n=xx,m=23`  ->  null, 23
+        #       the pattern still matched, so the capture was not digits-only;
+        #   `"q=" b: bool` over `q=12x`                             ->  null
+        #       a *trailing* column takes everything and then fails to convert,
+        #       where a shaped one would have taken `12` and answered true.
+        last = index == len(op.segments) - 1
+        return ".*?$" if last else ".*?"
+
+    shape = _PARSE_TYPE_PATTERNS.get(str(segment.type))
+    if shape is not None:
+        if index == len(op.segments) - 1:
+            # A *trailing* `*` makes the shape **optional**: measured,
+            # `"p|" a: string "-q|" b: long *` over `p|1-q|xx` answers
+            # `('1', null)` — the pattern still matched, so `b`'s shape was
+            # allowed to match nothing. A `*` in the middle is not optional:
+            # the same value under `"p|" a: long * "-q|" b` blanks the row.
+            return f"(?:{shape})?"
+        return shape
+    # A string column here is refused by `_refuse_unanchored_string_column`,
+    # which runs first and shares this position test.
+    raise KqlUnsupportedError(
+        f"parse type:{segment.type} before '*'",
+        hint=f"the text a {segment.type} column matches has not been measured, "
+        "so it can only be used where a literal or the end of the pattern "
+        "follows it",
+    )
+
+
+def _followed_by_skip(op: ir.Parse, index: int) -> bool:
+    """Whether a `*` comes directly after this segment's column.
+
+    The only position where a capture has nothing to stop it: a following
+    literal anchors it, the end of the pattern anchors it, and a `*` does
+    neither. It is exactly where a typed column needs its shape and where a
+    string column is ambiguous enough that Kusto refuses it.
+    """
+    if index + 1 < len(op.segments):
+        return op.segments[index + 1].skip
+    return op.trailing_star
+
+
+def _parse_pattern(op: ir.Parse) -> str:
+    """The whole pattern as one regex.
+
+    A ``*`` is a **non-greedy skip** capturing nothing — measured, `* "x=" v ","`
+    over `y=1,x=2,x=9` gives `2`, so it stops at the *first* `x=`.
+
+    Literals are escaped: `parse s with "a.b" v` does not match `axbZ`.
+    """
+    out = []
+    for index, segment in enumerate(op.segments):
+        if segment.skip:
+            out.append(".*?")
+        out.append(re.escape(segment.literal))
+        if segment.name:
+            out.append(f"(?P<{segment.name}>{_parse_capture(op, index)})")
+    return "".join(out)
+
+
+def _parse_row_ok(op: ir.Parse, source: str, pattern: str) -> str | None:
+    """Whether the row matched **and** every declared conversion succeeded.
+
+    `kind=simple` is **all-or-nothing**, which a two-column example cannot show
+    and three columns can. Measured:
+
+        datatable(s:string)['a=1,b=2,c=zz,d=4']
+        | parse s with "a=" a: long ",b=" b ",c=" c: long ",d=" d
+            ->  a=null  b=''  c=null  d=''
+
+    `a=1` converts perfectly well and is blanked anyway. An **empty** capture
+    into a typed column counts as a failure too — `'a=,b=2'` blanks the row —
+    so there is no "empty is not a failure" exception to carve out.
+
+    `parse-where` is then exactly this predicate in a `WHERE`.
+
+    ``kind=relaxed`` is the *absence* of all this: each column converts on its
+    own, which is what the raw expressions already do — an unmatched capture is
+    `''` from `regexp_extract` and a failed `TRY_CAST` is null. So relaxed needs
+    no predicate at all, and returns ``None``.
+    """
+    if op.kind == "relaxed":
+        return None
+    tests = [f"regexp_matches({source}, {pattern})"]
+    tests += [
+        f"{_parse_convert(s)} IS NOT NULL" for s in op.segments if s.name and s.type
+    ]
+    return "(" + " AND ".join(tests) + ")"
+
+
+def _parse_column(segment: ir.ParseSegment, ok: str | None) -> str:
+    """One output column: the captured text, converted, blanked if the row failed."""
+    value = _parse_convert(segment)
+    name = quote_ident(str(segment.name))
+    if ok is None:  # relaxed — every column stands alone
+        return f"{value} AS {name}"
+    # A string column that did not match is `''`, which is what `regexp_extract`
+    # already returns for an unmatched pattern; a typed one is null.
+    blank = "''" if segment.type in (None, "string") else "NULL"
+    return f"CASE WHEN {ok} THEN {value} ELSE {blank} END AS {name}"
+
+
+def _parse_convert(segment: ir.ParseSegment) -> str:
+    """The captured text under `name: T`, or the text itself for a bare name."""
+    captured = f"{quote_ident(_PARSE_CAPTURES)}.{quote_ident(str(segment.name))}"
+    if segment.type is None:
+        return captured
+    duck = TYPE_MAP.get(segment.type)
+    if duck is None:
+        raise KqlUnsupportedError(
+            f"parse type:{segment.type}", hint=f"known: {sorted(TYPE_MAP)}"
+        )
+    # Reuse the conversion the `to<T>()` functions use rather than a bare cast.
+    # Not tidiness: KQL accepts date formats DuckDB's own cast does not, and the
+    # corpus depends on it — `releaseTime: date` over `02/17/2016 08:40:01` is
+    # MM/DD/YYYY, which `TRY_CAST(... AS TIMESTAMPTZ)` rejects and
+    # `_TODATETIME`'s format list handles. A bare cast made the conversion fail,
+    # which under the all-or-nothing rule blanked the entire row.
+    if duck == "TIMESTAMP":
+        return f"({_TODATETIME.format(captured)})"
+    if duck == "INTERVAL":
+        return f"({_TOTIMESPAN.format(captured)})"
+    if duck == "BOOLEAN":
+        # Measured: `true`/`false` case-insensitively, or an **integer** whose
+        # nonzero-ness decides — `'2'` and `'-1'` are true, `'0'` is false, and
+        # `'1.5'` and `'0.0'` are **null**, not true. The integer test is what
+        # keeps those two null, so a bare `TRY_CAST ... AS BIGINT` (which
+        # rounds `'1.5'` to 2) will not do.
+        #
+        # This is exact here and cannot be in `tobool`, which also has to serve
+        # a numeric argument — `tobool(1.5)` is true where `tobool('1.5')` is
+        # null, and telling those apart needs the column type
+        # (docs/column-types-proposal.md). `tobool`'s residue stays recorded.
+        # `TRY_CAST(… AS BOOLEAN)` is too generous on the textual side as well:
+        # DuckDB accepts `yes`, `no`, `t`, `f`; Kusto accepts only true/false.
+        return (
+            f"CASE WHEN regexp_matches({captured}, '^\\s*[-+]?\\d+\\s*$') "
+            f"THEN TRY_CAST({captured} AS BIGINT) <> 0 "
+            f"WHEN regexp_matches({captured}, '(?i)^\\s*(true|false)\\s*$') "
+            f"THEN TRY_CAST(trim({captured}) AS BOOLEAN) END"
+        )
+    if duck in ("BIGINT", "INTEGER"):
+        # Measured: `tolong('1.5')` is **null** in Kusto, and `'.5'` and `'1e3'`
+        # are too — only integer text converts. DuckDB's `TRY_CAST(… AS BIGINT)`
+        # *rounds*, answering 2, 1 and 1000, so the shape test is what keeps
+        # them null. (`tolong` itself has the same divergence and cannot be
+        # fixed the same way: it must also serve a numeric argument, where
+        # `tolong(1.5)` really is 2. See docs/column-types-proposal.md.)
+        return (
+            f"CASE WHEN regexp_matches({captured}, '^\\s*[-+]?\\d+\\s*$') "
+            f"THEN TRY_CAST({captured} AS {duck}) END"
+        )
+    if duck.startswith("DECIMAL"):
+        # `todecimal` has no mapping either, and the reason is the same: DuckDB
+        # renders DECIMAL(38,9) as `1.000000000` where Kusto renders `1`.
+        raise KqlUnsupportedError(
+            "parse type:decimal",
+            hint="DuckDB's DECIMAL keeps its scale in the rendered value "
+            "(1.000000000, not 1); `todecimal` is unmapped for the same reason",
+        )
+    # R1 — a conversion that cannot parse is null, never an error.
+    return f"TRY_CAST({captured} AS {duck})"
 
 
 def render_mv_expand(op: ir.MvExpand, prev: str, cols: list[str] | None = None) -> str:

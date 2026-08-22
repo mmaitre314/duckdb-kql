@@ -20,7 +20,8 @@ from .errors import KqlSchemaError
 
 __all__ = [
     "Schema", "output_columns", "join_output_columns", "lookup_output_columns",
-    "union_output_columns", "mv_expand_output_columns", "match_wildcard",
+    "union_output_columns", "mv_expand_output_columns", "parse_output_columns",
+    "replacing", "match_wildcard",
     "surviving_branches",
     "disambiguate",
 ]
@@ -140,6 +141,8 @@ def _operator_columns(
         return [mapping.get(c, c) for c in cols]
     if isinstance(op, ir.MvExpand):
         return mv_expand_output_columns(op, cols)
+    if isinstance(op, ir.Parse):
+        return parse_output_columns(op, cols)
     if isinstance(op, ir.GetSchema):
         return ["ColumnName", "ColumnOrdinal", "DataType", "ColumnType"]
     if isinstance(op, ir.Count):
@@ -271,6 +274,32 @@ def lookup_output_columns(
     return out
 
 
+def replacing(cols: list[str], declared: list[str]) -> list[str]:
+    """Add *declared* to *cols* the way `extend` does: in place, else appended.
+
+    KQL's recurring rule for an operator that introduces columns — a name that
+    already exists is **overwritten where it stands**, keeping its position, and
+    only a genuinely new name goes on the end. Column order is user-visible
+    (R1), so getting this wrong reorders a result.
+
+    Three operators want it — `extend`, `mv-expand` (R18) and `parse` — and it
+    was written twice before being named.
+    """
+    out = list(cols)
+    out.extend(name for name in declared if name not in out)
+    return out
+
+
+def parse_output_columns(op: ir.Parse, cols: list[str]) -> list[str]:
+    """``parse``'s output columns. Measured to follow `extend`'s rule:
+
+        datatable(s:string, a:string) | parse s with "a=" a   ->  s, a
+
+    with `a` overwritten in place rather than a second `a` appended.
+    """
+    return replacing(cols, [s.name for s in op.segments if s.name])
+
+
 def mv_expand_output_columns(op: ir.MvExpand, cols: list[str]) -> list[str]:
     """``mv-expand``'s output columns — `extend`'s rule, not a rename.
 
@@ -285,11 +314,7 @@ def mv_expand_output_columns(op: ir.MvExpand, cols: list[str]) -> list[str]:
     table that already has `b` answers **b1**, where two columns both called
     `b` would have left DuckDB naming the second `b_1`.
     """
-    out = list(cols)
-    for target in op.targets:
-        name = target.name or target.column
-        if name not in out:
-            out.append(name)
+    out = replacing(cols, [t.name or t.column for t in op.targets])
     if op.item_index:
         out.append(disambiguate(op.item_index, out))
     return out

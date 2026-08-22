@@ -33,7 +33,7 @@ returns an approximate answer.
 
 ## Tabular operators
 
-20 of 42 supported.
+22 of 42 supported.
 
 ### Supported
 
@@ -57,6 +57,8 @@ returns an approximate answer.
 | `top` | `sort by X \| take n` in one step, and it inherits `sort`'s defaults rather than SQL's: **descending** unless `asc` is written, and null sorts first ascending / last descending (R6). Exactly one sort key — `top 2 by a, b` is a syntax error in Kusto too. A negative count returns no rows, as it does in Kusto; DuckDB refuses a negative LIMIT, so the count is clamped. Which rows come back on a tie is undefined in both engines (R10). |
 | `macro-expand` | Runs the body **once per entity** and unions the results (R16), so `count` inside the parentheses returns one row per entity and outside returns one. Column unification, `isfuzzy` and row order are R15's. Entities come from an inline or `let`-bound group, or — for a *named* group, which is cluster-side state — from `entity_groups={"G": ["database('d')"]}`; an unmapped name is refused rather than expanded to nothing. A `cluster(...)` entity resolves through `clusters=`. Refused as Kusto refuses them: duplicate entities, nesting, a bare scope reference. **`withsource=` is refused**: Kusto qualifies every label here and reproducing that needs the current database's name, which belongs to the connection rather than the query. |
 | `union` | Branches are matched by column **name**, not position, and are never de-duplicated (R15). The default `kind=outer` keeps the union of the branches' columns with nulls for the gaps; `kind=inner` keeps the intersection. Column order is first appearance, left to right. `withsource=` names a branch by its table name, but a subquery, a `let`-bound name and a piped left side are all `union_argN`, counting the left side as 0. `isfuzzy=true` drops a branch whose table is missing; a wildcard matching no table is an error, not an empty result. **Residue:** two branches giving one name two different types are split into two columns by Kusto and merged by DuckDB — undetectable without column types. A wildcard also expands in *name* order here and in *creation* order in Kusto, so the columns of `union UT*` can be ordered differently; the rows are the same. |
+| `parse` | `kind=simple` (the default) and `kind=relaxed`. **All-or-nothing**: under `simple`, one failed conversion blanks the *whole row*, columns that converted included. A non-match keeps the row with `''` for a string column and null for a typed one. A capture is lazy up to the next literal, except immediately before a `*`, where a typed column matches its type's shape and a string column is refused as ambiguous (SEM0476, as Kusto refuses it). Conversions are KQL's, not DuckDB's — `'1.5'` as a long is null, not 2. Not supported: `kind=regex`, `flags=`, `: decimal`, and a `datetime`/`timespan` column before a `*`. See R19. |
+| `parse-where` | The same pattern as `parse`, dropping the rows it would have blanked — i.e. matched **and** every conversion succeeded. `parse-where kind=relaxed` is refused, as Kusto refuses it (SEM0477). |
 | `lookup` | Defaults to **`leftouter`**, not `join`'s `innerunique`, and only `leftouter` and `inner` exist — every other kind is refused, as Kusto refuses it. The right side's **key columns are dropped**, so there is no `Key1`; non-key collisions still get the `1` suffix (R14). Needs the input schema, like `join`. As with any outer join, an unmatched `string` column is null here but `''` in Kusto, so a downstream `!= ""` differs — `isempty()` is the portable test. |
 | `getschema` | Reports `ColumnName`, `ColumnOrdinal` (0-based), `DataType` and `ColumnType`, verified against the emulator including the non-obvious .NET names (`bool` is `System.SByte`, `decimal` is `System.Data.SqlTypes.SqlDecimal`). Types are DuckDB's, named as Kusto names them, so a DuckDB type with no Kusto counterpart reports as `dynamic` (composites) or `string` (everything else) rather than inventing a name. |
 
@@ -64,8 +66,6 @@ returns an approximate answer.
 
 | Operator | Notes |
 |---|---|
-| `parse` | Needs a pattern-to-regex compiler covering the greedy/lazy `*` forms and typed captures. The largest single gap — around 27 corpus cases. `extract()` and `extract_all()` cover the regex cases meanwhile. |
-| `parse-where` | The same pattern compiler as `parse`, plus dropping non-matching rows. |
 | `project-keep` | Wildcard column selection against the input schema. The plumbing `project-away` uses would cover it. |
 | `project-reorder` | The same schema plumbing as `project-keep`, plus the trailing-column rules. |
 | `make-series` | Produces array-valued columns over a generated axis, with gap filling. A different result *shape*, not just a different aggregate. |

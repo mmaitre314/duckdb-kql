@@ -772,7 +772,9 @@ def test_a_syntax_error_is_a_semantic_kusto_error(client) -> None:
 
 def test_an_unsupported_construct_is_a_semantic_error(client) -> None:
     with pytest.raises(KustoServiceError) as exc:
-        client.execute("db", "StormEvents | parse State with * 'X' *")
+        client.execute(
+            "db", "StormEvents | scan declare (x: long = 0) with (step a: true => x = 1;)"
+        )
     assert exc.value.is_semantic_error()
 
 

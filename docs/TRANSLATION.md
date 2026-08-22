@@ -728,6 +728,69 @@ sub-pipeline per element and is a different operator.
 
 ---
 
+### R19 — `parse` is all-or-nothing, and its captures are type-shaped
+*Trap: `trap-r19-parse`*
+
+`parse Expression with <pattern>` compiles to **one** regex with a named group
+per declared column, matched once per row by `regexp_extract(s, pattern,
+[names])`. DuckDB fits it unusually well: a non-match returns `''` in every
+field, which *is* Kusto's rule for a string column.
+
+Four rules, none of them guessable, all measured:
+
+**A non-match keeps the row.** `''` for a string column, null for a typed one —
+not null for strings, and not dropped. `parse-where` drops it instead.
+
+**`kind=simple` is all-or-nothing.** If *any* declared column fails to convert,
+the entire row is blanked — including columns that converted fine:
+
+```
+datatable(s:string)['a=1,b=2,c=zz,d=4']
+| parse s with "a=" a: long ",b=" b ",c=" c: long ",d=" d
+    ->  a=null  b=''  c=null  d=''      `a=1` is perfectly good and is blanked
+```
+
+A two-column example cannot tell this from "stop at the first failure"; three
+can. An **empty** capture into a typed column counts as a failure too, so there
+is no "empty is not a failure" exception. `kind=relaxed` converts each column
+independently. `parse-where` is then exactly *matched **and** every conversion
+succeeded* — and `parse-where kind=relaxed` is refused, as Kusto refuses it
+(SEM0477).
+
+**A capture is lazy, except before a `*`.** `"a" v "c"` over `aXcYc` gives `X` —
+the first `c`, not the last — and `*` skips non-greedily too. The exception is
+the one position with nothing to stop the capture: a column immediately
+followed by a `*`. There a **typed** column matches its *type's shape*
+(`\s*[-+]?\d+` for an integer, and so on), which is why Kusto allows `*` after
+a typed column and refuses it after a **string** one (SEM0476) — we refuse it
+too. A *trailing* `*` is a no-op and makes the shape optional; a `*` in the
+middle does not.
+
+**The conversions are KQL's, not DuckDB's.** Three places where `TRY_CAST` is
+too generous, each one a silent wrong answer if taken:
+
+| text | Kusto | `TRY_CAST` |
+|---|---|---|
+| `'1.5'` as `long` | null | **2** — it rounds |
+| `'yes'` as `bool` | null | **true** — DuckDB accepts yes/no/t/f |
+| `'02/17/2016 08:40:01'` as `datetime` | the datetime | **null** — the cast has no MM/DD/YYYY |
+
+So an integer column tests the text is integer-shaped first, a bool accepts
+only `true`/`false` or a whole number, and a datetime reuses `todatetime`'s
+format list. `parse` can be exact here where `tolong`/`tobool` cannot, because
+what it converts is always *text* — those two must also serve a numeric
+argument (`tolong(1.5)` really is 2), and telling the cases apart needs column
+types. **Their divergence is unfixed and recorded**: `tolong('1.5')` answers 1
+here and null on a cluster.
+
+**Not implemented:** `kind=regex` (it splices user regex into a pattern RE2 runs
+where Kusto runs .NET), `flags=`, `: decimal` (DuckDB renders the scale —
+`1.000000000`, not `1`), a `datetime`/`timespan` column before a `*` (no
+measured shape), and `parse-kv`. Each refuses rather than guessing. See
+[`parse-proposal.md`](parse-proposal.md).
+
+---
+
 ## 5. Tabular operator conventions
 
 | KQL | DuckDB rendering |
@@ -747,6 +810,7 @@ sub-pipeline per element and is a different operator.
 | `join` | R5 — kind-dependent |
 | `union [kind=]` | `UNION ALL BY NAME` with an explicit output column list (R15) |
 | `mv-expand [kind=] [x =] c [to typeof(T)][, …] [limit N]` | One `UNNEST` per target, written into an explicit column list — see R18 |
+| `parse [kind=] E with <pattern>` / `parse-where` | One `regexp_extract` with a named group per column — see R19 |
 | `datatable(...)` / `print` / `range` | `VALUES` / `SELECT` / `range()` — self-contained, ideal for corpus tests |
 
 **`union` column unification:** KQL unions produce the **superset** of columns,
