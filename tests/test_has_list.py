@@ -307,16 +307,24 @@ def test_the_boundary_applies_only_at_term_character_edges(con) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_python_agrees_with_duckdb_about_what_a_term_character_is(con) -> None:
-    """`is_term_char` reimplements RE2's ``[\\pL\\pN]``, so it must be exact.
+def test_the_boundary_is_only_folded_where_python_agrees_with_duckdb(con) -> None:
+    """The invariant the whole optimisation rests on, checked exhaustively.
 
-    This is the one correctness risk in deciding the term boundary at
-    translation time instead of emitting a ``CASE`` for DuckDB to evaluate. It
-    is worth an exhaustive check rather than a sampled one: a single
-    disagreement would silently change what `has` matches, for one alphabet,
-    on one row in a million.
+    `is_term_char` reimplements RE2's ``[\\pL\\pN]`` using ``str.isalpha()``,
+    which reads **Python's** Unicode tables — and their version travels with the
+    interpreter, not with DuckDB. U+0870 was added in Unicode 14.0, so it is a
+    letter to DuckDB and to Python 3.11 and *not* to Python 3.10. Folding on it
+    would make `has` match differently depending on which Python ran the
+    translation. CI found this on the 3.10 leg after it passed locally on 3.11.
+
+    So the property to hold is not "Python always agrees" — it cannot — but
+    "wherever we fold, Python agrees". `can_fold_term_boundary` withholds the
+    fold outside ASCII, which every Unicode version has always agreed on.
     """
-    from duckdb_kql.translate.functions import is_term_char  # noqa: PLC0415
+    from duckdb_kql.translate.functions import (  # noqa: PLC0415
+        can_fold_term_boundary,
+        is_term_char,
+    )
 
     chars = (
         [chr(i) for i in range(1, 0x2FFF)]
@@ -330,9 +338,32 @@ def test_python_agrees_with_duckdb_about_what_a_term_character_is(con) -> None:
         r"SELECT ch, regexp_matches(ch, '[\pL\pN]') FROM C"
     ).fetchall())
 
-    disagree = [c for c in chars if duck[c] != is_term_char(c)]
-    assert not disagree, [f"U+{ord(c):04X}" for c in disagree[:20]]
+    unsound = [
+        c for c in chars
+        if can_fold_term_boundary(c) and duck[c] != is_term_char(c)
+    ]
+    assert not unsound, [f"U+{ord(c):04X}" for c in unsound[:20]]
     assert len(chars) > 14_000  # the check is only worth anything if it is wide
+
+    # ...and the ASCII range, which is what real needles are made of, is
+    # entirely foldable — otherwise the guard would be silently disabling the
+    # optimisation rather than narrowing it.
+    ascii_chars = [chr(i) for i in range(1, 128) if chr(i) not in ("'", "\\")]
+    assert all(can_fold_term_boundary(c) for c in ascii_chars)
+
+
+def test_a_non_ascii_needle_keeps_the_case_form(con) -> None:
+    """Correctness beats the extra 3x: the database decides, as it always could.
+
+    The ~300x from unrolling the list is kept either way — only the boundary
+    fold is withheld.
+    """
+    folded = str(duckdb_kql.to_sql('T | where s has_any (dynamic(["ab"]))'))
+    assert "CASE WHEN regexp_matches" not in folded, folded
+
+    unfolded = str(duckdb_kql.to_sql('T | where s has_any (dynamic(["ࡰb"]))'))
+    assert "CASE WHEN regexp_matches" in unfolded, unfolded
+    assert "list_filter" not in unfolded, unfolded  # still unrolled
 
 
 def test_a_literal_needle_produces_a_constant_pattern(con) -> None:

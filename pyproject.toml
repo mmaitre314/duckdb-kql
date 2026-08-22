@@ -64,6 +64,9 @@ all = ["duckdb-kql[duckdb,pandas,arrow]"]
 dev = [
     "duckdb-kql[all]",
     "pytest>=7",
+    # The suite is CPU-bound and embarrassingly parallel apart from the corpus
+    # sweep, which `--dist loadfile` keeps on one worker (see addopts).
+    "pytest-xdist>=3",
     "ruff",
     "mypy>=1.11",
     # pandas ships no py.typed, so without these `df()` resolves to Any and the
@@ -151,6 +154,14 @@ exclude = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 filterwarnings = ["error"]
+# Parallel by default: the suite is CPU-bound and nothing in it shares state
+# across files. `loadfile` rather than the default per-test distribution because
+# several files build an expensive module-level fixture once — the corpus sweep
+# is one `functools.lru_cache`d function over 1,000 cases — and splitting a file
+# across workers would rebuild it per worker and lose more than the parallelism
+# gains. Run serially with `-n0` when a debugger or live output matters — not
+# `-p no:xdist`, which unloads the plugin that has to parse these very options.
+addopts = "-n logical --dist loadfile"
 
 [tool.ruff]
 line-length = 100

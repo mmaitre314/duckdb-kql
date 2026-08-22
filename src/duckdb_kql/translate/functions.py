@@ -15,7 +15,7 @@ from typing import Any
 __all__ = [
     "FunctionSpec", "SCALAR_FUNCTIONS", "lookup", "BINARY_OPERATORS", "BinarySpec",
     "AggregateSpec", "AGGREGATE_FUNCTIONS", "lookup_aggregate", "term_match_sql",
-    "is_term_char",
+    "is_term_char", "can_fold_term_boundary",
 ]
 
 
@@ -422,13 +422,31 @@ def is_term_char(char: str) -> bool:
     which also admits Nd-adjacent oddities, and not ``\\w``, which admits the
     underscore — the whole reason `has` cannot be written with ``\\b``.
 
-    Checked character by character against DuckDB's own
-    ``regexp_matches(ch, '[\\pL\\pN]')`` over 14,590 code points spanning the
-    BMP and four astral samples: **zero** disagreements
-    (``tests/test_has_list.py``). That equality is what lets the boundary be
-    decided here instead of by the database.
+    Only meaningful where :func:`can_fold_term_boundary` is true. See it for
+    why this cannot simply be trusted.
     """
     return bool(char) and (char.isalpha() or char.isnumeric())
+
+
+def can_fold_term_boundary(needle: str) -> bool:
+    """Whether *needle*'s boundaries may be decided here rather than by DuckDB.
+
+    Only when both edge characters are **ASCII** — and that restriction is not
+    caution, it is a caught bug. ``str.isalpha()`` reads Python's bundled
+    Unicode tables, whose version travels with the *interpreter*: 3.10 ships
+    Unicode 13.0 and 3.11 ships 14.0, while DuckDB's RE2 tables are its own.
+    U+0870 (Arabic Extended-B, added in 14.0) is a letter to DuckDB and to
+    Python 3.11, and **not** a letter to Python 3.10 — so folding there would
+    have made `has` match differently on one Python than another. CI caught it
+    on the 3.10 leg; it passed locally on 3.11.
+
+    ASCII is the subset every Unicode version has always agreed on, and it is
+    what real needles are made of. A needle with a non-ASCII edge keeps the
+    emitted ``CASE`` form, which asks the database and is therefore always
+    right — it is only the extra ~3x that is given up, not the ~300x from
+    unrolling the list in the first place.
+    """
+    return needle[:1].isascii() and needle[-1:].isascii()
 
 
 def term_match_sql(
@@ -463,6 +481,8 @@ def term_match_sql(
     **Pass `needle_text` whenever the needle is a literal.** The pattern is then
     a constant and RE2 compiles it once; otherwise it is concatenated from two
     ``CASE`` expressions and DuckDB rebuilds — and recompiles — it **per row**.
+    (Subject to :func:`can_fold_term_boundary`, which withholds the fold where
+    Python's Unicode tables cannot be trusted to match the database's.)
     An earlier version left this to the optimizer on the theory that "for the
     usual string literal DuckDB folds them away". It does not: measured on the
     5,000-row corpus fixture, folding here took one `has_any` from 52ms to 15ms,
@@ -470,7 +490,7 @@ def term_match_sql(
     genuinely is per-row) cost **28 seconds**. See `_render_has_list`.
     """
     flag = "" if case_sensitive else "(?i)"
-    if needle_text is not None:
+    if needle_text is not None and can_fold_term_boundary(needle_text):
         lead = _TERM_START if is_term_char(needle_text[:1]) else ""
         trail = _TERM_END if is_term_char(needle_text[-1:]) else ""
         pattern = f"'{flag}{lead}' || regexp_escape({needle})"

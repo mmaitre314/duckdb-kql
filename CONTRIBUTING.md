@@ -21,12 +21,17 @@ pytest
 A dev container is included (`.devcontainer/`) if you would rather not install
 Docker, DuckDB and the emulator yourself.
 
-While iterating, skip the corpus sweep — it is a third of the runtime and only
-moves when a mapping does:
+`pytest` runs in parallel by default (`-n logical --dist loadfile`, configured
+in `pyproject.toml`). Two things to know:
 
 ```bash
-pytest --ignore=tests/test_behavior.py    # ~55s, everything but ground truth
+pytest -n0                                # serially: for a debugger, or live output
+pytest --ignore=tests/test_behavior.py    # skip the ground-truth sweep while iterating
 ```
+
+`--dist loadfile` rather than per-test distribution is deliberate: several files
+build one expensive module-level fixture, and splitting a file across workers
+would rebuild it per worker.
 
 Before opening a pull request:
 

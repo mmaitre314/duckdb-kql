@@ -19,6 +19,7 @@ import time
 from pathlib import Path
 
 import pytest
+from conftest import report_note
 
 import duckdb_kql
 from duckdb_kql import engine, fixtures
@@ -33,16 +34,32 @@ pytestmark = pytest.mark.skipif(not CORPUS.is_file(), reason=f"no corpus at {COR
 
 #: Cases that translate AND match ground truth. May only go UP.
 #:
-#: The **floor**, not the typical count. One corpus case (`in-cs-operator-04`)
-#: contains a `top` whose cut falls inside a tie, so it sometimes matches the
-#: frozen expectation and sometimes is classified nondeterministic by the
-#: reproducibility check in `_run` — the count is legitimately 280 or 281. A
-#: ratchet set at the higher number would fail on the runs that get the other.
-#:
 #: Went 277 -> 280 with the `has_any`/`has_all` rewrite: a null needle matches
 #: anything and `has_all` over an empty needle set is true, neither of which the
 #: old `list_filter` / `bool_and` shapes could express.
 BASELINE_PASSING = 280
+
+#: Cases whose *data* makes them nondeterministic, which the query text cannot
+#: show. Not a divergence and not a waiver — there is no single right answer to
+#: compare against, so comparing is meaningless rather than lenient.
+#:
+#: `is_nondeterministic` reads the query for `now()`/`rand()` and cannot see
+#: this: the text is identical to one over data with no tie, which *is*
+#: reproducible and must stay compared. `_is_reproducible` was the previous
+#: guess — re-run the query and see whether our own answer moves — and it lost
+#: the race under load, because DuckDB will happily pick the same tie ordering
+#: three times running and then a different one in the next process.
+NONDETERMINISTIC_BY_DATA: dict[str, str] = {
+    "in-cs-operator-04": (
+        "`top 5 by lightning_events` over StormEvents: two states have 5 "
+        "events and **five** tie at 4, for three remaining slots. Any three of "
+        "the five is a correct top-5, and the choice then feeds "
+        "`iff(State in (Top_5_States), …)`, so the whole result moves with it "
+        "(R10). Kusto's frozen answer took TEXAS/WASHINGTON/KENTUCKY; DuckDB "
+        "takes a different three depending on scheduling — visibly so once the "
+        "suite started running in parallel and the workers competed for cores."
+    ),
+}
 
 #: Cases we translate but knowingly get wrong, with the reason. This is an
 #: **admission of a bug**, not a waiver: each entry is a real KQL↔DuckDB gap
@@ -127,9 +144,11 @@ def _run(case: dict) -> tuple[str, str]:
 
     status: ``pass`` | ``unsupported`` | ``sql_error`` | ``mismatch``
     """
-    if is_nondeterministic(case["kql"]):
+    if is_nondeterministic(case["kql"]) or case["id"] in NONDETERMINISTIC_BY_DATA:
         # now()/rand() have no stable answer, so the frozen expectation cannot
-        # be reproduced by anyone — comparing it would test nothing.
+        # be reproduced by anyone — comparing it would test nothing. Neither can
+        # a tie at a `top` cut-off, which the query text cannot show; those are
+        # named in NONDETERMINISTIC_BY_DATA.
         return "nondeterministic", ""
 
     try:
@@ -221,6 +240,33 @@ def test_translated_cases_match_ground_truth() -> None:
     assert not mismatches, f"{len(mismatches)} cases disagree with ground truth:\n{detail}"
 
 
+def test_nondeterministic_by_data_entries_are_still_nondeterministic() -> None:
+    """A case skipped for a data tie must still *have* one.
+
+    Same discipline as KNOWN_DIVERGENCES: the list is a claim about the fixture
+    data, and if the fixtures change so the tie disappears, the case becomes
+    comparable again and belongs back in the sweep. Otherwise this quietly
+    becomes the place cases go when nobody wants to look at them.
+    """
+    for cid, reason in NONDETERMINISTIC_BY_DATA.items():
+        case = next((c for c in _frozen_cases() if c["id"] == cid), None)
+        assert case is not None, f"{cid} is no longer in the corpus"
+        assert len(reason) > 60, f"{cid} needs a real explanation"
+
+        sql = duckdb_kql.to_sql(case["kql"], schema=_schema())
+        first = _execute(sql)
+        # A tie shows up as the answer moving between runs. Several attempts,
+        # because it does not resolve differently on *every* one.
+        moved = not _is_reproducible(sql, first, attempts=20)
+        agrees = compare(
+            case["expected"], first, ComparisonOptions.for_query(case["kql"])
+        ).equal
+        assert moved or not agrees, (
+            f"{cid} is now stable AND matches ground truth — remove it from "
+            f"NONDETERMINISTIC_BY_DATA and let the sweep compare it"
+        )
+
+
 def test_translation_does_not_produce_invalid_sql() -> None:
     """If we claim to translate a query, the SQL must at least execute.
 
@@ -289,20 +335,25 @@ def test_no_query_is_pathologically_slow() -> None:
     )
 
 
-def test_report_coverage(capsys: pytest.CaptureFixture) -> None:
-    """Not an assertion — prints the coverage breakdown for visibility."""
+def test_report_coverage() -> None:
+    """Not an assertion — reports the coverage breakdown for visibility.
+
+    Via `report_note` rather than `print`: under xdist a worker's stdout only
+    reaches the terminal when a test fails. See tests/conftest.py.
+    """
     r = _results()
     total = sum(len(v) for v in r.values())
     slowest = max(ELAPSED.items(), key=lambda kv: kv[1], default=("-", 0.0))
-    with capsys.disabled():
-        print(
-            f"\n  L3 slowest query: {slowest[1] * 1000:.0f}ms ({slowest[0]})"
-            f" | budget {SLOWEST_QUERY_BUDGET * 1000:.0f}ms"
-            f"\n  L3 coverage: {len(r['pass'])}/{total} match ground truth"
-            f" | {len(r['unsupported'])} not yet supported"
-            f" | {len(r['sql_error'])} sql errors"
-            f" | {len(r['mismatch'])} mismatches"
-            f" | {len(r['crash'])} crashes"
-            f" | {len(r['known_divergence'])} known divergences"
-            f" | {len(r['nondeterministic'])} nondeterministic (skipped)"
-        )
+    report_note(
+        f"  L3 slowest query: {slowest[1] * 1000:.0f}ms ({slowest[0]})"
+        f" | budget {SLOWEST_QUERY_BUDGET * 1000:.0f}ms"
+    )
+    report_note(
+        f"  L3 coverage: {len(r['pass'])}/{total} match ground truth"
+        f" | {len(r['unsupported'])} not yet supported"
+        f" | {len(r['sql_error'])} sql errors"
+        f" | {len(r['mismatch'])} mismatches"
+        f" | {len(r['crash'])} crashes"
+        f" | {len(r['known_divergence'])} known divergences"
+        f" | {len(r['nondeterministic'])} nondeterministic (skipped)"
+    )

@@ -19,6 +19,7 @@ import json
 from pathlib import Path
 
 import pytest
+from conftest import report_note
 
 duckdb = pytest.importorskip("duckdb")
 
@@ -121,12 +122,15 @@ def test_every_gap_has_a_reason() -> None:
         assert len(reason) > 30, f"{name} needs a real explanation, not a placeholder"
 
 
-def test_report_coverage(capsys: pytest.CaptureFixture, results) -> None:
-    """Not an assertion — prints the coverage line for visibility."""
+def test_report_coverage(results) -> None:
+    """Not an assertion — reports the coverage line for visibility.
+
+    Via `report_note` rather than `print`, so it survives a parallel run; see
+    tests/conftest.py.
+    """
     flat = _flat(results)
     supported = sum(1 for e in flat if e["supported"])
-    with capsys.disabled():
-        print(
-            f"\n  Azure Monitor profile: {supported}/{len(flat)} probes pass "
-            f"({100 * supported // len(flat)}%) | {len(KNOWN_GAPS)} known gaps"
-        )
+    report_note(
+        f"  Azure Monitor profile: {supported}/{len(flat)} probes pass "
+        f"({100 * supported // len(flat)}%) | {len(KNOWN_GAPS)} known gaps"
+    )
