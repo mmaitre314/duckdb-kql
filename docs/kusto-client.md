@@ -149,6 +149,7 @@ too, and both go through the same translation
 | `.show databases` | `DatabaseName`, `PersistentStorage`, `Version`, `IsCurrent`, `DatabaseAccessMode`, `PrettyName`, `ReservedSlot1`, `DatabaseId`, `InTransitionTo`, `SuspensionState` | The DuckDB catalogs attached to the connection. `Version` is DuckDB's; `DatabaseId` and the cluster-only columns are null. |
 | `.show tables` | `TableName`, `DatabaseName`, `Folder`, `DocString` | Tables **and views** in the current database — a view is a queryable table as far as KQL is concerned. `Folder` and `DocString` are null. |
 | `.set` / `.append` / `.set-or-append` / `.set-or-replace` | `ExtentId`, `OriginalSize`, `ExtentSize`, `CompressedSize`, `IndexSize`, `RowCount` | Ingests the command's KQL body into the table. Only `RowCount` and a generated `ExtentId` are real; the sizes describe a cluster's storage layout and are null. Gated by `allow_write`, which defaults to on here and off in `duckdb-kql serve`. |
+| `.show entity_groups` | `Name`, `Entities` | The `entity_groups=` mapping this client was given, since a named group is cluster-side state and there is no cluster. `Entities` is a **string** holding a JSON array of the references, measured. No mapping means no rows. |
 | everything else | — | `KustoUnsupportedError`, naming the ones that work. |
 
 A command's result can be **piped into query operators**, as it can in Kusto:

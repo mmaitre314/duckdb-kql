@@ -126,12 +126,13 @@ Correctness measured against the real KQL engine (the [Kusto Emulator](https://l
 |---|---|
 | Doc-corpus cases matching ground truth | **266** of 1036 (0 mismatches) |
 | [Azure Monitor's published KQL subset](https://github.com/mmaitre314/duckdb-kql/blob/main/docs/azure-monitor-profile.md) | **114 / 119 (96%)** |
-| Tabular operators | **18 / 41** |
+| Tabular operators | **19 / 42** |
 | Scalar functions / aggregates / binary operators | **111 / 19 / 33** |
 
 Supported operators: `where`, `project`, `project-away`, `project-rename`,
 `extend`, `summarize`, `join`, `mv-expand`, `distinct`, `count`,
-`sort` / `order by`, `take` / `limit`, `union`, `lookup`, `render`; sources `print`, `datatable`,
+`sort` / `order by`, `take` / `limit`, `union`, `macro-expand`, `lookup`, `render`;
+sources `print`, `datatable`,
 `range`, and tables; plus `let` and `declare query_parameters`.
 
 [The support matrix](https://github.com/mmaitre314/duckdb-kql/blob/main/docs/kql-support.md)

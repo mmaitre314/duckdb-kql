@@ -1,9 +1,12 @@
 # Proposal — `macro-expand` and entity groups
 
-> **Status: proposal.** Nothing here is implemented. Every semantic claim in §2
-> was measured on the pinned Kusto Emulator against two databases
-> (`NetDefaultDB` and a `.create database DB2 volatile`), and the measurement is
-> quoted next to the rule it justifies.
+> **Status: implemented**, with the exceptions listed in §8. The normative rule
+> is [`TRANSLATION.md` R16](TRANSLATION.md); the trap tests are
+> `tests/test_macro_expand.py`. Every semantic claim in §2 was measured on the
+> pinned Kusto Emulator against two databases (`NetDefaultDB` and a
+> `.create database DB2 volatile`), and the measurement is quoted next to the
+> rule it justifies. This document is kept as the design record and as the
+> worklist for what was deliberately left out.
 
 ## 1. The one-sentence version
 
@@ -237,3 +240,78 @@ The desugar means there is no new emitter and no new column-tracking code.
    qualifies unqualified tables. Inside a macro-expand body every table is
    qualified by the scope rewrite, so the two should not interact — but that
    deserves a test rather than an assumption.
+
+---
+
+## 8. What was deliberately left out
+
+Four decisions, each a scope choice rather than a difficulty.
+
+### 8.1 `.create entity_group` — not implemented
+
+A named group is created on the cluster and lives in a database. Storing one in
+memory for the session would make an object that looks like the cluster's and is
+not, and the mapping already covers the need. If it is added later it changes
+§4: the group would belong to a *database*, so `macro-expand` would start
+interacting with `database=` in a way it deliberately does not today (§8.4).
+
+### 8.2 A bare DuckDB catalog name is not an entity
+
+`{"EG": ["mydb"]}` is refused; write `{"EG": ["database('mydb')"]}`. One
+language in the field, and it is the form `.show entity_groups` reports, so a
+real group's definition copies across unchanged.
+
+### 8.3 `withsource=` — refused on `macro-expand`
+
+Measured, Kusto qualifies **every** label as soon as one branch resolves to a
+database other than the current one:
+
+| query | labels |
+|---|---|
+| `union withsource=S database('Other').T` | `database("Other").T` |
+| `union withsource=S database('Current').T` | `T` |
+| `union withsource=S T, T2` | `T`, `T2` |
+| `union withsource=S T, database('Other').T` | `database("Current").T`, `database("Other").T` |
+| `union withsource=S database('Current').T, T2` | `T`, `T2` |
+
+Reproducing that needs the name of the *current* database, which arrives with
+the connection and not with the query — `to_sql` has no connection at all. Under
+`macro-expand` every branch is a different database by construction, so Kusto
+always qualifies; emitting the bare table name would give every entity the same
+label, which is the one thing `withsource` is asked not to do. Plain `union`
+keeps bare labels, right whenever every branch is in the current database.
+
+**To settle it later**, run these against the emulator with a second database
+attached (`.create database DB2 volatile`) and a table `MT` in each:
+
+```kusto
+// (a) Is the qualifier decided per union, or per branch? — answered above,
+//     per union. Re-confirm after any emulator upgrade.
+union withsource=S MT, database('DB2').MT
+
+// (b) UNMEASURED: what does a cluster-qualified entity report? The emulator
+//     cannot resolve a remote cluster (it fails at DNS), so this needs a real
+//     cluster or a second emulator reachable by name.
+macro-expand withsource=S
+    entity_group [cluster('other.kusto.windows.net').database('D'), database('DB2')]
+    as s (s.MT)
+
+// (c) UNMEASURED: does a three-part name appear, or just cluster+database?
+union withsource=S cluster('other.kusto.windows.net').database('D').MT
+
+// (d) UNMEASURED: is the label affected by `database=` on the request, i.e. is
+//     "current" the request's database or the connection's?
+//     Send `union withsource=S MT, database('DB2').MT` with the request scoped
+//     to DB2 rather than to the default database.
+```
+
+Once (b)–(d) are known, the implementation needs one more input — the current
+database's name — threaded into `to_sql`, and then `_table_label`'s `qualify`
+flag (already present, always False) can be computed by `_union_qualifies`.
+
+### 8.4 `macro-expand` does not interact with `database=`
+
+`database=` qualifies *unqualified* table references. Every table inside a
+macro-expand body is qualified by the scope rewrite, so the two never meet, and
+`test_database_does_not_change_which_entities_expand` pins it. This is a
+property of the current design rather than a law: see §8.1.

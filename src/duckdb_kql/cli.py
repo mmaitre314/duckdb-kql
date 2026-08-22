@@ -146,6 +146,15 @@ def _serve_command(args: argparse.Namespace) -> int:
         except (OSError, ValueError) as exc:
             print(f"duckdb-kql serve: --cluster-map: {exc}", file=sys.stderr)
             return EXIT_TRANSLATION_ERROR
+    entity_groups = None
+    if args.entity_groups:
+        try:
+            entity_groups = json.loads(
+                Path(args.entity_groups).read_text(encoding="utf-8")
+            )
+        except (OSError, ValueError) as exc:
+            print(f"duckdb-kql serve: --entity-groups: {exc}", file=sys.stderr)
+            return EXIT_TRANSLATION_ERROR
     try:
         serve(
             args.database,
@@ -154,6 +163,7 @@ def _serve_command(args: argparse.Namespace) -> int:
             init=args.init,
             allow_write=args.allow_write,
             clusters=clusters,
+            entity_groups=entity_groups,
         )
     except ImportError as exc:  # pragma: no cover - depends on the install
         # `engine._require_duckdb` already names the extra to install; repeating
@@ -476,6 +486,17 @@ def _parser() -> argparse.ArgumentParser:
             'as cluster("c").database("d").Table resolve here: '
             '{"c": {"d": "duckdb_database"}}. Without it such a query is '
             "refused rather than answered from whatever is local."
+        ),
+    )
+    serve.add_argument(
+        "--entity-groups",
+        metavar="FILE",
+        help=(
+            "JSON mapping each NAMED entity group to its entities, so "
+            "macro-expand MyGroup as s (...) resolves here: "
+            '{"MyGroup": ["database(\'d1\')", "database(\'d2\')"]}. '
+            "An inline or let-bound group needs no mapping. Without one a "
+            "named group is refused rather than expanded to nothing."
         ),
     )
     serve.add_argument(

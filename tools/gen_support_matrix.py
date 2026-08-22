@@ -59,6 +59,7 @@ RULES = {
     "R13": "`/` on two integers is **integer** division, truncating toward zero.",
     "R14": "`lookup` defaults to **`leftouter`** and drops the right key columns; join/lookup keys match **null to null**.",
     "R15": "`union` matches branches by column **name**, not position, and does not de-duplicate.",
+    "R16": "`macro-expand` runs its body once per entity and unions the results.",
 }
 
 #: R11 covers two unrelated hazards. Aggregates get the one that applies to them.
@@ -176,6 +177,7 @@ OPERATORS: list[tuple[str, str, str]] = [
     ("limit", "T | limit 1", "Synonym for `take`."),
     ("render", "T | render table", "Parsed and **ignored**: there is no chart to draw. The rows are unchanged, so a query ending in `render` still returns its data."),
     ("top", "T | top 1 by a", "Needs sort-plus-limit with KQL's descending default and its undefined tie-breaking. `sort by X desc | take n` is supported and equivalent apart from ties."),
+    ("macro-expand", "macro-expand entity_group [database('d')] as s (s.T)", "Runs the body **once per entity** and unions the results (R16), so `count` inside the parentheses returns one row per entity and outside returns one. Column unification, `isfuzzy` and row order are R15's. Entities come from an inline or `let`-bound group, or — for a *named* group, which is cluster-side state — from `entity_groups={\"G\": [\"database('d')\"]}`; an unmapped name is refused rather than expanded to nothing. A `cluster(...)` entity resolves through `clusters=`. Refused as Kusto refuses them: duplicate entities, nesting, a bare scope reference. **`withsource=` is refused**: Kusto qualifies every label here and reproducing that needs the current database's name, which belongs to the connection rather than the query."),
     ("union", "T | union T", "Branches are matched by column **name**, not position, and are never de-duplicated (R15). The default `kind=outer` keeps the union of the branches' columns with nulls for the gaps; `kind=inner` keeps the intersection. Column order is first appearance, left to right. `withsource=` names a branch by its table name, but a subquery, a `let`-bound name and a piped left side are all `union_argN`, counting the left side as 0. `isfuzzy=true` drops a branch whose table is missing; a wildcard matching no table is an error, not an empty result. **Residue:** two branches giving one name two different types are split into two columns by Kusto and merged by DuckDB — undetectable without column types. A wildcard also expands in *name* order here and in *creation* order in Kusto, so the columns of `union UT*` can be ordered differently; the rows are the same."),
     ("parse", "T | parse a with * 'x' *", "Needs a pattern-to-regex compiler covering the greedy/lazy `*` forms and typed captures. The largest single gap — around 27 corpus cases. `extract()` and `extract_all()` cover the regex cases meanwhile."),
     ("parse-where", "T | parse-where a with * 'x' *", "The same pattern compiler as `parse`, plus dropping non-matching rows."),
@@ -227,7 +229,10 @@ STATEMENTS: list[tuple[str, str, str]] = [
 ]
 
 #: Schema the probes translate against.
-PROBE_SCHEMA = {"T": ["a", "b"]}
+#: `d.T` is here for the `macro-expand` probe: an entity group's members are
+#: always `database(...)`-qualified, so its body names a table in another
+#: database and the probe cannot reach `T`.
+PROBE_SCHEMA = {"T": ["a", "b"], "d.T": ["a", "b"]}
 
 
 def probe(kql: str) -> tuple[bool, str]:

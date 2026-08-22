@@ -634,6 +634,7 @@ def to_sql(query: ir.Query, schema: Schema | None = None) -> TranslationResult:
     # A tabular `let` becomes a named CTE, so `TableRef(name)` in the body needs
     # no rewriting — it already refers to the CTE.
     schema = _schema_with_lets(query, schema)
+    query = _promote_fuzzy_source(query, schema)
     let_ctes = [
         f"{quote_ident(name)} AS ({to_sql(bound, schema)})"
         for name, bound in query.lets
@@ -689,6 +690,64 @@ def to_sql(query: ir.Query, schema: Schema | None = None) -> TranslationResult:
     ctes = let_ctes + [f"_s{i} AS ({sql})" for i, sql in enumerate(stages)]
     body = f"SELECT * FROM _s{len(stages) - 1}"
     return TranslationResult("WITH " + ",\n     ".join(ctes) + f"\n{body}")
+
+
+def _promote_fuzzy_source(query: ir.Query, schema: Schema | None) -> ir.Query:
+    """Let ``isfuzzy=true`` drop the **first** branch as well as the others.
+
+    A union's first branch is the query's own source, not one of
+    `ir.Union.branches`, so `surviving_branches` could never drop it:
+    `union isfuzzy=true UT1, NoSuchTable` worked and
+    `union isfuzzy=true NoSuchTable, UT1` raised, which is a difference Kusto
+    does not make. Reaching a missing first branch also made
+    `macro-expand isfuzzy=true` fail whenever the *first* entity was the one
+    lacking the table.
+
+    Resolved here rather than at lowering because it needs the schema — whether
+    a table exists is not knowable from the query text.
+    """
+    from ..errors import KqlSchemaError
+    from ..schema import output_columns, surviving_branches
+
+    if schema is None:
+        return query
+    index = next(
+        (
+            i
+            for i, candidate in enumerate(query.operators)
+            if isinstance(candidate, ir.Union) and candidate.isfuzzy
+        ),
+        None,
+    )
+    if index is None:
+        return query
+    op = query.operators[index]
+    assert isinstance(op, ir.Union)
+
+    head = ir.Query(query.source, list(query.operators[:index]), list(query.lets))
+    try:
+        output_columns(head, schema)
+    except KqlSchemaError:
+        pass
+    else:
+        return query        # the first branch is fine; nothing to promote
+
+    survivors = list(surviving_branches(op, schema))
+    if not survivors:
+        # Every branch is missing. Kusto has nothing to return either, and the
+        # original error names the table, which is more use than an empty table.
+        return query
+
+    promoted, *rest = survivors
+    out = ir.Query(
+        promoted.source,
+        list(promoted.operators),
+        list(query.lets) + list(promoted.lets),
+        list(query.parameters),
+    )
+    out.operators.append(dataclasses.replace(op, branches=tuple(rest)))
+    out.operators.extend(query.operators[index + 1:])
+    return out
 
 
 def _schema_with_lets(query: ir.Query, schema: Schema | None) -> Schema | None:
@@ -1218,9 +1277,10 @@ def render_union(
     out_cols = union_output_columns(op, left_cols, schema)
     let_names = frozenset(name for name, _ in query.lets)
 
-    arms = _left_arms(op, prev, query, schema, leading, let_names)
+    qualify = _union_qualifies(query, op, leading)
+    arms = _left_arms(op, prev, query, schema, leading, let_names, qualify)
     for index, branch in enumerate(surviving_branches(op, schema), start=1):
-        arms += _branch_arms(branch, index, schema, let_names)
+        arms += _branch_arms(branch, index, schema, let_names, qualify)
 
     selects = []
     for sql, label in arms:
@@ -1241,6 +1301,7 @@ def _left_arms(
     schema: Schema | None,
     leading: bool,
     let_names: frozenset[str],
+    qualify: bool,
 ) -> list[tuple[str, str]]:
     """The arms for the union's left side — the query so far.
 
@@ -1251,18 +1312,22 @@ def _left_arms(
         return _wildcard_arms(query.source, schema)
     label = "union_arg0"
     if leading and isinstance(query.source, ir.TableRef):
-        label = _table_label(query.source, let_names) or label
+        label = _table_label(query.source, let_names, qualify) or label
     return [(f"SELECT * FROM {prev}", label)]
 
 
 def _branch_arms(
-    branch: ir.Query, index: int, schema: Schema | None, let_names: frozenset[str]
+    branch: ir.Query,
+    index: int,
+    schema: Schema | None,
+    let_names: frozenset[str],
+    qualify: bool,
 ) -> list[tuple[str, str]]:
     if not branch.operators and isinstance(branch.source, ir.WildcardTableRef):
         return _wildcard_arms(branch.source, schema)
     label = f"union_arg{index}"
     if not branch.operators and isinstance(branch.source, ir.TableRef):
-        label = _table_label(branch.source, let_names) or label
+        label = _table_label(branch.source, let_names, qualify) or label
     return [(str(to_sql(branch, schema)), label)]
 
 
@@ -1282,17 +1347,49 @@ def _wildcard_arms(
     ]
 
 
-def _table_label(source: ir.TableRef, let_names: frozenset[str]) -> str | None:
+def _table_label(
+    source: ir.TableRef, let_names: frozenset[str], qualify: bool
+) -> str | None:
     """The `withsource` label for a bare table branch, or None for `union_argN`.
 
-    The bare table name, with any database qualifier stripped — measured,
-    `database('NetDefaultDB').UT2` reports `UT2`. A `let`-bound name is *not* a
-    table and does not get its name: `let A = ...; union withsource=Src UT1, A`
-    reports `union_arg1` for the second branch.
+    A `let`-bound name is *not* a table and does not get its name: measured,
+    `let A = ...; union withsource=Src UT1, A` reports `union_arg1` for the
+    second branch.
+
+    **Known residue — the database qualifier.** Measured, Kusto qualifies every
+    label as soon as one branch resolves to a database other than the *current*
+    one, and leaves them all bare otherwise:
+
+        union withsource=S database('Other').MT   -> database("Other").MT
+        union withsource=S database('Current').MT -> MT
+        union withsource=S MT, MT2                -> MT, MT2
+        union withsource=S MT, database('Other').MT
+                    -> database("Current").MT, database("Other").MT
+
+    Reproducing that needs the name of the *current* database, which arrives
+    with the connection and not with the query — `to_sql` has no connection at
+    all. So labels stay bare, which is right whenever every branch is in the
+    current database and is the common case locally. `qualify` is threaded
+    through for when that plumbing exists; it is False today.
+
+    This is also why `macro-expand` refuses `withsource=`: there every branch is
+    explicitly a *different* database, so Kusto always qualifies and bare labels
+    would be identical for every entity — which defeats the point of asking.
     """
     if source.name in let_names:
         return None
+    if qualify and source.database:
+        return f'database("{source.database}").{source.name}'
     return source.name
+
+
+def _union_qualifies(query: ir.Query, op: ir.Union, leading: bool) -> bool:
+    """Whether this union's labels carry a `database(...)` qualifier.
+
+    Always False: deciding it needs the current database's name, which is a
+    property of the connection and not of the query. See `_table_label`.
+    """
+    return False
 
 
 def _renamed(left_cols: list[str], right_cols: list[str]) -> list[str]:

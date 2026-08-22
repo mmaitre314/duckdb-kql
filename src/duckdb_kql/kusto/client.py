@@ -29,6 +29,7 @@ import threading
 import uuid
 from typing import TYPE_CHECKING, Any, cast
 
+from ..entity_groups import EntityGroupMap
 from ..errors import KqlError
 from ..translate import quote_ident
 from ._models import WellKnownDataSet, kusto_type, to_wire, widen_out_of_range
@@ -210,6 +211,7 @@ class KustoClient:
         database: str | None = None,
         *,
         allow_write: bool = True,
+        entity_groups: EntityGroupMap | None = None,
     ) -> None:
         self._is_closed = False
         self._lock = threading.Lock()
@@ -221,6 +223,11 @@ class KustoClient:
         #: for. `duckdb-kql serve` defaults the other way because it is reachable
         #: over a socket.
         self.allow_write = allow_write
+        #: Entities each **named** entity group stands for, for `macro-expand`.
+        #: Parsed once here so a malformed entry fails at construction.
+        from ..entity_groups import parse_entity_groups  # noqa: PLC0415
+
+        self.entity_groups = parse_entity_groups(entity_groups)
         self._connection: DuckDBPyConnection
 
         if hasattr(kcsb, "execute") and hasattr(kcsb, "sql"):
@@ -363,7 +370,7 @@ class KustoClient:
             return self._execute_ingestion(con, database, query, properties)
 
         try:
-            sql = translate_control_command(query)
+            sql = translate_control_command(query, self.entity_groups)
         except KqlUnsupportedError as exc:
             # This client's own refusal type, not a service error: "we do not
             # implement that command" is a statement about the client, and it is

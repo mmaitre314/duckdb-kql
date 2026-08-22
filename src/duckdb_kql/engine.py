@@ -35,6 +35,7 @@ if TYPE_CHECKING:
     from duckdb import DuckDBPyConnection, DuckDBPyRelation
 
     from .clusters import ClusterMap
+    from .entity_groups import EntityGroupMap
     from .translate import TranslationResult
 
 #: Values a caller may supply for a query's declared parameters. Deliberately
@@ -88,6 +89,7 @@ def kql(
     database: str | None = None,
     allow_write: bool = True,
     clusters: ClusterMap | None = None,
+    entity_groups: EntityGroupMap | None = None,
 ) -> DuckDBPyRelation:
     """Execute the KQL *query* against a DuckDB connection, returning a relation.
 
@@ -113,7 +115,9 @@ def kql(
             {"state": user_input},   # safe whatever user_input contains
         )
     """
-    translated, bound = _prepare(con, query, parameters, database, allow_write, clusters)
+    translated, bound = _prepare(
+        con, query, parameters, database, allow_write, clusters, entity_groups
+    )
     return con.sql(translated, params=bound) if bound else con.sql(translated)
 
 
@@ -124,13 +128,16 @@ def execute(
     database: str | None = None,
     allow_write: bool = True,
     clusters: ClusterMap | None = None,
+    entity_groups: EntityGroupMap | None = None,
 ) -> DuckDBPyConnection:
     """Execute the KQL *query* and return the connection, mirroring ``con.execute``.
 
     Use this for its side effect or its cursor; use :func:`kql` when you want a
     relation to keep composing.
     """
-    translated, bound = _prepare(con, query, parameters, database, allow_write, clusters)
+    translated, bound = _prepare(
+        con, query, parameters, database, allow_write, clusters, entity_groups
+    )
     return con.execute(translated, bound) if bound else con.execute(translated)
 
 
@@ -141,6 +148,7 @@ def _prepare(
     database: str | None = None,
     allow_write: bool = True,
     clusters: ClusterMap | None = None,
+    entity_groups: EntityGroupMap | None = None,
 ) -> tuple[str, Parameters]:
     """Translate the KQL *query* and get *con* into the state the SQL assumes."""
     from . import to_sql
@@ -155,6 +163,7 @@ def _prepare(
         parameters=parameters,
         database=database,
         allow_write=allow_write,
+        entity_groups=entity_groups,
         clusters=clusters,
     )
 
@@ -209,9 +218,10 @@ def df(
     database: str | None = None,
     allow_write: bool = True,
     clusters: ClusterMap | None = None,
+    entity_groups: EntityGroupMap | None = None,
 ) -> pd.DataFrame:
     """Execute the KQL *query* and return a pandas DataFrame."""
-    return kql(con, query, parameters, database, allow_write, clusters).df()
+    return kql(con, query, parameters, database, allow_write, clusters, entity_groups).df()
 
 
 def arrow(
@@ -221,9 +231,10 @@ def arrow(
     database: str | None = None,
     allow_write: bool = True,
     clusters: ClusterMap | None = None,
+    entity_groups: EntityGroupMap | None = None,
 ) -> pa.Table:
     """Execute the KQL *query* and return a pyarrow Table."""
-    return kql(con, query, parameters, database, allow_write, clusters).arrow()
+    return kql(con, query, parameters, database, allow_write, clusters, entity_groups).arrow()
 
 
 def schema(con: DuckDBPyConnection) -> Schema:

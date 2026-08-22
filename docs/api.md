@@ -102,7 +102,7 @@ Every syntax diagnostic, empty when the query is valid. Does not raise.
 `Diagnostic` has `.span` (a `SourceSpan` with 1-based `line`, 0-based `column`)
 and `.message`.
 
-### `to_sql(kql, schema=None, parameters=None, database=None, allow_write=True, clusters=None)`
+### `to_sql(kql, schema=None, parameters=None, database=None, allow_write=True, clusters=None, entity_groups=None)`
 
 `database` gives unqualified table names a database: `T` renders as
 `"sales"."T"`. It needs no connection, so Layer 0 can target a database too.
@@ -123,7 +123,7 @@ so `join` works without you supplying one.
 the zone yourself. Raises `ImportError` with an install hint if `duckdb` is not
 installed.
 
-### `kql(con, query, parameters=None, database=None, allow_write=True, clusters=None) -> DuckDBPyRelation`
+### `kql(con, query, parameters=None, database=None, allow_write=True, clusters=None, entity_groups=None) -> DuckDBPyRelation`
 
 Execute and return a relation, so you can keep composing with DuckDB's API.
 
@@ -200,6 +200,13 @@ the ones that are.
 > connection, or give each thread its own. `duckdb-kql serve` holds a lock for
 > exactly this reason.
 
+`entity_groups` maps each **named** entity group to its entities, for
+`macro-expand MyGroup as s (...)`: `{"MyGroup": ["database('d1')",
+"cluster('c').database('d2')"]}`. Inline and `let`-bound groups need no mapping.
+Set it once with `duckdb_kql.set_entity_groups(...)`; a per-call argument
+replaces the global rather than merging, exactly as `clusters=` does. A
+`cluster(...)` entity resolves through `clusters=`, so the two compose.
+
 Also accepts the control commands `.show version`, `.show databases` and
 `.show tables` — a separate Kusto dialect, with the column shapes Kusto returns
 — and pipelines built on them, such as
@@ -241,7 +248,7 @@ Requires `duckdb`; `pandas` for the DataFrame helper. A drop-in for
 option and why it is implemented, a no-op, or refused — is in
 [Kusto SDK compatibility](kusto-client.md); this is the surface.
 
-### `KustoClient(kcsb, database=None, *, allow_write=True)`
+### `KustoClient(kcsb, database=None, *, allow_write=True, entity_groups=None)`
 
 *kcsb* may be a DuckDB database path, a `KustoConnectionStringBuilder`, or an
 existing `duckdb` connection. A connection the client opened is closed with the

@@ -52,6 +52,10 @@ KUSTO_SCHEMA: dict[str, list[tuple[str, int, str, str]]] = {
         ("ProductVersion", 3, "System.String", "string"),
         ("ServiceOffering", 4, "System.String", "string"),
     ],
+    ".show entity_groups": [
+        ("Name", 0, "System.String", "string"),
+        ("Entities", 1, "System.String", "string"),
+    ],
     ".show databases": [
         ("DatabaseName", 0, "System.String", "string"),
         ("PersistentStorage", 1, "System.String", "string"),
@@ -119,7 +123,11 @@ KUSTO_COLUMNS = {
 #: has to *answer* — the web UI asks for it while opening a database, and a
 #: refusal reads as a broken connection — so it returns its sixteen columns and
 #: no rows.
-ALWAYS_EMPTY = {".show materialized-views"}
+#
+#: `.show entity_groups` joins it for a different reason: a named entity group
+#: is cluster-side state, so what this reports is the caller's
+#: `entity_groups=` mapping — and this fixture passes none.
+ALWAYS_EMPTY = {".show materialized-views", ".show entity_groups"}
 
 
 @pytest.fixture(scope="module")

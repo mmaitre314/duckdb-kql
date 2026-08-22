@@ -492,6 +492,68 @@ See the support matrix.
 
 ---
 
+### R16 — `macro-expand` is `union` with the source rewritten per entity
+
+*Trap: `tests/test_macro_expand.py`*
+
+> `macro-expand G as s (body)` evaluates **body once per entity** in the group
+> and unions the results. It is not a second way to combine branches.
+
+Measured against two databases, and every part of it is R15's:
+
+| | behaviour |
+|---|---|
+| `count` inside the parentheses | one row **per entity** |
+| `count` after the closing paren | one row, over the union |
+| differing schemas | outer union of column names in first-appearance order |
+| `isfuzzy=true` | drops an entity whose **table** is missing |
+| `hint.*` | accepted; cannot change the result |
+| row order | undefined, as R10 already says |
+
+So it lowers to an `ir.Union` and inherits all of that, rather than growing a
+parallel implementation that would have to be kept in step.
+
+**`scope.T` is not a table reference to the lowerer.** Outside a macro-expand it
+is dynamic property access on a column called `scope`, and nothing in the syntax
+tells them apart. The body is therefore lowered **once per entity with the scope
+bound**, not lowered once and rewritten — by the time it is IR the two readings
+are indistinguishable. The same applies inside the body: `let t = s.T` binds a
+*table*, which only the bound scope reveals.
+
+**Where the entities come from.** Inline (`entity_group [...]`) and `let`-bound
+groups carry them in the query text. A **named** group is cluster-side state
+created by `.create entity_group`, so it is supplied by the caller through
+`entity_groups=`, on exactly the reasoning `cluster()` uses (R3 of
+`duckdb_kql.clusters`): expanding an unknown group to nothing would answer a
+question about several databases with none. Entries are KQL entity references as
+text, so a `cluster(...)` entity resolves through the existing `clusters=` map
+and the two features compose.
+
+Refused, each because Kusto refuses it: a duplicate entity (SEM0614), a nested
+`macro-expand` (SEM0611), a bare scope used as a table (SEM0608), and an empty
+group.
+
+**`withsource=` is refused**, and this is the one place the desugar does not
+carry over. Measured, Kusto qualifies *every* label as soon as one branch is in
+a database other than the current one:
+
+```
+union withsource=S database('Other').T   ->  database("Other").T
+union withsource=S database('Current').T ->  T
+union withsource=S T, T2                 ->  T, T2
+union withsource=S T, database('Other').T
+                    ->  database("Current").T, database("Other").T
+```
+
+Reproducing that needs the name of the *current* database, which arrives with
+the connection and not with the query — `to_sql` has no connection at all. Under
+`macro-expand` every branch is a different database by construction, so Kusto
+always qualifies and a bare table name would label every entity identically,
+which is the one thing `withsource` is asked not to do. Plain `union` keeps bare
+labels, which are right whenever every branch is in the current database.
+
+---
+
 ## 5. Tabular operator conventions
 
 | KQL | DuckDB rendering |

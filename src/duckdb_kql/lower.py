@@ -11,18 +11,20 @@ table keeps the supported surface readable and greppable.
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from typing import Any
 
 from . import ir
 from ._antlr.KqlParser import KqlParser
 from .clusters import Resolved
+from .entity_groups import Entity, ResolvedGroups, resolve_group
 from .errors import KqlError, KqlSchemaError, KqlUnsupportedError, SourceSpan
 from .params import ParameterDeclaration, normalize_type
 from .parser import parse
 
-__all__ = ["lower", "qualify", "query_parameters"]
+__all__ = ["lower", "parse_entity_reference", "qualify", "query_parameters"]
 
 #: Query-scope scalar bindings — `let` values and query parameters — keyed by
 #: the KQL name they were declared under, substituted into the IR before
@@ -435,9 +437,21 @@ def _lower_source(node: Any) -> ir.Source:
     if kind in _NAME_KINDS:
         name = _name_text(node)
         if name is not None:
+            if _SCOPE is not None and name == _SCOPE[0]:
+                # Kusto: "SEM0608: Unexpected entity in entity_group. Entity
+                # group allows only entities with qualified names." The scope
+                # stands for a *database*, so it needs a table after it.
+                raise _unsupported(
+                    node,
+                    f"macro-expand scope {name!r} used as a table — "
+                    f"write {name}.TableName",
+                )
             return ir.TableRef(name)
 
     if kind == "FunctionCallOrPathPathExpression":
+        scoped = _lower_scoped_table(node)
+        if scoped is not None:
+            return scoped
         qualified = _lower_qualified_table(node)
         if qualified is not None:
             return qualified
@@ -717,6 +731,296 @@ def _reparse_distinct(node: Any, kids: list[Any]) -> tuple[ir.NamedExpr, ...]:
     return tuple(_lower_named(c) for c in _rule_children(prints[0]))
 
 
+# ---------------------------------------------------------------------------
+# macro-expand and entity groups (docs/TRANSLATION.md R16)
+# ---------------------------------------------------------------------------
+#
+# `macro-expand EG as s (body)` runs `body` once per entity and unions the
+# results — measured, see the rule. So it lowers to an `ir.Union` and inherits
+# every column-unification, `withsource` and `isfuzzy` behaviour R15 already
+# implements, rather than introducing a second way to combine branches.
+
+#: The scope name in force while a macro-expand body is being lowered, and the
+#: entity it stands for. A module-level binding rather than a parameter
+#: threaded through `_lower_source`: the scope is *lexically* scoped to one
+#: operator, but the lowering entry points that would have to carry it number
+#: about a dozen, and a parameter that is None in all but one caller is a worse
+#: description of the situation than a save-and-restore around the one place it
+#: is true. Kusto refuses a nested macro-expand (SEM0611) and so does this, so
+#: the binding never needs to stack.
+_SCOPE: tuple[str, Entity] | None = None
+
+#: `let`-bound entity groups, and the caller's named-group mapping, in force
+#: for the query being lowered.
+_LET_GROUPS: dict[str, tuple[Entity, ...]] = {}
+_NAMED_GROUPS: ResolvedGroups | None = None
+
+
+@contextlib.contextmanager
+def _macro_context(
+    let_groups: dict[str, tuple[Entity, ...]], named: ResolvedGroups | None
+) -> Iterator[None]:
+    global _LET_GROUPS, _NAMED_GROUPS
+    previous = (_LET_GROUPS, _NAMED_GROUPS)
+    _LET_GROUPS, _NAMED_GROUPS = let_groups, named
+    try:
+        yield
+    finally:
+        _LET_GROUPS, _NAMED_GROUPS = previous
+
+
+@contextlib.contextmanager
+def _scope_binding(name: str, entity: Entity) -> Iterator[None]:
+    global _SCOPE
+    if _SCOPE is not None:
+        # Kusto: "SEM0611: macro '<name>' name is invalid. Make sure that the
+        # macro is used in macro-expand query." Nesting is refused there, and a
+        # guess at what it would mean is not worth the ambiguity here.
+        raise KqlUnsupportedError(
+            "macro-expand", hint="a nested macro-expand is refused, as Kusto refuses it"
+        )
+    _SCOPE = (name, entity)
+    try:
+        yield
+    finally:
+        _SCOPE = None
+
+
+def parse_entity_reference(text: str) -> Entity | None:
+    """``database('d')`` / ``cluster('c').database('d')`` -> an `Entity`.
+
+    Returns None when *text* is not a database reference — a bare name, say.
+
+    Parsed by wrapping it in an inline group and running the ordinary path, so
+    an entry in an `entity_groups=` mapping is handled by construction the same
+    way the identical text written inline in a query is. Hand-rolled string
+    splitting would be a second syntax that has to be kept in step with the
+    first, and this runs once when a mapping is set, not per query.
+    """
+    tree = parse(f"macro-expand entity_group [{text}] as _s (_s.__probe__)").tree
+    groups = _find_all(tree, "EntityGroupExpression")
+    if not groups:
+        return None
+    try:
+        entities = _lower_entity_group_expression(groups[0])
+    except KqlUnsupportedError:
+        return None
+    return entities[0] if entities else None
+
+
+def _within_macro_expand(node: Any) -> bool:
+    """Whether *node* sits inside a ``macro-expand`` body."""
+    parent = getattr(node, "parentCtx", None)
+    while parent is not None:
+        if _cls(parent) == "MacroExpandOperator":
+            return True
+        parent = getattr(parent, "parentCtx", None)
+    return False
+
+
+def _lower_let_entity_groups(tree: Any) -> list[tuple[str, tuple[Entity, ...]]]:
+    """Collect ``let EG = entity_group [...]`` declarations, in order."""
+    out: list[tuple[str, tuple[Entity, ...]]] = []
+    for decl in _find_all(tree, "LetEntityGroupDeclaration"):
+        kids = _rule_children(decl)
+        if len(kids) < 2:
+            raise _unsupported(decl, "let entity_group")
+        names = _find_names(kids[0])
+        name = names[0] if names else kids[0].getText()
+        out.append((name, _lower_entity_group_expression(kids[-1])))
+    return out
+
+
+def _lower_entity_group_expression(node: Any) -> tuple[Entity, ...]:
+    """``entity_group [database('a'), cluster('c').database('b')]``."""
+    entities: list[Entity] = []
+    for child in _rule_children(node):
+        entity = _lower_entity(child)
+        if entity is None:
+            raise _unsupported(
+                child,
+                "entity_group member — expected database(...) or "
+                "cluster(...).database(...)",
+            )
+        entities.append(entity)
+    if not entities:
+        raise _unsupported(node, "entity_group")
+    _refuse_duplicate_entities(node, entities)
+    return tuple(entities)
+
+
+def _lower_entity(node: Any) -> Entity | None:
+    """One group member. ``None`` when it is not a database reference.
+
+    A member has no trailing table name, so it is a chain of *calls*
+    (`DotCompositeFunctionCallExpression`) rather than the path expression a
+    `database('d').T` reference produces — a different node class for what
+    reads like the same thing, which is why this does not reuse
+    `_lower_qualified_table`.
+    """
+    calls: list[tuple[str, str | None]] = []
+    for call in _find_all(node, "NamedFunctionCallExpression"):
+        parts = _rule_children(call)
+        if not parts:
+            return None
+        name = parts[0].getText().lower()
+        literals = _find_all(call, "StringLiteralExpression")
+        calls.append((name, _literal_string(literals[0]) if literals else None))
+
+    if len(calls) == 1 and calls[0][0] == "database" and calls[0][1]:
+        return Entity(database=calls[0][1])
+    if (
+        len(calls) == 2
+        and [c[0] for c in calls] == ["cluster", "database"]
+        and calls[0][1]
+        and calls[1][1]
+    ):
+        from .clusters import normalize_cluster  # noqa: PLC0415
+
+        return Entity(database=calls[1][1], cluster=normalize_cluster(calls[0][1]))
+    return None
+
+
+def _refuse_duplicate_entities(node: Any, entities: list[Entity]) -> None:
+    seen: set[tuple[str | None, str]] = set()
+    for entity in entities:
+        key = (entity.cluster, entity.database)
+        if key in seen:
+            raise _unsupported(
+                node,
+                f"entity_group listing {entity.as_kql()} twice",
+            )
+        seen.add(key)
+
+
+def _lower_macro_expand(node: Any, kids: list[Any], rest: list[Any]) -> ir.Query:
+    """``macro-expand <group> as <scope> ( body )`` -> a union over the entities.
+
+    The body is lowered **once per entity**, with the scope name bound so that
+    `scope.T` becomes that entity's table. Lowering it once and rewriting the
+    IR afterwards is not equivalent: outside a macro-expand `scope.T` is
+    ordinary dynamic property access on a column called `scope`, so by the time
+    it is IR the two are indistinguishable.
+    """
+    with_source: str | None = None
+    isfuzzy = False
+    group_node = None
+    scope_name = None
+    body_nodes: list[Any] = []
+
+    for k in kids:
+        cls = _cls(k)
+        if cls in ("RelaxedQueryOperatorParameter", "QueryOperatorParameter"):
+            text = k.getText()
+            key, _, value = text.partition("=")
+            key = key.strip().lower()
+            value = value.strip()
+            if key == "isfuzzy":
+                isfuzzy = value.lower() == "true"
+            elif key in ("withsource", "with_source"):
+                with_source = _string_value(value) if value[:1] in "\"'" else value
+            elif key.startswith("hint."):
+                continue        # distribution only; cannot change the result
+            else:
+                raise _unsupported(k, f"macro-expand parameter:{key}")
+        elif cls == "MacroExpandEntityGroup":
+            group_node = k
+        elif cls == "Statement":
+            # A body containing a `let` has several Statement children; the
+            # pipeline is the last of them and the rest are its bindings.
+            body_nodes.append(k)
+        elif scope_name is None and _find_names(k):
+            scope_name = _find_names(k)[0]
+
+    if group_node is None or scope_name is None or not body_nodes:
+        raise _unsupported(node, "macro-expand")
+
+    entities = _resolve_macro_group(group_node)
+    branches = [
+        _lower_macro_body(body_nodes, scope_name, entity) for entity in entities
+    ]
+
+    if with_source is not None:
+        # Refused, not approximated. Measured, Kusto qualifies every label as
+        # soon as one branch is in a database other than the current one — and
+        # under macro-expand every branch is a *different* database by
+        # construction, so it always qualifies. Reproducing that needs the
+        # current database's name, which belongs to the connection and not the
+        # query. Emitting the bare table name instead would give every entity
+        # the SAME label, which is precisely the question `withsource` is asked
+        # to answer. See docs/macro-expand-proposal.md §8 for the queries that
+        # would settle the remaining unknowns.
+        raise _unsupported(
+            node,
+            "macro-expand withsource=",
+        )
+
+    first, *others = branches
+    query = ir.Query(first.source, list(first.operators), list(first.lets))
+    query.operators.append(
+        ir.Union(tuple(others), "outer", with_source, isfuzzy)
+    )
+    query.operators.extend(_lower_operators(rest))
+    return query
+
+
+def _resolve_macro_group(node: Any) -> tuple[Entity, ...]:
+    """The entity list, from an inline group, a `let`-bound one, or a name."""
+    inline = _find_all(node, "EntityGroupExpression")
+    if inline:
+        return _lower_entity_group_expression(inline[0])
+    names = _find_names(node)
+    if not names:
+        raise _unsupported(node, "macro-expand entity group")
+    name = names[0]
+    if name in _LET_GROUPS:
+        return _LET_GROUPS[name]
+    return resolve_group(name, _NAMED_GROUPS)
+
+
+def _lower_macro_body(nodes: list[Any], scope: str, entity: Entity) -> ir.Query:
+    """One branch: the body with *scope* bound to *entity*."""
+    with _scope_binding(scope, entity):
+        statements = [s for n in nodes for s in _find_all(n, "QueryStatement")]
+        if not statements:
+            raise _unsupported(nodes[0], "macro-expand body")
+        if len(statements) > 1:
+            raise _unsupported(nodes[0], "macro-expand body — one query only")
+        # A `let` inside the body is lowered here, in the scope's context —
+        # measured, `macro-expand EG as s (let t = s.MT; t | count)` works.
+        scalars: Scalars = {}
+        tabulars: list[tuple[str, ir.Query]] = []
+        for n in nodes:
+            more_scalars, more_tabulars = _lower_lets(n, scalars, nested=True)
+            scalars.update(more_scalars)
+            tabulars.extend(more_tabulars)
+        body = _lower_query_node(statements[0])
+        body = _substitute_query(body, scalars)
+        names = {name for name, _ in tabulars}
+        body = _resolve_in_subqueries(body, names)
+        body.lets.extend(
+            (name, _resolve_in_subqueries(bound, names)) for name, bound in tabulars
+        )
+        return body
+
+
+def _lower_scoped_table(node: Any) -> ir.TableRef | None:
+    """``scope.T`` inside a macro-expand body -> that entity's ``T``."""
+    if _SCOPE is None:
+        return None
+    scope, entity = _SCOPE
+    root, *operations = _rule_children(node)
+    root_names = _find_names(root)
+    if not root_names or root_names[0] != scope:
+        return None
+    names = [n for op in operations for n in _find_names(op)]
+    if len(names) != 1:
+        # `scope.a.b` is not a table, and a bare `scope` is refused by Kusto
+        # too (SEM0608).
+        raise _unsupported(node, f"macro-expand scope reference {node.getText()!r}")
+    return ir.TableRef(names[0], database=entity.database, cluster=entity.cluster)
+
+
 #: Join kinds we implement, KQL spelling -> canonical (docs/TRANSLATION.md R5).
 _JOIN_KINDS = {
     "innerunique": "innerunique",
@@ -987,8 +1291,12 @@ def query_parameters(kql: str) -> list[ParameterDeclaration]:
     return _lower_query_parameters(parse(kql).tree)
 
 
-def lower(kql: str) -> ir.Query:
+def lower(kql: str, entity_groups: ResolvedGroups | None = None) -> ir.Query:
     """Parse *kql* and lower it to IR.
+
+    *entity_groups* resolves a `macro-expand` written against a **named** group.
+    It is needed here rather than in `qualify` because expanding a group changes
+    how many union branches there are, which is structure and not annotation.
 
     Raises:
         KqlSyntaxError: the query does not parse.
@@ -1025,14 +1333,16 @@ def lower(kql: str) -> ir.Query:
         d.name: ir.Parameter(d.name, d.type, d.slot) for d in declarations
     }
     scalars, tabulars = _lower_lets(tree, seed)
+    groups = dict(_lower_let_entity_groups(tree))
 
     pipe = _collapse(statements[0])
-    if _cls(pipe) != "PipeExpression":
-        # A source with no pipeline at all, e.g. `print 1` or `datatable(...)[]`.
-        query = _lower_head(pipe, [])
-    else:
-        parts = _rule_children(pipe)
-        query = _lower_head(parts[0], parts[1:])
+    with _macro_context(groups, entity_groups):
+        if _cls(pipe) != "PipeExpression":
+            # A source with no pipeline at all, e.g. `print 1` or `datatable()`.
+            query = _lower_head(pipe, [])
+        else:
+            parts = _rule_children(pipe)
+            query = _lower_head(parts[0], parts[1:])
 
     names = {name for name, _ in tabulars}
     query = _substitute_query(query, scalars)
@@ -1058,6 +1368,8 @@ def _lower_head(head: Any, rest: list[Any]) -> ir.Query:
     being modelled a second time, and every later stage sees one shape.
     """
     head = _collapse(head)
+    if _cls(head) == "MacroExpandOperator":
+        return _lower_macro_expand(head, _rule_children(head), rest)
     if _cls(head) == "UnionOperator":
         union = _lower_union(head, _rule_children(head))
         first, *others = union.branches
@@ -1255,6 +1567,11 @@ def _is_tabular_value(node: Any, scalars: Scalars) -> bool:
     kind = _cls(node)
     if kind in _TABULAR_VALUE:
         return True
+    if kind == "FunctionCallOrPathPathExpression" and _lower_scoped_table(node):
+        # `let t = scope.T` inside a macro-expand body binds a TABLE. Without
+        # this it read as a scalar, because `scope.T` is dynamic property access
+        # to everything that has not been told what `scope` is.
+        return True
     if kind in _NAME_KINDS:
         name = _name_text(node)
         return name is not None and name not in scalars
@@ -1405,7 +1722,7 @@ def _substitute_operator(op: ir.Operator, scalars: Scalars) -> ir.Operator:
 
 
 def _lower_lets(
-    tree: Any, seed: Scalars | None = None
+    tree: Any, seed: Scalars | None = None, nested: bool = False
 ) -> tuple[Scalars, list[tuple[str, ir.Query]]]:
     """Collect ``let`` bindings in declaration order.
 
@@ -1417,12 +1734,22 @@ def _lower_lets(
     tabulars: list[tuple[str, ir.Query]] = []
 
     for statement in _find_all(tree, "LetStatement"):
+        # A `let` written *inside* a macro-expand body belongs to that body and
+        # is lowered per entity, with the scope bound. Collecting it here would
+        # lower `let t = scope.T` with no scope in force, where `scope.T` is
+        # just dynamic property access on a column.
+        if not nested and _within_macro_expand(statement):
+            continue
         decls = _rule_children(statement)
         if not decls:
             continue
         decl = decls[0]
         kind = _cls(decl)
 
+        if kind == "LetEntityGroupDeclaration":
+            # Collected separately, by `_lower_let_entity_groups`: an entity
+            # group is neither a scalar nor a table.
+            continue
         if kind == "LetFunctionDeclaration":
             raise _unsupported(decl, "let function")
 

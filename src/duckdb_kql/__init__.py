@@ -44,6 +44,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from .clusters import ClusterMap, get_clusters, set_clusters
+from .entity_groups import EntityGroupMap, get_entity_groups, set_entity_groups
 from .errors import (
     Diagnostic,
     KqlError,
@@ -94,6 +95,9 @@ __all__ = [
     # cluster mapping (Layer 0 — no database needed)
     "set_clusters",
     "get_clusters",
+    "set_entity_groups",
+    "get_entity_groups",
+    "EntityGroupMap",
     # errors (Layer 0)
     "KqlError",
     "KqlSyntaxError",
@@ -153,6 +157,7 @@ def to_sql(
     database: str | None = None,
     allow_write: bool = True,
     clusters: ClusterMap | None = None,
+    entity_groups: EntityGroupMap | None = None,
 ) -> TranslationResult:
     """Translate *kql* to DuckDB SQL. Requires no connection and no database.
 
@@ -166,6 +171,9 @@ def to_sql(
         parameters: values for the query's declared parameters, by KQL name.
             They are bound as values, never spliced into the SQL, so a value may
             contain any text at all without changing what the query does.
+        entity_groups: what entities a **named** entity group contains, for
+            `macro-expand MyGroup as s (...)`. Inline and `let`-bound groups
+            need no mapping — their entities are in the query text.
         clusters: what local database stands in for each Kusto cluster, as
             ``{("cluster", "kusto_db"): "duckdb_db"}`` or the nested
             ``{"cluster": {"kusto_db": "duckdb_db"}}``. Omitted, `cluster(...)`
@@ -202,6 +210,7 @@ def to_sql(
     from .clusters import effective_clusters
     from .control import COLUMNS, is_control_command, split_command
     from .control import translate_control_command as _command_sql
+    from .entity_groups import effective_entity_groups
     from .ingest import is_ingestion_command, parse_ingestion, render_ingestion
     from .lower import lower, qualify
     from .params import bind
@@ -232,20 +241,25 @@ def to_sql(
         # after the first `|` is plain KQL and goes through the normal path with
         # the command standing in as its source.
         command, pipeline = split_command(kql)
-        head = _command_sql(command)  # raises, naming the ones that work
+        # raises, naming the ones that work
+        head = _command_sql(command, effective_entity_groups(entity_groups))
         if not pipeline:
             return _Result(head)
 
         # Lowered against a placeholder table, whose source is then replaced.
         # `lower` wants a whole query and the pipeline alone is not one.
-        tail = lower(f"__command__ {pipeline}")
+        tail = lower(f"__command__ {pipeline}", effective_entity_groups(entity_groups))
         source = ir.CommandSource(head, COLUMNS[command], command)
         return _emit(
             qualify(ir.Query(source, tail.operators), database, effective_clusters(clusters)),
             schema,
         )
 
-    query = qualify(lower(kql), database, effective_clusters(clusters))
+    query = qualify(
+        lower(kql, effective_entity_groups(entity_groups)),
+        database,
+        effective_clusters(clusters),
+    )
     result = _emit(query, schema)
     if query.parameters or parameters:
         bound, unbound = bind(query.parameters, parameters)

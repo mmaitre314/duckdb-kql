@@ -33,7 +33,7 @@ returns an approximate answer.
 
 ## Tabular operators
 
-18 of 41 supported.
+19 of 42 supported.
 
 ### Supported
 
@@ -54,6 +54,7 @@ returns an approximate answer.
 | `take` | Which rows come back is **not defined** without a preceding `sort` (R10). |
 | `limit` | Synonym for `take`. |
 | `render` | Parsed and **ignored**: there is no chart to draw. The rows are unchanged, so a query ending in `render` still returns its data. |
+| `macro-expand` | Runs the body **once per entity** and unions the results (R16), so `count` inside the parentheses returns one row per entity and outside returns one. Column unification, `isfuzzy` and row order are R15's. Entities come from an inline or `let`-bound group, or — for a *named* group, which is cluster-side state — from `entity_groups={"G": ["database('d')"]}`; an unmapped name is refused rather than expanded to nothing. A `cluster(...)` entity resolves through `clusters=`. Refused as Kusto refuses them: duplicate entities, nesting, a bare scope reference. **`withsource=` is refused**: Kusto qualifies every label here and reproducing that needs the current database's name, which belongs to the connection rather than the query. |
 | `union` | Branches are matched by column **name**, not position, and are never de-duplicated (R15). The default `kind=outer` keeps the union of the branches' columns with nulls for the gaps; `kind=inner` keeps the intersection. Column order is first appearance, left to right. `withsource=` names a branch by its table name, but a subquery, a `let`-bound name and a piped left side are all `union_argN`, counting the left side as 0. `isfuzzy=true` drops a branch whose table is missing; a wildcard matching no table is an error, not an empty result. **Residue:** two branches giving one name two different types are split into two columns by Kusto and merged by DuckDB — undetectable without column types. A wildcard also expands in *name* order here and in *creation* order in Kusto, so the columns of `union UT*` can be ordered differently; the rows are the same. |
 | `lookup` | Defaults to **`leftouter`**, not `join`'s `innerunique`, and only `leftouter` and `inner` exist — every other kind is refused, as Kusto refuses it. The right side's **key columns are dropped**, so there is no `Key1`; non-key collisions still get the `1` suffix (R14). Needs the input schema, like `join`. As with any outer join, an unmatched `string` column is null here but `''` in Kusto, so a downstream `!= ""` differs — `isempty()` is the portable test. |
 | `getschema` | Reports `ColumnName`, `ColumnOrdinal` (0-based), `DataType` and `ColumnType`, verified against the emulator including the non-obvious .NET names (`bool` is `System.SByte`, `decimal` is `System.Data.SqlTypes.SqlDecimal`). Types are DuckDB's, named as Kusto names them, so a DuckDB type with no Kusto counterpart reports as `dynamic` (composites) or `string` (everything else) rather than inventing a name. |

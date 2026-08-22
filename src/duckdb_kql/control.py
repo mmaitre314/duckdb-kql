@@ -39,7 +39,9 @@ import re
 from collections.abc import Callable
 from typing import NamedTuple
 
+from .entity_groups import ResolvedGroups
 from .errors import KqlUnsupportedError
+from .translate import quote_string
 
 __all__ = [
     "is_control_command",
@@ -112,6 +114,13 @@ SCHEMA: dict[str, tuple[CommandColumn, ...]] = {
         CommandColumn("DatabaseName", "String", "string"),
         CommandColumn("Folder", "String", "string"),
         CommandColumn("DocString", "String", "string"),
+    ),
+    # Measured: `Entities` is a **string** holding a JSON array of the entity
+    # references, not a dynamic. Reporting it as dynamic would look tidier and
+    # disagree with every client that reads it back.
+    ".show entity_groups": (
+        CommandColumn("Name", "String", "string"),
+        CommandColumn("Entities", "String", "string"),
     ),
     # The web UI reads this one to build its schema tree: `CslOutputSchema`
     # carries each table's columns as `name:kqltype`, which is why the type
@@ -233,8 +242,13 @@ def split_command(text: str) -> tuple[str, str]:
     return lowered, ""
 
 
-def translate_control_command(text: str) -> str:
+def translate_control_command(
+    text: str, entity_groups: ResolvedGroups | None = None
+) -> str:
     """Translate a supported control command to DuckDB SQL.
+
+    *entity_groups* is only read by `.show entity_groups`, which reports the
+    caller's mapping — there is no cluster holding the real thing.
 
     Raises:
         KqlUnsupportedError: for every other `.`-command, naming the ones that
@@ -246,10 +260,41 @@ def translate_control_command(text: str) -> str:
             f"control command {text.strip()!r}",
             hint="a piped command is translated by duckdb_kql.to_sql, not here",
         )
+    if command == ".show entity_groups":
+        return _entity_groups_sql(entity_groups)
     build = _COMMANDS.get(command)
     if build is None:
         raise KqlUnsupportedError(f"control command {text.strip()!r}", hint=UNSUPPORTED_HINT)
     return build()
+
+
+def _entity_groups_sql(groups: ResolvedGroups | None) -> str:
+    """`.show entity_groups`, over the caller-supplied mapping.
+
+    A named entity group is cluster-side state and there is no cluster, so what
+    this reports is the `entity_groups=` mapping — which is exactly the thing a
+    `macro-expand MyGroup` will resolve against. With no mapping the answer is
+    no rows, which is what a cluster with no groups also returns.
+
+    Measured shape: `Name`, then `Entities` as a **string** holding a JSON array
+    of the entity references, separators and all —
+    ``["database('a')","database('b')"]``, with no space after the comma.
+    """
+    import json  # noqa: PLC0415
+
+    if not groups:
+        return (
+            "SELECT CAST(NULL AS VARCHAR) AS \"Name\", "
+            "CAST(NULL AS VARCHAR) AS \"Entities\" WHERE FALSE"
+        )
+    rows = []
+    for name, entities in sorted(groups.items()):
+        listed = json.dumps([e.as_kql() for e in entities], separators=(",", ":"))
+        rows.append(
+            f"SELECT {quote_string(name)} AS \"Name\", "
+            f"{quote_string(listed)} AS \"Entities\""
+        )
+    return " UNION ALL ".join(rows)
 
 
 def _version_sql() -> str:
