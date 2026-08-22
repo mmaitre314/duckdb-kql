@@ -285,8 +285,11 @@ def mv_expand_output_columns(op: ir.MvExpand, cols: list[str]) -> list[str]:
     table that already has `b` answers **b1**, where two columns both called
     `b` would have left DuckDB naming the second `b_1`.
     """
-    name = op.name or op.column
-    out = list(cols) if name in cols else [*cols, name]
+    out = list(cols)
+    for target in op.targets:
+        name = target.name or target.column
+        if name not in out:
+            out.append(name)
     if op.item_index:
         out.append(disambiguate(op.item_index, out))
     return out

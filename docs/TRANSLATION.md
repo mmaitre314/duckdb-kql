@@ -628,6 +628,74 @@ drain R14's null-string residue and `reverse()`'s datetime divergence.
 
 ---
 
+### R18 — `mv-expand` zips, replaces in place, and **converts**
+*Trap: `trap-r18-mv-expand`*
+
+Three separate rules, none of them what the operator looks like it does.
+
+**The column shape is `extend`'s.** Measured on `datatable(id, a, b)`:
+
+```
+mv-expand a       ->  id, a, b     the expansion replaces `a` where it stands
+mv-expand x = a   ->  id, a, b, x  a NEW column; `a` keeps the whole array
+mv-expand b = a   ->  id, a, b     `b` is overwritten; `a` kept
+```
+
+So the alias names an *output* column that replaces a same-named input and is
+appended otherwise — the source disappears only when it happens to be the
+target. `* EXCLUDE (a), UNNEST(…) AS a` got both halves wrong: it moved the
+expanded column to the end (column order is user-visible, R1) and dropped `a`
+under an alias. Writing the list out needs the incoming columns; without them
+the `EXCLUDE` form is kept and the position is the residual divergence, exactly
+as for `extend`. `with_itemindex=` always lands last and collides like a join
+key — measured, `with_itemindex=b` over a table that already has `b` answers
+**b1**, not DuckDB's own `b_1`.
+
+**Several columns zip, they do not cross-product.** The row count is the
+longest list's and the shorter ones pad with null. DuckDB's rule for several
+`UNNEST`s in one select list is exactly that, both edges included, so the zip
+needs no arithmetic:
+
+| a | b | rows |
+|---|---|---|
+| `[10,20,30]` | `['p']` | `(10,'p') (20,null) (30,null)` |
+| `[]` | `['p']` | `(null,'p')` — an **empty** array padded against a non-empty one contributes a null row, unlike the single-column case where it yields none |
+| `[]` | `[]` | none |
+| `null` | `['p','q']` | `(null,'p') (null,'q')` — a null is *one* element, not zero |
+| `{'k':1}` | `['p','q']` | `({"k":1},'p') (null,'q')` — an object counts one per key |
+
+The index list must therefore be as long as the **longest** expansion, with no
+floor of one: clamping it to at least one gave an empty array a single row
+carrying null where Kusto answers none.
+
+**`to typeof(T)` converts; it does not declare.** Measured element by element
+over `[1, 2.5, -2.5, '2', true, null]`:
+
+| T | result |
+|---|---|
+| `long` / `int` | `1, 2, -2, null, null, null` — a number, truncated **toward zero** (a cast would make -2.5 into -3) |
+| `real` / `double` | `1.0, 2.5, -2.5, null, null, null` |
+| `bool` | `true, null, null, null, true, null` — a JSON boolean or a *whole* number; `2` is true and `2.5` is null |
+| `string` | `'1', '2.5', '-2.5', '2', 'true', ''` — exactly R17's conversion |
+| `datetime` / `guid` | the mirror image: only a JSON **string** converts |
+| `timespan` / `decimal` | **refused** — every input tried, `'1.00:00:00'` included, is null there, so there is no rule to reproduce, and answering null for everything would look like a working conversion |
+
+A JSON *string* is not a number here: `'2' to typeof(long)` is null, which is
+what makes this a conversion rather than a declaration and why a cast of the
+JSON text would be wrong.
+
+**`limit N`** caps the rows produced *per input row*, so it truncates each list
+before the zip rather than the result afterwards; `limit 0` answers no rows.
+**`kind=array`** / **`bagexpansion=array`** turns a bag into two-element
+`[key, value]` arrays instead of single-key bags, and leaves a plain array
+alone. `bag` is the default.
+
+**Not implemented:** `mv-expand` of a non-dynamic column, which Kusto refuses
+(SEM0447) and needs the column's type; and `mv-apply`, which runs a
+sub-pipeline per element and is a different operator.
+
+---
+
 ## 5. Tabular operator conventions
 
 | KQL | DuckDB rendering |
@@ -646,7 +714,7 @@ drain R14's null-string residue and `reverse()`'s datetime divergence.
 | `summarize …  by …` | `GROUP BY` (R12 naming, R4 null handling) |
 | `join` | R5 — kind-dependent |
 | `union [kind=]` | `UNION ALL BY NAME` with an explicit output column list (R15) |
-| `mv-expand [x =] c` | `UNNEST` of the JSON, written into an explicit column list — the output column **replaces a same-named input in place** and is appended otherwise, exactly as `extend` does, so `mv-expand x = a` keeps `a` holding the whole array. `with_itemindex=` lands last and collides like a join key (`b` → `b1`). |
+| `mv-expand [kind=] [x =] c [to typeof(T)][, …] [limit N]` | One `UNNEST` per target, written into an explicit column list — see R18 |
 | `datatable(...)` / `print` / `range` | `VALUES` / `SELECT` / `range()` — self-contained, ideal for corpus tests |
 
 **`union` column unification:** KQL unions produce the **superset** of columns,

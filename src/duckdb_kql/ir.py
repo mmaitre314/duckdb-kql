@@ -32,7 +32,8 @@ __all__ = [
     # sources
     "TableRef", "WildcardTableRef", "DataTable", "PrintSource", "RangeSource",
     # operators
-    "Summarize", "Join", "JoinKey", "Lookup", "Union", "MvExpand", "ProjectAway",
+    "Summarize", "Join", "JoinKey", "Lookup", "Union", "MvExpand", "MvExpandTarget",
+    "ProjectAway",
     "ProjectRename",
     "Where", "Project", "Extend", "Take", "Sort", "SortKey", "Top", "Count",
     "Distinct",
@@ -424,13 +425,36 @@ class PathAccess(Expr):
 
 
 @dataclass(frozen=True)
-class MvExpand(Operator):
-    """``mv-expand col`` — one output row per array element."""
+class MvExpandTarget(Node):
+    """One column of an ``mv-expand``, with its optional alias and cast.
+
+    ``to typeof(T)`` is a **conversion**, not a declaration: measured, a JSON
+    string does not become a long (`'2' to typeof(long)` is null) and a
+    fractional number does not become a bool. So the type travels here and the
+    emitter decides what converts.
+    """
 
     column: str
     name: str | None = None
+    to_type: str | None = None
+
+
+@dataclass(frozen=True)
+class MvExpand(Operator):
+    """``mv-expand col`` — one output row per array element.
+
+    Several targets expand in **lockstep**, not as a cross product: the row
+    count is the longest one and the shorter ones pad with null.
+    """
+
+    targets: tuple[MvExpandTarget, ...]
     #: `with_itemindex=Name` adds a 0-based position column.
     item_index: str | None = None
+    #: `limit N` — at most N rows per input row.
+    limit: int | None = None
+    #: `kind=array` / `bagexpansion=array`: expand a bag to `[key, value]`
+    #: pairs instead of single-key bags. `bag` is the default.
+    array_expansion: bool = False
 
 
 @dataclass(frozen=True)

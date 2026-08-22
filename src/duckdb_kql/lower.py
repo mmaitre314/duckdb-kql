@@ -1970,29 +1970,66 @@ def _lower_path(node: Any) -> ir.Expr:
     return ir.PathAccess(base, tuple(steps))
 
 
-def _lower_mv_expand(node: Any, kids: list[Any]) -> ir.Operator:
-    """``mv-expand col`` — one output row per array element."""
-    item_index = None
-    named = []
-    for k in kids:
-        text = k.getText()
-        if text.lower().startswith("with_itemindex"):
-            item_index = text.split("=", 1)[1].strip()
-            continue
-        if "Parameter" in _cls(k):
-            raise _unsupported(k, f"mv-expand parameter:{text}")
-        named.append(k)
+#: `kind=`/`bagexpansion=` values, mapped to "expand a bag to [key, value]".
+_BAG_EXPANSION = {"bag": False, "array": True}
 
-    if not named:
+
+def _lower_mv_expand(node: Any, kids: list[Any]) -> ir.Operator:
+    """``mv-expand [kind=] col [to typeof(T)][, …] [limit N]``.
+
+    The grammar puts each column in its own ``MvexpandOperatorExpression``,
+    with the ``to typeof`` clause as a sibling of the named expression inside
+    it, and hangs ``limit`` off the operator rather than off a column.
+    """
+    item_index: str | None = None
+    limit: int | None = None
+    array_expansion = False
+    targets: list[ir.MvExpandTarget] = []
+
+    for k in kids:
+        cls, text = _cls(k), k.getText()
+        if cls == "MvapplyOperatorLimitClause":
+            limit = int(text[len("limit"):])
+            continue
+        if "Parameter" in cls:
+            key, _, value = text.partition("=")
+            key, value = key.strip().lower(), value.strip().lower()
+            if key == "with_itemindex":
+                item_index = text.split("=", 1)[1].strip()
+            elif key in ("kind", "bagexpansion") and value in _BAG_EXPANSION:
+                array_expansion = _BAG_EXPANSION[value]
+            else:
+                raise _unsupported(k, f"mv-expand parameter:{text}")
+            continue
+        targets.append(_lower_mv_expand_target(k))
+
+    if not targets:
         raise _unsupported(node, "mv-expand")
-    if len(named) > 1:
-        # Expanding several columns in lockstep is a different operation from
-        # expanding one, and getting it wrong silently changes the row count.
-        raise _unsupported(node, "mv-expand", )
-    target = _lower_named(named[-1])
+    return ir.MvExpand(tuple(targets), item_index, limit, array_expansion)
+
+
+def _lower_mv_expand_target(node: Any) -> ir.MvExpandTarget:
+    """One ``col [to typeof(T)]`` of the list.
+
+    The `to` clause is a **sibling** of the named expression, not part of it,
+    so the named expression has to be picked out rather than lowering the whole
+    node — which otherwise falls through as an unsupported expression.
+    """
+    to_type = None
+    named = node
+    for k in _rule_children(node):
+        if _cls(k) == "MvapplyOperatorExpressionToClause":
+            # `to typeof(long)`, with the parentheses and keywords stripped.
+            to_type = k.getText().lower().partition("typeof(")[2].rstrip(")").strip()
+        elif _cls(k) == "NamedExpression":
+            named = k
+
+    target = _lower_named(named)
     if not isinstance(target.expr, ir.ColumnRef):
-        raise _unsupported(node, "mv-expand", )
-    return ir.MvExpand(target.expr.name, target.name, item_index)
+        # Expanding a computed expression needs it named first; the operator
+        # rewrites a column in place, and there is no column to rewrite.
+        raise _unsupported(node, "mv-expand")
+    return ir.MvExpandTarget(target.expr.name, target.name, to_type)
 
 
 # ---------------------------------------------------------------------------

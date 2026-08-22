@@ -1895,15 +1895,21 @@ def _json_path_key(name: str) -> str:
 
 
 def render_mv_expand(op: ir.MvExpand, prev: str, cols: list[str] | None = None) -> str:
-    """``mv-expand col`` — one output row per element.
+    """``mv-expand [kind=] col [to typeof(T)][, …] [limit N]``.
 
-    Three shapes, all measured on the emulator:
+    Three shapes for one column, all measured on the emulator:
 
     * an **array** expands to one row per element;
     * an **object** expands to one row per key, each a single-key bag —
       ``{"a":1,"b":2}`` becomes two rows, not one;
     * a **null** yields one row carrying null, while an **empty array** yields
       *no* rows at all.
+
+    Several columns expand in **lockstep**, not as a cross product: the row
+    count is the longest list's and the shorter ones pad with null. DuckDB's
+    own rule for several ``UNNEST``s in one select list is exactly that,
+    including both edges — an empty list beside a one-element list gives one
+    row with null, and all-empty gives none — so the zip needs no arithmetic.
 
     The **column shape** follows `extend`'s rule, which is not what the operator
     looks like it does. Measured on ``datatable(id, a, b)``:
@@ -1922,25 +1928,20 @@ def render_mv_expand(op: ir.MvExpand, prev: str, cols: list[str] | None = None) 
     """
     from ..schema import disambiguate, mv_expand_output_columns
 
-    col = quote_ident(op.column)
-    name = op.name or op.column
-    out = quote_ident(name)
-    expanded = (
-        f"CAST(CASE json_type({col}) "
-        f"WHEN 'ARRAY' THEN json_extract({col}, '$[*]') "
-        f"WHEN 'OBJECT' THEN list_transform(json_keys({col}), "
-        f"k -> json_object(k, json_extract({col}, '$.\"' || k || '\"'))) "
-        f"ELSE json_array({col}) END AS JSON[])"
-    )
-    unnested = f"UNNEST({expanded}) AS {out}"
+    rendered = {t: _mv_expand_unnest(op, t) for t in op.targets}
+    names = {t: t.name or t.column for t in op.targets}
 
     if cols is None:
-        select = [f"* EXCLUDE ({col})", unnested] if name == op.column else ["*", unnested]
+        replaced = [
+            quote_ident(t.column) for t in op.targets if names[t] == t.column
+        ]
+        star = f"* EXCLUDE ({', '.join(replaced)})" if replaced else "*"
+        select = [star, *rendered.values()]
         index_name = op.item_index
     else:
-        select = [unnested if c == name else quote_ident(c) for c in cols]
-        if name not in cols:
-            select.append(unnested)
+        by_name = {names[t]: sql for t, sql in rendered.items()}
+        select = [by_name.get(c, quote_ident(c)) for c in cols]
+        select += [sql for name, sql in by_name.items() if name not in cols]
         index_name = (
             disambiguate(op.item_index, mv_expand_output_columns(op, cols)[:-1])
             if op.item_index
@@ -1948,19 +1949,151 @@ def render_mv_expand(op: ir.MvExpand, prev: str, cols: list[str] | None = None) 
         )
 
     if index_name:
-        # The index list must be exactly as long as the expanded list, or the
-        # two UNNESTs fall out of step and the shorter one pads with nulls.
-        length = (
-            f"CASE json_type({col}) "
-            f"WHEN 'ARRAY' THEN CAST(json_array_length({col}) AS BIGINT) "
-            f"WHEN 'OBJECT' THEN CAST(json_array_length(json_keys({col})) AS BIGINT) "
-            f"ELSE CAST(1 AS BIGINT) END"
-        )
+        # The index list has to be as long as the LONGEST expanded list, since
+        # that is how many rows the zip produces. Clamping it to at least one —
+        # which an earlier version did — gave an empty array one row carrying
+        # null instead of the no rows Kusto answers.
+        longest = f"greatest({', '.join(_mv_expand_length(t) for t in op.targets)})"
+        length = longest if len(op.targets) > 1 else _mv_expand_length(op.targets[0])
+        if op.limit is not None:
+            length = f"least({length}, CAST({max(op.limit, 0)} AS BIGINT))"
         select.append(
-            f"UNNEST(generate_series(CAST(0 AS BIGINT), "
-            f"greatest({length}, CAST(1 AS BIGINT)) - 1)) AS {quote_ident(index_name)}"
+            f"UNNEST(generate_series(CAST(0 AS BIGINT), {length} - 1)) "
+            f"AS {quote_ident(index_name)}"
         )
     return f"SELECT {', '.join(select)} FROM {prev}"
+
+
+def _mv_expand_elements(op: ir.MvExpand, target: ir.MvExpandTarget) -> str:
+    """The JSON list one target expands into, before ``UNNEST``.
+
+    A null or a scalar becomes a one-element list, which is what gives the
+    measured "a null yields one row carrying null" while an empty array yields
+    none — `json_array(NULL)` is `[null]`, not `[]`.
+    """
+    col = quote_ident(target.column)
+    if op.array_expansion:
+        # `kind=array` / `bagexpansion=array`: a bag becomes two-element
+        # `[key, value]` arrays rather than single-key bags. Measured to leave
+        # a plain array alone.
+        bag = (
+            f"list_transform(json_keys({col}), "
+            f"k -> json_array(k, json_extract({col}, '$.\"' || k || '\"')))"
+        )
+    else:
+        bag = (
+            f"list_transform(json_keys({col}), "
+            f"k -> json_object(k, json_extract({col}, '$.\"' || k || '\"')))"
+        )
+    elements = (
+        f"CAST(CASE json_type({col}) "
+        f"WHEN 'ARRAY' THEN json_extract({col}, '$[*]') "
+        f"WHEN 'OBJECT' THEN {bag} "
+        f"ELSE json_array({col}) END AS JSON[])"
+    )
+    if op.limit is not None:
+        # `limit N` caps the rows *per input row*, so it truncates each list
+        # before the zip rather than the result afterwards. `limit 0` answers
+        # no rows, and `list_slice(l, 1, 0)` is `[]`.
+        elements = f"list_slice({elements}, 1, {max(op.limit, 0)})"
+    return elements
+
+
+def _mv_expand_unnest(op: ir.MvExpand, target: ir.MvExpandTarget) -> str:
+    out = quote_ident(target.name or target.column)
+    value = f"UNNEST({_mv_expand_elements(op, target)})"
+    if target.to_type is not None:
+        value = _mv_expand_convert(value, target.to_type)
+    return f"{value} AS {out}"
+
+
+def _mv_expand_length(target: ir.MvExpandTarget) -> str:
+    col = quote_ident(target.column)
+    return (
+        f"CASE json_type({col}) "
+        f"WHEN 'ARRAY' THEN CAST(json_array_length({col}) AS BIGINT) "
+        f"WHEN 'OBJECT' THEN CAST(json_array_length(json_keys({col})) AS BIGINT) "
+        f"ELSE CAST(1 AS BIGINT) END"
+    )
+
+
+#: `to typeof(T)` -> the JSON types T accepts, and the DuckDB type to cast to.
+#: Measured element by element, and it is a **conversion** rather than a
+#: declaration: `'2' to typeof(long)` is null, because a JSON string is not a
+#: number there, and `2.5 to typeof(bool)` is null while `2` is true.
+_MV_EXPAND_CONVERSIONS: dict[str, tuple[tuple[str, ...], str]] = {
+    "long": (("UBIGINT", "BIGINT", "DOUBLE"), "BIGINT"),
+    "int": (("UBIGINT", "BIGINT", "DOUBLE"), "INTEGER"),
+    "real": (("UBIGINT", "BIGINT", "DOUBLE"), "DOUBLE"),
+    "double": (("UBIGINT", "BIGINT", "DOUBLE"), "DOUBLE"),
+    "bool": (("BOOLEAN", "UBIGINT", "BIGINT"), "BOOLEAN"),
+    "boolean": (("BOOLEAN", "UBIGINT", "BIGINT"), "BOOLEAN"),
+    "datetime": (("VARCHAR",), "TIMESTAMP"),
+    "guid": (("VARCHAR",), "UUID"),
+}
+
+
+def _mv_expand_convert(value: str, to_type: str) -> str:
+    """``to typeof(T)`` over one expanded element.
+
+    Not a cast of the JSON text — that would convert far too much. Measured:
+
+        [1, 2.5, -2.5, '2020-01-01T00:00:00Z', true, null] to typeof(long)
+            -> 1, 2, -2, null, null, null
+
+    So a number converts (truncating **toward zero**, not flooring: -2.5 is
+    -2), and a JSON string does not. `to typeof(bool)` takes a JSON boolean or
+    a whole number — `2` is true, `2.5` is null. `to typeof(datetime)` and
+    `to typeof(guid)` are the mirror image, taking only a string.
+
+    `timespan` and `decimal` are refused: every input tried, `'1.00:00:00'`
+    included, came back null there, so there is no rule to reproduce — and
+    answering null for everything would look like a working conversion.
+    """
+    if to_type == "string":
+        # Exactly R17's conversion, and this is where it was measured from:
+        # `null to typeof(string)` is `''`, not null.
+        return _unwrap_json_scalar(value)
+    if to_type == "dynamic":
+        return value
+    conversion = _MV_EXPAND_CONVERSIONS.get(to_type)
+    if conversion is None:
+        raise KqlUnsupportedError(
+            f"mv-expand to typeof({to_type})",
+            hint="every input tried converts to null there, so there is no "
+            "measured rule to reproduce",
+        )
+    accepted, duck_type = conversion
+    kinds = ", ".join(f"'{k}'" for k in accepted)
+    if duck_type == "BOOLEAN":
+        # A JSON boolean is itself; a whole number is "not zero". Rendered as
+        # `<> 0` rather than a cast because DuckDB's VARCHAR -> BOOLEAN accepts
+        # only '1'/'0'/'true'/'false' and answers null for 2, where Kusto says
+        # true. The `= trunc` test is what keeps 2.5 null.
+        return (
+            f"CASE WHEN json_type({value}) = 'BOOLEAN' THEN CAST({value} AS BOOLEAN) "
+            f"WHEN json_type({value}) IN ({kinds}) THEN "
+            f"TRY_CAST({value} AS DOUBLE) <> 0 END"
+        )
+    if duck_type in ("BIGINT", "INTEGER"):
+        # Truncation toward zero, which `trunc` does and a cast does not:
+        # DuckDB rounds -2.5 to -3 (half away from zero), Kusto answers -2.
+        return (
+            f"CASE WHEN json_type({value}) IN ({kinds}) THEN "
+            f"TRY_CAST(trunc(TRY_CAST({value} AS DOUBLE)) AS {duck_type}) END"
+        )
+    if duck_type == "TIMESTAMP":
+        # R8 — via TIMESTAMPTZ so a trailing `Z` or an offset is resolved
+        # rather than silently kept as a local wall time.
+        return (
+            f"CASE WHEN json_type({value}) IN ({kinds}) THEN "
+            f"TRY_CAST({_unwrap_json_scalar(value)} AS TIMESTAMPTZ) "
+            f"AT TIME ZONE 'UTC' END"
+        )
+    return (
+        f"CASE WHEN json_type({value}) IN ({kinds}) THEN "
+        f"TRY_CAST({_unwrap_json_scalar(value)} AS {duck_type}) END"
+    )
 
 
 def render_kql_tostring(node: ir.Expr) -> str:

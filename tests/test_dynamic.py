@@ -183,10 +183,107 @@ def test_an_alias_leaves_the_source_column_holding_the_whole_array(con) -> None:
     assert rows == [("[10,20]", "10"), ("[10,20]", "20")]
 
 
-def test_mv_expand_of_several_columns_refuses(con) -> None:
-    """Expanding in lockstep is a different operation; guessing changes rowcount."""
+@pytest.mark.parametrize(
+    ("a", "b", "rows"),
+    [
+        # The row count is the LONGEST list's; the shorter pads with null.
+        ("[10,20,30]", "['p']", [("10", '"p"'), ("20", None), ("30", None)]),
+        # An empty array beside a non-empty one contributes a **null row** —
+        # unlike the single-column case, where an empty array yields nothing.
+        ("[]", "['p']", [(None, '"p"')]),
+        # ...and all-empty still yields nothing.
+        ("[]", "[]", []),
+        # A null is one element, not zero, so it pads across the longer list.
+        ("null", "['p','q']", [(None, '"p"'), (None, '"q"')]),
+        ("[1,2]", "null", [("1", None), ("2", None)]),
+        # An object counts as one element per key.
+        ("{'k':1}", "['p','q']", [('{"k":1}', '"p"'), (None, '"q"')]),
+    ],
+)
+def test_mv_expand_of_several_columns_zips(con, a: str, b: str, rows: list) -> None:
+    """Lockstep, not a cross product — and the padding rule is its own trap.
+
+    DuckDB's rule for several `UNNEST`s in one select list is exactly KQL's,
+    both edges included, so the zip needs no arithmetic. What it does need is
+    the row count for `with_itemindex`, which is the longest list's.
+    """
+    q = f"datatable(a:dynamic, b:dynamic)[dynamic({a}), dynamic({b})] | mv-expand a, b"
+    assert _rows(con, q) == rows
+
+
+def test_mv_expand_of_several_columns_keeps_the_source_columns(con) -> None:
+    rel = duckdb_kql.kql(con, f"{_SHAPE} | mv-expand x = a, y = b")
+    assert list(rel.columns) == ["id", "a", "b", "x", "y"]
+
+
+@pytest.mark.parametrize(
+    ("to_type", "values"),
+    [
+        # A JSON **number** converts, truncating toward zero — not flooring,
+        # and not rounding: -2.5 is -2 in Kusto and -3 under a plain cast.
+        ("long", [1, 2, -2, None, None, None]),
+        ("int", [1, 2, -2, None, None, None]),
+        ("real", [1.0, 2.5, -2.5, None, None, None]),
+        # A JSON string is NOT a number here, which is what makes this a
+        # conversion rather than a declaration: `'2' to typeof(long)` is null.
+        ("string", ["1", "2.5", "-2.5", "2", "true", ""]),
+        # A boolean, or a whole number: `2` is true and `2.5` is null.
+        ("bool", [True, None, None, None, True, None]),
+    ],
+)
+def test_mv_expand_to_typeof_converts_rather_than_declares(con, to_type, values) -> None:
+    src = "dynamic([1, 2.5, -2.5, '2', true, null])"
+    q = f"datatable(a:dynamic)[{src}] | mv-expand a to typeof({to_type})"
+    assert [r[0] for r in _rows(con, q)] == values
+
+
+def test_mv_expand_to_typeof_refuses_the_types_with_no_measured_rule(con) -> None:
+    """Every input tried — `'1.00:00:00'` included — converts to null there.
+
+    Accepting them would answer null for everything and look like a working
+    conversion, which is the wrong kind of wrong.
+    """
+    for to_type in ("timespan", "decimal"):
+        with pytest.raises(duckdb_kql.KqlUnsupportedError):
+            duckdb_kql.to_sql(f"T | mv-expand a to typeof({to_type})")
+
+
+@pytest.mark.parametrize(("limit", "count"), [(0, 0), (1, 1), (2, 2), (9, 3)])
+def test_mv_expand_limit_caps_rows_per_input_row(con, limit: int, count: int) -> None:
+    q = f"datatable(a:dynamic)[dynamic([1,2,3])] | mv-expand a limit {limit}"
+    assert len(_rows(con, q)) == count
+
+
+@pytest.mark.parametrize(
+    "operator",
+    ["mv-expand kind=array d", "mv-expand bagexpansion=array d"],
+)
+def test_bag_expansion_as_array_gives_key_value_pairs(con, operator: str) -> None:
+    """On an **object** only: `{"p":1}` becomes `["p",1]` rather than a bag."""
+    q = f"datatable(d:dynamic)[dynamic({{'p':1,'q':2}})] | {operator}"
+    assert _rows(con, q) == [('["p",1]',), ('["q",2]',)]
+
+
+@pytest.mark.parametrize("operator", ["mv-expand kind=bag d", "mv-expand d"])
+def test_bag_expansion_defaults_to_bag(con, operator: str) -> None:
+    q = f"datatable(d:dynamic)[dynamic({{'p':1,'q':2}})] | {operator}"
+    assert _rows(con, q) == [('{"p":1}',), ('{"q":2}',)]
+
+
+def test_with_itemindex_over_an_empty_array_yields_no_rows(con) -> None:
+    """The index list is as long as the longest expansion, with no floor of 1.
+
+    Clamping it to at least one — which an earlier version did — gave an empty
+    array one row carrying null where Kusto answers none.
+    """
+    q = "datatable(a:dynamic)[dynamic([])] | mv-expand with_itemindex=i a"
+    assert _rows(con, q) == []
+
+
+def test_mv_expand_of_an_expression_refuses(con) -> None:
+    """The operator rewrites a column in place, and there is none to rewrite."""
     with pytest.raises(duckdb_kql.KqlUnsupportedError):
-        duckdb_kql.to_sql("T | mv-expand a, b")
+        duckdb_kql.to_sql("T | mv-expand strcat(a, 'x')")
 
 
 # --- tostring / hashing -----------------------------------------------------

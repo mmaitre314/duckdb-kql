@@ -1,20 +1,32 @@
 # Proposal — completing `mv-expand`, and the `dynamic` work it depends on
 
-> **Status: phases 1–3 implemented; 4–6 outstanding.** D1, D2 and the two
-> column-shape bugs are done — the rule that came out of D2 turned out to be
-> wider than this document expected and is written up as **R17** in
-> `TRANSLATION.md`, with `tests/test_dynamic_strings.py` holding the
-> measurements. D3 is unchanged and still blocked on column types. Every
-> behaviour in §1 and §2 was measured on the pinned Kusto Emulator, and the
-> measurement is quoted next to the claim it supports.
+> **Status: done, except D3.** All six phases are implemented; the outcome
+> lives in `TRANSLATION.md` as **R17** (a `dynamic` in a string context) and
+> **R18** (`mv-expand`'s three rules), with `tests/test_dynamic_strings.py` and
+> the `mv-expand` block of `tests/test_dynamic.py` holding the measurements.
+> This file is kept as the record of how the shape of the work was found; the
+> two R-rules are the spec. Every behaviour in §1 and §2 was measured on the
+> pinned Kusto Emulator, and the measurement is quoted next to the claim it
+> supports.
 >
-> **What §1 under-counted.** D2 was written as "comparing a dynamic to a string
-> crashes". Sweeping the operator table found the crash was the *smaller* half:
-> `startswith`, `endswith`, `matches regex`, `=~` and `in` all answered
-> **false** where Kusto says true, and `contains`/`has` looked correct only
-> because `"x"` happens to contain `x` — `s contains '"'` was true here and
-> false there. Six string *functions* were wrong the same way. R17 carries the
-> full table and the residue.
+> **Where the plan was wrong, and it was wrong three times:**
+>
+> 1. **D2 was under-counted.** Written as "comparing a dynamic to a string
+>    crashes", the crash turned out to be the *smaller* half: `startswith`,
+>    `endswith`, `matches regex`, `=~` and `in` all answered **false** where
+>    Kusto says true, and `contains`/`has` looked correct only because `"x"`
+>    happens to contain `x` — `s contains '"'` was true here and false there.
+>    Six string *functions* were wrong the same way.
+> 2. **B2's model was wrong.** "The alias creates a new column" is `extend`'s
+>    rule wearing a disguise: `mv-expand b = a` overwrites `b` *in place*.
+> 3. **§2.3's `to typeof` reading was wrong.** It is not a declaration whose
+>    only effect is on `getschema`, and not a cast of the text either: a JSON
+>    string does not become a long, and `2.5` does not become a bool.
+>
+> **What was found on the way:** `with_itemindex` over an empty array produced
+> one row carrying null where Kusto produces none — a shipped bug this proposal
+> never mentioned, caught only because the multi-column row count made the
+> index length load-bearing.
 
 ## 0. Short answer to "does `dynamic` need resolving first?"
 
@@ -178,7 +190,7 @@ Measured: the alias creates a **new** column and leaves the source intact.
 | Form | Kusto behaviour (measured) | Notes |
 |---|---|---|
 | `mv-expand a, b` | expands in **lockstep**, padding the shorter with null: `[1,2,3]` × `['x']` gives `(1,'x'), (2,null), (3,null)` | An **empty** array padded against a non-empty one contributes a null row — unlike the single-column case, where empty yields nothing |
-| `mv-expand a to typeof(long)` | same rows; the output column's declared type becomes `long` instead of `dynamic`, visible only in `getschema` | A non-convertible element becomes **null**, not an error |
+| `mv-expand a to typeof(long)` | ~~same rows; the output column's declared type becomes `long` instead of `dynamic`, visible only in `getschema`~~ | A non-convertible element becomes **null**, not an error |
 | `mv-expand a limit N` | at most N rows per input row | |
 | `mv-expand kind=array a` / `bagexpansion=array` | on an **object**, expands to two-element `[key, value]` arrays instead of single-key bags | Default is `bag` |
 | `mv-expand` of a non-dynamic column | **refused** (SEM0447) | We should refuse too, but it needs the column type |
@@ -193,12 +205,18 @@ is out of scope here.
 | ~~1~~ | **D1** — `render_kql_tostring` unwraps JSON scalars | **Done.** Fixes a silent wrong answer, and fixes `strcat`/hash/`reverse` with it. |
 | ~~2~~ | **D2** — a dynamic in any string context | **Done**, and wider than planned — see R17. |
 | ~~3~~ | **B1, B2** — column position and alias semantics | **Done.** The alias turned out to follow `extend`'s replace-in-place rule, so `mv-expand b = a` overwrites `b` where it stands. |
-| 4 | `to typeof(T)`, `limit N` | Additive; `to typeof` needs the declared-type plumbing that D3 would also use, so it is worth doing after 1–3 rather than before. |
-| 5 | multi-column zipped expansion | The largest piece, and the null-padding rule differs from single-column, so it wants its own trap test. |
-| 6 | `kind=` / `bagexpansion=` | Smallest, and only affects objects. |
+| ~~4~~ | `to typeof(T)`, `limit N` | **Done**, and it needed no type plumbing at all: the conversion is decided from the element's *JSON* type at run time, which DuckDB knows. `timespan` and `decimal` are refused. |
+| ~~5~~ | multi-column zipped expansion | **Done**, and it was the *smallest* piece, not the largest: DuckDB's rule for several `UNNEST`s in one select list is already KQL's, both padding edges included. |
+| ~~6~~ | `kind=` / `bagexpansion=` | **Done.** One branch of the expansion expression. |
 
 Phases 1–3 are worth doing as one change: they are all corrections to shipped
 behaviour, and 3's tests would trip over 1 and 2 otherwise.
+
+> **In hindsight the estimates were inverted.** Phase 5 was called "the largest
+> piece" and took one extra `UNNEST` per target; phase 4 was expected to need
+> the type plumbing D3 wants and needed none, because `to typeof` reads the
+> *element's* JSON type rather than the *column's* declared one. The expensive
+> phase was 2, which the plan sized as a single crash.
 
 **D3 and the SEM0447 refusal both need the same missing thing** — the *type* of
 a column at translation time. The schema currently carries names only. That is
@@ -206,19 +224,53 @@ a larger piece of plumbing than anything above, it would also close R14's
 null-string residue and `reverse()`'s datetime divergence, and it should be its
 own proposal rather than being smuggled in here.
 
-## 4. Open questions
+## 4. Open questions — and how they resolved
 
 1. **Should `tostring(dynamic(null))` be `''` or null?** Measured as `''`
    (`strlen` 0), which is surprising — most KQL conversions return null. Worth
    re-confirming against a real cluster before freezing, since it is the one
    row of the D1 table that does not follow the obvious rule.
+
+   *Still open in that sense.* Implemented as `''`, measured three ways
+   (`strlen` 0, `isnull` false, wire value `""`) and now the load-bearing half
+   of the R17 conversion — `coalesce(x ->> '$', '')`. `to typeof(string)` over
+   a null agrees, which is a second, independent measurement of the same rule.
+   Only a real cluster can close it.
+
 2. **Does the D1 unwrap belong to `tostring` only, or to every string context?**
    Proposed: to `render_kql_tostring`, because every string-context caller
    already routes through it. That makes `strcat(s,'!')` correct as a
    side effect — verify no caller *wants* the JSON text.
+
+   *Resolved: every string context, and the sweep found more of them than the
+   question assumed.* No caller wants the JSON text. The one place the unwrap
+   is deliberately **not** applied is `in`/`has_any` against a subquery, for a
+   reason that has nothing to do with wanting JSON — see R17.
+
 3. **`to typeof(T)` with no type plumbing.** The rows are unaffected; only
    `getschema` differs. Options are to implement it as a cast (changing the
    DuckDB column type, which `getschema` then reports correctly) or to accept
    and ignore it. A cast is probably right and probably cheap — measure whether
    `to typeof(string)` over `[1,2]` gives `strlen` 1 (it does, so a cast to
    VARCHAR agrees).
+
+   *Resolved, and the premise was false.* The rows **are** affected: `'2' to
+   typeof(long)` is null, not 2, so accepting and ignoring would have been a
+   silent wrong answer and a plain cast would have been a different one. It
+   needs no type plumbing either — the conversion reads the *element's* JSON
+   type, which DuckDB knows at run time. See R18 for the measured table.
+
+## 5. What is still open
+
+* **D3** — `summarize by` / `sort by` a dynamic, which Kusto refuses and we
+  answer. Unchanged, and still blocked on the column-type plumbing §3
+  describes.
+* **`mv-expand` of a non-dynamic column** (SEM0447) — same blocker.
+* **Arithmetic over a dynamic.** Found while measuring D2 and not covered
+  anywhere in this document: `s + 1` over `dynamic([1,2])` answers 2, 3 in
+  Kusto and fails to bind here. Loud rather than silent, so it is recorded in
+  R17's residue table rather than fixed. The hard part is not detection but the
+  result *type* — a `CASE` over `json_type` unifies BIGINT and DOUBLE into
+  DOUBLE, so `dynamic(1) + 1` would answer `2.0` where Kusto answers `2`.
+* **`mv-apply`**, which runs a sub-pipeline per element. A different operator,
+  and out of scope throughout.
