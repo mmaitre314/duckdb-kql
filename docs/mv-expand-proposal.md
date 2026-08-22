@@ -224,6 +224,18 @@ a larger piece of plumbing than anything above, it would also close R14's
 null-string residue and `reverse()`'s datetime divergence, and it should be its
 own proposal rather than being smuggled in here.
 
+> It now is: [`column-types-proposal.md`](column-types-proposal.md), which
+> reads the rules off Microsoft's `Kusto.Language` rather than measuring them.
+> Two things there are worth back-porting into the reading of this document.
+> `mv-expand`'s "replace in place" is literally `ProjectionStyle.Replace` in
+> the binder, and `GetMvExpandResultType` is a 40-line method whose branches
+> match every measurement in §2 — including `to typeof` winning, `kind=array`
+> giving `DynamicArray`, and the item index being a `long` appended last. And
+> §5's open question about arithmetic has an answer: `Add`'s
+> `(dynamic, DynamicAddable) -> Parameter1` overload means `s + 1` returns the
+> *other* operand's type, so the result is a long rather than the `DOUBLE` a
+> `json_type` CASE would have unified to.
+
 ## 4. Open questions — and how they resolved
 
 1. **Should `tostring(dynamic(null))` be `''` or null?** Measured as `''`

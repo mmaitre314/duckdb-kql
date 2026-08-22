@@ -650,8 +650,13 @@ loud direction unless marked:
 | `summarize by` / `sort by` a dynamic | refuse | answer (**mild**) |
 
 Every one of them needs the column's *type* at translation time, which the
-schema does not carry. That plumbing is its own piece of work — it would also
-drain R14's null-string residue and `reverse()`'s datetime divergence.
+schema does not carry. That plumbing is its own piece of work, specified in
+[`column-types-proposal.md`](column-types-proposal.md) — it would also drain
+R14's null-string residue and `reverse()`'s datetime divergence, and it would
+turn the `typeof(...) = 'JSON'` guard above from the default into the fallback.
+Worth knowing while reading this rule: Microsoft's own type system declares
+`string` as **wider than** `dynamic`, so all of R17 is one widening conversion
+in the official model (`Symbols/ScalarTypes.cs`).
 
 ---
 
