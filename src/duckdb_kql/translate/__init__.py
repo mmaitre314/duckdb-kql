@@ -582,6 +582,21 @@ def render_operator(op: ir.Operator, prev: str, cols: list[str] | None = None) -
     if isinstance(op, ir.Sort):
         return f"SELECT * FROM {prev} ORDER BY {render_sort_keys(op.keys)}"
 
+    if isinstance(op, ir.Top):
+        # `sort by X | take n` in one CTE. The direction and null placement are
+        # `sort`'s, defaults included (R6) — measured, `top 3 by a` is
+        # descending and `top 3 by a asc` puts nulls first.
+        #
+        # The count is clamped at zero because DuckDB *refuses* a negative
+        # LIMIT ("LIMIT/OFFSET cannot be negative") where Kusto answers an
+        # empty table — measured, `top -1 by a` returns no rows there. An
+        # engine error for a query the reference engine accepts is a
+        # divergence like any other.
+        return (
+            f"SELECT * FROM {prev} ORDER BY {render_sort_keys(op.keys)} "
+            f"LIMIT {max(op.count, 0)}"
+        )
+
     if isinstance(op, (ir.Join, ir.Lookup, ir.Union)):
         # These need both sides' columns, so they are rendered by to_sql(),
         # which threads the schema. Reaching here means a bug, not a gap.
@@ -1454,13 +1469,25 @@ def render_in_list(node: ir.InList) -> str:
     value = render_expr(node.value)
 
     if node.subquery is not None:
-        inner = str(to_sql(node.subquery))
+        # KQL tests against the subquery's **first column** and ignores the
+        # rest — measured: `x in (T)` where T is `(k, v)` matches on `k`, and a
+        # value of the wrong type for `k` is an error (SEM0025) rather than a
+        # fallback to `v`. `SELECT *` sent every column and DuckDB refused with
+        # "Subquery returns 2 columns - expected 1", which only ever surfaced
+        # once `top` made `T | summarize … | top 5 by …` translatable.
+        #
+        # The alias list picks the first column **without needing the schema**:
+        # DuckDB accepts fewer aliases than there are columns and applies them
+        # left to right, so `AS _q(_c1)` names column one whatever it is called.
+        inner = f"SELECT _c1 FROM ({to_sql(node.subquery)}) AS _q(_c1)"
         if node.case_insensitive:
-            # Lower BOTH sides, so the subquery must be wrapped rather than
-            # inlined: comparing a lowered value against un-lowered rows would
-            # silently miss matches.
+            # Lower BOTH sides: comparing a lowered value against un-lowered
+            # rows would silently miss matches.
             value = f"lower({value})"
-            inner = f"SELECT lower(CAST(COLUMNS(*) AS VARCHAR)) FROM ({inner})"
+            inner = (
+                f"SELECT lower(CAST(_c1 AS VARCHAR)) "
+                f"FROM ({to_sql(node.subquery)}) AS _q(_c1)"
+            )
         sql = f"({value} IN ({inner}))"
         return _in_result(sql, node, value)
 

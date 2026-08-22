@@ -31,7 +31,13 @@ CORPUS = Path(os.environ.get("DUCKDB_KQL_CORPUS", "tests/cases/docs/docs-corpus.
 pytestmark = pytest.mark.skipif(not CORPUS.is_file(), reason=f"no corpus at {CORPUS}")
 
 #: Cases that translate AND match ground truth. May only go UP.
-BASELINE_PASSING = 266
+#:
+#: The **floor**, not the typical count. One corpus case (`in-cs-operator-04`)
+#: contains a `top` whose cut falls inside a tie, so it sometimes matches the
+#: frozen expectation and sometimes is classified nondeterministic by the
+#: reproducibility check in `_run` — the count is legitimately 277 or 278. A
+#: ratchet set at the higher number would fail on the runs that get the other.
+BASELINE_PASSING = 277
 
 #: Cases we translate but knowingly get wrong, with the reason. This is an
 #: **admission of a bug**, not a waiver: each entry is a real KQL↔DuckDB gap
@@ -111,14 +117,7 @@ def _run(case: dict) -> tuple[str, str]:
         return "crash", f"{type(e).__name__}: {e}"
 
     try:
-        # A `declare query_parameters` query renders placeholders; their values
-        # travel beside the SQL rather than inside it (see duckdb_kql.params).
-        params = getattr(sql, "parameters", None)
-        rel = _connection().sql(str(sql), params=params) if params else _connection().sql(str(sql))
-        actual = {
-            "columns": list(rel.columns),
-            "rows": [list(r) for r in rel.fetchall()],
-        }
+        actual = _execute(sql)
     except Exception as e:  # noqa: BLE001 - any DuckDB failure is a real signal
         return "sql_error", f"{type(e).__name__}: {e}"
 
@@ -128,7 +127,43 @@ def _run(case: dict) -> tuple[str, str]:
         return "pass", ""
     if case["id"] in KNOWN_DIVERGENCES:
         return "known_divergence", str(result)
+    if not _is_reproducible(sql, actual):
+        # Our own answer changes between runs, so there is nothing here to
+        # compare against a frozen expectation. This is R10 arriving through
+        # the data rather than the query text: `top N by X` where more than N
+        # rows tie at the cut-off picks a different N each time, and if that
+        # choice feeds a later operator the whole result moves with it.
+        # `is_nondeterministic` cannot see it — the query text is identical to
+        # one over data with no tie, which *is* reproducible and must stay
+        # compared.
+        return "nondeterministic", str(result)
     return "mismatch", str(result)
+
+
+def _execute(sql: object) -> dict:
+    # A `declare query_parameters` query renders placeholders; their values
+    # travel beside the SQL rather than inside it (see duckdb_kql.params).
+    params = getattr(sql, "parameters", None)
+    con = _connection()
+    rel = con.sql(str(sql), params=params) if params else con.sql(str(sql))
+    return {"columns": list(rel.columns), "rows": [list(r) for r in rel.fetchall()]}
+
+
+def _is_reproducible(sql: object, first: dict, attempts: int = 3) -> bool:
+    """Whether re-running *sql* gives the same answer it just gave.
+
+    Only asked when a case has already failed, so the cost is paid on the few
+    that need it. Several attempts rather than one: a tie does not resolve
+    differently on *every* run, and calling an unstable query stable would put
+    the flake back.
+    """
+    for _ in range(attempts):
+        try:
+            if _execute(sql) != first:
+                return False
+        except Exception:  # noqa: BLE001 - an inconsistent failure is instability too
+            return False
+    return True
 
 
 @functools.lru_cache(maxsize=1)

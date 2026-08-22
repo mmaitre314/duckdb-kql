@@ -678,6 +678,19 @@ def _lower_operator(node: Any) -> ir.Operator | None:
     if kind == "SortOperator":
         return ir.Sort(tuple(_lower_sort_key(k) for k in kids))
 
+    if kind == "TopOperator":
+        # `top N by X` — the count comes first, then exactly one ordered
+        # expression. `top 2 by a, b` is a syntax error in Kusto and in the
+        # vendored grammar, so a second key cannot arrive here.
+        if len(kids) != 2:
+            raise _unsupported(node, "top")
+        count = _lower_expr(kids[0])
+        if not isinstance(count, ir.Literal) or not isinstance(count.value, int):
+            # As for `take`: the count is an expression in the grammar, so
+            # `top int(3) by a` must not reach the emitter as the text "int(3)".
+            raise _unsupported(node, "top")
+        return ir.Top(int(count.value), (_lower_sort_key(kids[1]),))
+
     if kind == "DistinctOperator":
         # Lowered as *expressions*, not names. `_find_names` was used here and
         # violates its own contract — a function name is a `KeywordName` too —

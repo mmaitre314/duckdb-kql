@@ -34,7 +34,8 @@ __all__ = [
     # operators
     "Summarize", "Join", "JoinKey", "Lookup", "Union", "MvExpand", "ProjectAway",
     "ProjectRename",
-    "Where", "Project", "Extend", "Take", "Sort", "SortKey", "Count", "Distinct",
+    "Where", "Project", "Extend", "Take", "Sort", "SortKey", "Top", "Count",
+    "Distinct",
 ]
 
 
@@ -282,6 +283,24 @@ class SortKey(Node):
 
 @dataclass(frozen=True)
 class Sort(Operator):
+    keys: tuple[SortKey, ...]
+
+
+@dataclass(frozen=True)
+class Top(Operator):
+    """``top N by X [asc|desc] [nulls first|last]`` — sort and cut, in one step.
+
+    Kept as its own operator rather than lowered to `Sort` + `Take` so the
+    1:1 operator-to-CTE correspondence holds (docs/TRANSLATION.md §1) and the
+    emitted SQL reads like the query. The two are equivalent apart from ties,
+    and ties are undefined in both (R10).
+
+    One key only — `top 2 by a, b` is a syntax error in Kusto, and in the
+    vendored grammar, so `keys` is a tuple purely to share `render_sort_keys`
+    with `Sort`.
+    """
+
+    count: int
     keys: tuple[SortKey, ...]
 
 

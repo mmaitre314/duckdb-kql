@@ -154,16 +154,33 @@ _SORT_KEYS_RE = re.compile(
     r"\|\s*(?:sort|order)\s+by\s+(.*?)(?=\||$)", re.IGNORECASE | re.DOTALL
 )
 
+# `top N by X` is a sort and a truncation in one operator, so it is BOTH of the
+# things below: it orders by X, and it cuts inside whatever ties at the
+# boundary. The whitespace after `top` keeps `top-nested` and `top-hitters` out
+# — different operators with different result shapes.
+_TOP_RE = re.compile(
+    r"\|\s*top\s+[^|]*?\bby\s+(.*?)(?=\||$)", re.IGNORECASE | re.DOTALL
+)
+
 
 def is_truncated_after_sort(kql: str) -> bool:
-    """True for ``… | sort by X | take/limit N``.
+    """True for ``… | sort by X | take/limit N`` and for ``… | top N by X``.
 
     Such a query promises that the N rows carry the N smallest/largest X — but
     **which** rows among those tied at the cut-off is the engine's choice. So the
     sort-key sequence is comparable and the rest of the row is not.
+
+    `top` is the same shape written as one operator, and it needs the same
+    treatment for the same reason: `StormEvents | top 3 by InjuriesDirect` has
+    eight rows tied at the boundary value, so the three that come back are as
+    arbitrary here as they are there.
     """
+    if not is_order_significant(kql):
+        return False
+    if _TOP_RE.search(kql):
+        return True
     m = list(_ARBITRARY_SELECTION_RE.finditer(kql))
-    if not m or not is_order_significant(kql):
+    if not m:
         return False
     return bool(_TERMINAL_ORDERING_RE.search(kql[: m[-1].start()]))
 
@@ -176,7 +193,10 @@ def sort_key_names(kql: str) -> list[str]:
     promises a stable sort. Knowing the keys lets the comparison assert the part
     that is promised without asserting the part that is not.
     """
-    matches = list(_SORT_KEYS_RE.finditer(kql))
+    matches = sorted(
+        [*_SORT_KEYS_RE.finditer(kql), *_TOP_RE.finditer(kql)],
+        key=lambda m: m.start(),
+    )
     if not matches:
         return []
     names = []

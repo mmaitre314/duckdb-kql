@@ -119,7 +119,7 @@ def _operator_columns(
 ) -> list[str]:
     from .translate import aggregate_name, output_name, target_names
 
-    if isinstance(op, (ir.Where, ir.Take, ir.Sort)):
+    if isinstance(op, (ir.Where, ir.Take, ir.Sort, ir.Top)):
         return cols
     if isinstance(op, ir.Project):
         return [output_name(e, i) for i, e in enumerate(op.expressions)]
