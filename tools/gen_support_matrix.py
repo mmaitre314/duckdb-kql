@@ -60,6 +60,7 @@ RULES = {
     "R14": "`lookup` defaults to **`leftouter`** and drops the right key columns; join/lookup keys match **null to null**.",
     "R15": "`union` matches branches by column **name**, not position, and does not de-duplicate.",
     "R16": "`macro-expand` runs its body once per entity and unions the results.",
+    "R17": "A `dynamic` in a string context is its **unwrapped** text — `dynamic('x')` is `x`, not `\"x\"`, and `dynamic(null)` is the empty string.",
 }
 
 #: R11 covers two unrelated hazards. Aggregates get the one that applies to them.
@@ -168,7 +169,7 @@ OPERATORS: list[tuple[str, str, str]] = [
     ("extend", "T | extend c = 1", "Redefining an existing column **replaces** it rather than adding a second one."),
     ("summarize", "T | summarize n = round(sum(a), 2) by b", "Any scalar expression over aggregates, not just a bare call — `round(sum(x), 2)`, `sum(x) / count()`, `strcat('n=', tostring(count()))`. Auto-generated names follow KQL: the name comes from the *aggregate*, so `round(sum(y), 2)` is `sum_y`, and an expression whose first argument is not an aggregate is `Column1`. Group keys come first in source order, and a null key forms its own group (R12). A column outside an aggregate is refused, as Kusto refuses it — even a `by` key."),
     ("join", "T | join kind=inner (T) on a", "Needs the input schema to reproduce KQL's column renaming — `duckdb_kql.kql()` supplies it; `to_sql()` needs `schema=`."),
-    ("mv-expand", "T | mv-expand a", "One column at a time. Multi-column `mv-expand` (zipped expansion) is not supported."),
+    ("mv-expand", "T | mv-expand a", "One column at a time. Multi-column `mv-expand` (zipped expansion) is not supported. The expanded column keeps its **position**, and `mv-expand x = a` adds `x` while leaving `a` holding the whole array — both need the incoming column list, so pass a schema or use `duckdb_kql.kql()`."),
     ("distinct", "T | distinct a", "Takes **expressions**, not just column names — `distinct B2 = tostring(B)` — despite a documented syntax of a column list. Output names follow R12's allow-list, shared with `summarize`'s `by` keys: `tostring(B)` is named `B`, `tolower(B)` is `Column1`. `distinct *` is refused; it needs the input schema to expand. **Residue:** arithmetic gets a number one higher than expected (`distinct -C` is `Column2`), and `strlen(B)` is named `strlen_B` — two data points too few to derive a rule from, so both fall back to the positional name."),
     ("count", "T | count", "Output column is named `Count`."),
     ("sort", "T | sort by a", "Defaults to **descending**, the opposite of SQL. Null placement is emitted explicitly rather than left to DuckDB's default (R6)."),

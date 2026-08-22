@@ -46,7 +46,7 @@ returns an approximate answer.
 | `extend` | Redefining an existing column **replaces** it rather than adding a second one. |
 | `summarize` | Any scalar expression over aggregates, not just a bare call — `round(sum(x), 2)`, `sum(x) / count()`, `strcat('n=', tostring(count()))`. Auto-generated names follow KQL: the name comes from the *aggregate*, so `round(sum(y), 2)` is `sum_y`, and an expression whose first argument is not an aggregate is `Column1`. Group keys come first in source order, and a null key forms its own group (R12). A column outside an aggregate is refused, as Kusto refuses it — even a `by` key. |
 | `join` | Needs the input schema to reproduce KQL's column renaming — `duckdb_kql.kql()` supplies it; `to_sql()` needs `schema=`. |
-| `mv-expand` | One column at a time. Multi-column `mv-expand` (zipped expansion) is not supported. |
+| `mv-expand` | One column at a time. Multi-column `mv-expand` (zipped expansion) is not supported. The expanded column keeps its **position**, and `mv-expand x = a` adds `x` while leaving `a` holding the whole array — both need the incoming column list, so pass a schema or use `duckdb_kql.kql()`. |
 | `distinct` | Takes **expressions**, not just column names — `distinct B2 = tostring(B)` — despite a documented syntax of a column list. Output names follow R12's allow-list, shared with `summarize`'s `by` keys: `tostring(B)` is named `B`, `tolower(B)` is `Column1`. `distinct *` is refused; it needs the input schema to expand. **Residue:** arithmetic gets a number one higher than expected (`distinct -C` is `Column2`), and `strlen(B)` is named `strlen_B` — two data points too few to derive a rule from, so both fall back to the positional name. |
 | `count` | Output column is named `Count`. |
 | `sort` | Defaults to **descending**, the opposite of SQL. Null placement is emitted explicitly rather than left to DuckDB's default (R6). |
@@ -326,9 +326,9 @@ Not supported: `arg_max`, `arg_min`, `binary_all_*`, `buildschema`,
 | `strlen` | Counts **characters**, not bytes — a multi-byte string is shorter than its `octet_length`. |
 | `strrep` | — |
 | `substring` | **0-based**, and clamps out-of-range or negative input instead of erroring. SQL's `substring` is 1-based. |
-| `tolower` | — |
+| `tolower` | A `dynamic` in a string context is its **unwrapped** text — `dynamic('x')` is `x`, not `"x"`, and `dynamic(null)` is the empty string. |
 | `tostring` | Uses .NET's spelling, which differs from DuckDB's for datetimes, timespans and dynamics. Getting it wrong changes every hash computed over it. |
-| `toupper` | — |
+| `toupper` | A `dynamic` in a string context is its **unwrapped** text — `dynamic('x')` is `x`, not `"x"`, and `dynamic(null)` is the empty string. |
 | `trim_start` | The first argument is a **regular expression**, not a set of characters to strip. `trim_start(' ', s)` strips one leading space, not all whitespace. |
 
 ### Mathematical

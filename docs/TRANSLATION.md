@@ -299,6 +299,8 @@ KQL identifiers are case-sensitive; DuckDB's are case-insensitive by default.
 - `parse_json`/`todynamic` on invalid input → null (R1), not an error.
 - `mv-expand` expansion of an empty or null array: row-preserving behavior must be
   pinned by the oracle (it differs from a naive `UNNEST`, which drops rows).
+- What comes *out* of `mv-expand` is a dynamic scalar, and the next operator is
+  usually a string one — see R17, which is where that goes wrong.
 
 ---
 
@@ -554,6 +556,78 @@ labels, which are right whenever every branch is in the current database.
 
 ---
 
+### R17 — A `dynamic` in a **string context** is its unwrapped text
+*Trap: `trap-r17-dynamic-string`*
+
+A KQL `dynamic` is DuckDB `JSON`, and the two disagree about a value's text
+form: JSON quotes a string, KQL does not. Kusto coerces a dynamic to its
+unquoted text before every string operator, so the disagreement surfaces as a
+**wrong answer** rather than an error — and it surfaces on the line after
+`mv-expand`, which is the main producer of dynamic scalars.
+
+Measured, with `strlen` proving it is the value and not the display:
+
+| expression | Kusto | naive rendering |
+|---|---|---|
+| `tostring(dynamic('x'))` | `x` (1) | `"x"` (3) |
+| `tostring(dynamic(null))` | `` (0, **not** null) | null |
+| `tostring(dynamic([1,2]))` | `[1,2]` | `[1,2]` ✓ |
+| `s startswith 'x'` over `dynamic(['x'])` | true | **false** |
+| `s contains '"'` over `dynamic(['x'])` | false | **true** |
+| `s == 'x'` over `dynamic(['x'])` | true | *crash* |
+
+**The conversion** is `coalesce(x ->> '$', '')`. DuckDB's `->> '$'` is already
+KQL's rule for every form — it unquotes a string and leaves everything else as
+its JSON text — with one hole: it returns SQL null for a JSON null, where KQL
+returns the empty string. `tostring(dynamic(null))` being `''` rather than null
+is the single conversion in KQL that does not propagate null.
+
+**Where it applies.** Three places, and the mechanism differs because the
+translator has column *names* but not column *types*:
+
+1. **`tostring` and its callers** (`strcat`, `strcat_delim`, the hash
+   functions, `reverse`) go through one helper, so the family is fixed at once.
+2. **String-only functions** — `strlen`, `toupper`, `tolower`, `substring`,
+   `split`, `indexof`, `isempty`, `isnotempty` — coerce the argument through
+   that same helper. An allow-list, not a rule: `countof`, `extract`,
+   `replace_string`, `trim` and `url_encode` all **refuse** a dynamic on a
+   cluster (SEM02xx), so a "looks stringy" heuristic would invent coercions.
+3. **Operators** get a run-time branch instead of a coercion, because equality
+   is polymorphic. Measured, `datetime_col == '2020-01-01'` coerces the
+   *literal* to a datetime and answers true, so stringifying the column would
+   answer false. The whole comparison is therefore rendered on both sides of a
+   `typeof(x) = 'JSON'` guard; only the taken branch evaluates, and a branch
+   that cannot even *bind* keeps its refusal — which is how `long_col contains
+   '1'` stays an error, as it is on a cluster (SEM0709).
+
+The `contains`/`has`/`startswith`/`endswith`/`matches regex`/`=~`/`!~` family
+is always a string context. `==`/`!=` count only when the other operand is
+visibly a string.
+
+**Comparing two dynamics is refused** — Kusto answers SEM0001, "Cannot compare
+dynamic values without explicit cast", and DuckDB would happily compare the
+JSON text. Only decidable when both sides are statically dynamic.
+
+**Residue**, all recorded in `tests/test_dynamic_strings.py` and all in the
+loud direction unless marked:
+
+| case | Kusto | here |
+|---|---|---|
+| `s == 1`, `s == true` over a string dynamic | false | conversion error |
+| `s < 'y'` | refuses (SEM0064) | conversion error |
+| `k == s` (string column vs dynamic column) | true | conversion error |
+| `s + 1` (arithmetic over a dynamic) | 2 | binder error |
+| `s in (subquery)` | coerces | compares JSON text (**mild**) |
+| `s == s` (two dynamic *columns*) | refuses | answers (**mild**) |
+| `countof`/`extract`/`replace_string` over a dynamic | refuse | answer (**mild**) |
+| `summarize by` / `sort by` a dynamic | refuse | answer (**mild**) |
+
+Every one of them needs the column's *type* at translation time, which the
+schema does not carry. That plumbing is its own piece of work — it would also
+drain R14's null-string residue and `reverse()`'s datetime divergence.
+
+---
+
 ## 5. Tabular operator conventions
 
 | KQL | DuckDB rendering |
@@ -572,6 +646,7 @@ labels, which are right whenever every branch is in the current database.
 | `summarize …  by …` | `GROUP BY` (R12 naming, R4 null handling) |
 | `join` | R5 — kind-dependent |
 | `union [kind=]` | `UNION ALL BY NAME` with an explicit output column list (R15) |
+| `mv-expand [x =] c` | `UNNEST` of the JSON, written into an explicit column list — the output column **replaces a same-named input in place** and is appended otherwise, exactly as `extend` does, so `mv-expand x = a` keeps `a` holding the whole array. `with_itemindex=` lands last and collides like a join key (`b` → `b1`). |
 | `datatable(...)` / `print` / `range` | `VALUES` / `SELECT` / `range()` — self-contained, ideal for corpus tests |
 
 **`union` column unification:** KQL unions produce the **superset** of columns,

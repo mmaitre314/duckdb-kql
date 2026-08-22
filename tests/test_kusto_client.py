@@ -165,8 +165,21 @@ def test_guid_is_stored_as_a_string(client) -> None:
     assert table.raw_rows[0][0] == g
 
 
-def test_null_stays_null(client) -> None:
+def test_tostring_of_a_dynamic_null_is_empty_not_null(client) -> None:
+    """The one KQL conversion that does *not* propagate null.
+
+    Measured on the emulator, three ways so it cannot be a display artefact:
+    the wire value is `""`, `strlen` is 0, and `isnull` is **false**. Every
+    other `to*` returns null for a null input, which is why this used to be
+    asserted the other way round.
+    """
     table = client.execute("db", "print x = tostring(dynamic(null))").primary_results[0]
+    assert table.raw_rows[0][0] == ""
+    assert table[0]["x"] == ""
+
+
+def test_null_stays_null(client) -> None:
+    table = client.execute("db", "print x = toint(dynamic(null))").primary_results[0]
     assert table.raw_rows[0][0] is None
 
 

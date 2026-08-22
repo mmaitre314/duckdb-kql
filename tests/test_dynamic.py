@@ -141,6 +141,48 @@ def test_mv_expand_with_itemindex(con) -> None:
     assert [r[1] for r in rel.fetchall()] == [0, 1, 2, 3]
 
 
+#: `id, a, b` where `a` is a two-element array — enough to see both where the
+#: expanded column lands and whether the source column survives.
+_SHAPE = "datatable(id:long, a:dynamic, b:dynamic)[1, dynamic([10,20]), dynamic(['p'])]"
+
+
+@pytest.mark.parametrize(
+    ("operator", "columns"),
+    [
+        # The expansion REPLACES the column in place — it does not append.
+        ("mv-expand a", ["id", "a", "b"]),
+        ("mv-expand b", ["id", "a", "b"]),
+        # An alias names an OUTPUT column: new ones are appended and `a` keeps
+        # the whole array, while an existing name is replaced where it stands.
+        ("mv-expand x = a", ["id", "a", "b", "x"]),
+        ("mv-expand b = a", ["id", "a", "b"]),
+        ("mv-expand a = a", ["id", "a", "b"]),
+        # The item index always lands last, and collides like a join key.
+        ("mv-expand with_itemindex=i a", ["id", "a", "b", "i"]),
+        ("mv-expand with_itemindex=b a", ["id", "a", "b", "b1"]),
+        ("mv-expand with_itemindex=i x = a", ["id", "a", "b", "x", "i"]),
+    ],
+)
+def test_mv_expand_column_shape(con, operator: str, columns: list[str]) -> None:
+    """Column order is user-visible (R1), and this operator gets it twice wrong.
+
+    Rendering as ``* EXCLUDE (a), UNNEST(...) AS a`` appended the expanded
+    column — `id, b, a` where Kusto says `id, a, b` — and dropped `a` entirely
+    under an alias, where Kusto keeps it holding the un-expanded array.
+
+    `with_itemindex=b` over a table that already has `b` is the naming trap:
+    Kusto answers **b1**, the join-collision spelling, where two columns both
+    called `b` would have left DuckDB naming the second `b_1`.
+    """
+    assert list(duckdb_kql.kql(con, f"{_SHAPE} | {operator}").columns) == columns
+
+
+def test_an_alias_leaves_the_source_column_holding_the_whole_array(con) -> None:
+    """The half of the shape a column list cannot show."""
+    rows = _rows(con, f"{_SHAPE} | mv-expand x = a | project a, x")
+    assert rows == [("[10,20]", "10"), ("[10,20]", "20")]
+
+
 def test_mv_expand_of_several_columns_refuses(con) -> None:
     """Expanding in lockstep is a different operation; guessing changes rowcount."""
     with pytest.raises(duckdb_kql.KqlUnsupportedError):

@@ -1899,12 +1899,13 @@ def _lower_dynamic_literal(node: Any) -> ir.Expr:
     so the payload is normalised rather than passed straight through.
     """
     values = [c for c in _rule_children(node) if _cls(c) == "JsonValue"]
-    if not values:
-        return ir.Literal(None, "null")
-    text = values[0].getText().strip()
-    if text.lower() == "null":
-        return ir.Literal(None, "null")
-    return ir.Literal(_normalize_json(text), "dynamic")
+    if not values or values[0].getText().strip().lower() == "null":
+        # `dynamic(null)` is a **typed** null (TRANSLATION.md §3), not a bare
+        # one. It used to lower to `Literal(None, "null")` and render as plain
+        # NULL, which lost the type — and with it `tostring(dynamic(null))`,
+        # which is the empty string in Kusto and came back as null here.
+        return ir.Literal(None, "dynamic")
+    return ir.Literal(_normalize_json(values[0].getText().strip()), "dynamic")
 
 
 def _normalize_json(text: str) -> str:

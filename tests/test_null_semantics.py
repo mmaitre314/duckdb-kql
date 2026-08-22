@@ -139,17 +139,23 @@ def test_null_on_both_sides_stays_null(con) -> None:
 
 
 def test_the_guard_is_only_paid_for_when_it_is_needed(con) -> None:
-    """A literal operand cannot be null, so the common predicate stays simple.
+    """A literal operand cannot be null, so the *null* guard is not emitted.
 
     Readability of the generated SQL is a feature — the CLI ships it to people
-    who have to read it — so the CASE guard must not appear in `col != 'x'`.
+    who have to read it — so `col != 'x'` must stay a plain coalesce.
+
+    Asserted on the both-null test rather than on the string `CASE WHEN`,
+    because a second and unrelated guard also renders as one: comparing a
+    column to a string has to work whether or not that column turns out to hold
+    a `dynamic` (`_in_string_context`), and it says `typeof(...) = 'JSON'`.
+    Those two are independent, and only this one is about nulls.
     """
     simple = str(duckdb_kql.to_sql('T | where s != "hello"'))
-    assert "CASE WHEN" not in simple, simple
+    assert "IS NULL AND" not in simple, simple
     assert "coalesce" in simple
 
     both_columns = str(duckdb_kql.to_sql("T | where n != m"))
-    assert "CASE WHEN" in both_columns, both_columns
+    assert "IS NULL AND" in both_columns, both_columns
 
 
 # ---------------------------------------------------------------------------

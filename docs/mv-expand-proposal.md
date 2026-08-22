@@ -1,8 +1,20 @@
 # Proposal — completing `mv-expand`, and the `dynamic` work it depends on
 
-> **Status: proposal.** Nothing here is implemented. Every behaviour in §1 and
-> §2 was measured on the pinned Kusto Emulator, and the measurement is quoted
-> next to the claim it supports.
+> **Status: phases 1–3 implemented; 4–6 outstanding.** D1, D2 and the two
+> column-shape bugs are done — the rule that came out of D2 turned out to be
+> wider than this document expected and is written up as **R17** in
+> `TRANSLATION.md`, with `tests/test_dynamic_strings.py` holding the
+> measurements. D3 is unchanged and still blocked on column types. Every
+> behaviour in §1 and §2 was measured on the pinned Kusto Emulator, and the
+> measurement is quoted next to the claim it supports.
+>
+> **What §1 under-counted.** D2 was written as "comparing a dynamic to a string
+> crashes". Sweeping the operator table found the crash was the *smaller* half:
+> `startswith`, `endswith`, `matches regex`, `=~` and `in` all answered
+> **false** where Kusto says true, and `contains`/`has` looked correct only
+> because `"x"` happens to contain `x` — `s contains '"'` was true here and
+> false there. Six string *functions* were wrong the same way. R17 carries the
+> full table and the residue.
 
 ## 0. Short answer to "does `dynamic` need resolving first?"
 
@@ -152,6 +164,15 @@ the list out explicitly so the expanded column keeps its position.
 Measured: the alias creates a **new** column and leaves the source intact.
 `schema._operator_columns` renames in place, which is the wrong model.
 
+> **Correction found while implementing.** "Creates a new column" is not the
+> rule; it is `extend`'s rule. `mv-expand b = a` over `id, a, b` answers
+> `id, a, b` with **`b` overwritten in place** by the expansion of `a`, and `a`
+> still holding the array. So the alias names an *output* column that replaces
+> a same-named input and is appended otherwise — which also explains the
+> no-alias case, where the target happens to be the source. The item index
+> collides like a join key on top of that: `with_itemindex=b` gives `b1`, not
+> DuckDB's own `b_1`.
+
 ### 2.3 Missing surface
 
 | Form | Kusto behaviour (measured) | Notes |
@@ -169,9 +190,9 @@ is out of scope here.
 
 | Phase | Scope | Why here |
 |---|---|---|
-| 1 | **D1** — `render_kql_tostring` unwraps JSON scalars | Fixes a silent wrong answer, and fixes `strcat`/hash/`reverse` with it. Independent of `mv-expand`. |
-| 2 | **D2** — dynamic-vs-string comparison | Turns a crash into an answer. Independent. |
-| 3 | **B1, B2** — column position and alias semantics | Fixes what already ships. Small, and both are user-visible. |
+| ~~1~~ | **D1** — `render_kql_tostring` unwraps JSON scalars | **Done.** Fixes a silent wrong answer, and fixes `strcat`/hash/`reverse` with it. |
+| ~~2~~ | **D2** — a dynamic in any string context | **Done**, and wider than planned — see R17. |
+| ~~3~~ | **B1, B2** — column position and alias semantics | **Done.** The alias turned out to follow `extend`'s replace-in-place rule, so `mv-expand b = a` overwrites `b` where it stands. |
 | 4 | `to typeof(T)`, `limit N` | Additive; `to typeof` needs the declared-type plumbing that D3 would also use, so it is worth doing after 1–3 rather than before. |
 | 5 | multi-column zipped expansion | The largest piece, and the null-padding rule differs from single-column, so it wants its own trap test. |
 | 6 | `kind=` / `bagexpansion=` | Smallest, and only affects objects. |

@@ -18,7 +18,7 @@ from ..errors import KqlUnsupportedError
 from .functions import _TODATETIME, BINARY_OPERATORS, lookup, lookup_aggregate
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
 
     from ..params import ParameterDeclaration
     from ..schema import Schema
@@ -134,6 +134,8 @@ def render_literal(lit: ir.Literal) -> str:
     if lit.kind == "guid":
         return f"UUID {quote_string(str(lit.value))}"
     if lit.kind == "dynamic":
+        if lit.value is None:
+            return "CAST(NULL AS JSON)"
         return f"CAST({quote_string(str(lit.value))} AS JSON)"
     raise KqlUnsupportedError(f"literal:{lit.kind}")
 
@@ -182,18 +184,40 @@ def render_expr(node: ir.Expr) -> str:
             # Where it is not — a column — `//` still divides correctly and only
             # a zero divisor differs; that residue is in the divergence catalog.
             return f"({render_expr(node.left)} / {render_expr(node.right)})"
+        if (
+            node.op in ("==", "!=", "<>")
+            and _is_dynamic_expr(node.left)
+            and _is_dynamic_expr(node.right)
+        ):
+            # Kusto refuses this outright — SEM0001, "Cannot compare dynamic
+            # values without explicit cast" — because it cannot know which
+            # comparison is meant. DuckDB compares the JSON text and answers,
+            # so without this the query would run where a cluster would not.
+            raise KqlUnsupportedError(
+                f"operator:{node.op}",
+                hint="Kusto refuses to compare two dynamics; cast one with "
+                "tostring()/tolong() to say which comparison is meant",
+            )
         spec = BINARY_OPERATORS.get(node.op)
         if spec is None:
             raise KqlUnsupportedError(
                 f"operator:{node.op}", hint="no DuckDB mapping in this wave"
             )
         left, right = render_expr(node.left), render_expr(node.right)
-        rendered = spec.template.format(left, right)
-        if spec.null_result is None:
-            return rendered
-        return _apply_null_semantics(
-            rendered, spec.null_result, ((node.left, left), (node.right, right))
-        )
+
+        def build(sqls: Sequence[str]) -> str:
+            rendered = spec.template.format(*sqls)
+            if spec.null_result is None:
+                return rendered
+            return _apply_null_semantics(
+                rendered,
+                spec.null_result,
+                ((node.left, sqls[0]), (node.right, sqls[1])),
+            )
+
+        if _is_string_context(node):
+            return _in_string_context(((node.left, left), (node.right, right)), build)
+        return build((left, right))
 
     if isinstance(node, ir.PathAccess):
         return render_path(node)
@@ -271,7 +295,7 @@ def render_expr(node: ir.Expr) -> str:
                 f"function:{node.name}",
                 hint="no DuckDB mapping in this wave; see translate/functions.py",
             )
-        args = [render_expr(a) for a in node.args]
+        args = [_render_arg(node.name, i, a) for i, a in enumerate(node.args)]
         try:
             return fn_spec.render(args)
         except ValueError as e:
@@ -504,7 +528,7 @@ def render_operator(op: ir.Operator, prev: str, cols: list[str] | None = None) -
 
     *cols* is the incoming column order where it is known — from the IR for a
     `datatable`/`print`/`range` source, or from the caller's schema for a table.
-    Only `extend` needs it, and only to keep a replaced column in place.
+    `extend` and `mv-expand` need it, both to keep a replaced column in place.
     """
     if isinstance(op, ir.Where):
         return f"SELECT * FROM {prev} WHERE {render_expr(op.predicate)}"
@@ -574,7 +598,7 @@ def render_operator(op: ir.Operator, prev: str, cols: list[str] | None = None) -
         return f"SELECT * RENAME ({renames}) FROM {prev}"
 
     if isinstance(op, ir.MvExpand):
-        return render_mv_expand(op, prev)
+        return render_mv_expand(op, prev, cols)
 
     if isinstance(op, ir.Summarize):
         return render_summarize(op, prev)
@@ -1465,9 +1489,32 @@ def render_in_list(node: ir.InList) -> str:
     The ``~`` suffix is case-INsensitive (R2), matching `=~` rather than `==`.
     Lowering both sides keeps the comparison symmetric — comparing a lowered
     column against un-lowered literals would silently miss matches.
-    """
-    value = render_expr(node.value)
 
+    A membership test against strings is a **string context**, so a `dynamic`
+    left operand is unwrapped first — see :func:`_in_string_context`. Measured:
+    `s in ("x")` over ``dynamic(["x"])`` is true in Kusto and crashed here.
+
+    **Not** for the subquery form. The guard renders the whole test twice, and
+    DuckDB flattens `IN (subquery)` into a semi-join whose key is computed for
+    every row — so the unreached branch's ``json_type()`` ran anyway and
+    `State in~ (…)` died on `Malformed JSON … "PENNSYLVANIA"`. Coercing only
+    the left operand instead would keep one subquery but break the typed cases
+    the guard exists to protect (`ts in (T)` must still compare datetimes), so
+    the subquery form keeps today's behaviour and the residue is recorded.
+    """
+    string_context = node.subquery is None and (
+        node.case_insensitive
+        or any(_is_string_expr(i) or _is_dynamic(i) for i in node.items)
+    )
+    if string_context:
+        return _in_string_context(
+            ((node.value, render_expr(node.value)),),
+            lambda sqls: _render_in_list(node, sqls[0]),
+        )
+    return _render_in_list(node, render_expr(node.value))
+
+
+def _render_in_list(node: ir.InList, value: str) -> str:
     if node.subquery is not None:
         # KQL tests against the subquery's **first column** and ignores the
         # rest — measured: `x in (T)` where T is `(k, v)` matches on `k`, and a
@@ -1525,9 +1572,19 @@ def render_has_list(node: ir.HasList) -> str:
     Nulls follow `has`: a null left operand makes both **false** (measured), so
     the result is coalesced rather than left as SQL's NULL.
     """
+    if node.subquery is not None:
+        # See render_in_list: guarding around a subquery duplicates it and
+        # defeats the guard, because DuckDB computes the join key eagerly.
+        return _render_has_list(node, render_expr(node.value))
+    return _in_string_context(
+        ((node.value, render_expr(node.value)),),
+        lambda sqls: _render_has_list(node, sqls[0]),
+    )
+
+
+def _render_has_list(node: ir.HasList, value: str) -> str:
     from .functions import term_match_sql
 
-    value = render_expr(node.value)
     joiner = " AND " if node.require_all else " OR "
 
     if node.subquery is not None:
@@ -1588,6 +1645,146 @@ def _is_dynamic(node: ir.Expr) -> bool:
     if isinstance(node, ir.FunctionCall):
         return node.name.lower() in ("parse_json", "todynamic", "pack_array")
     return False
+
+
+#: Binary operators whose operands are **always** strings in KQL — the emulator
+#: refuses `long_col contains "1"` (SEM0709) and `dt =~ "x"` (SEM0065). A
+#: `dynamic` reaching one of these is coerced to its string form, so these are
+#: the operators where an unwrap is unconditionally right.
+_STRING_OPERATORS = frozenset(
+    {"=~", "!~", "matches regex"}
+    | {
+        f"{neg}{op}{cs}"
+        for op in ("contains", "has", "startswith", "endswith")
+        for neg in ("", "!")
+        for cs in ("", "_cs")
+    }
+)
+
+#: Functions whose result is a string, for deciding whether `==` is a string
+#: comparison. Deliberately short: over-claiming here would stringify an
+#: equality that should stay typed, which is the regression `datetime_col ==
+#: "2020-01-01"` would suffer (Kusto coerces the *literal* to datetime there,
+#: and so does DuckDB today).
+_STRING_RETURNING = frozenset(
+    {"tostring", "strcat", "strcat_delim", "strcat_array", "tolower", "toupper",
+     "substring", "replace_string", "trim", "trim_start", "trim_end",
+     "format_datetime", "format_timespan", "strrep", "reverse"}
+)
+
+
+def _is_string_expr(node: ir.Expr) -> bool:
+    if isinstance(node, (ir.Literal, ir.Parameter)):
+        return node.kind == "string"
+    if isinstance(node, ir.FunctionCall):
+        return node.name.lower() in _STRING_RETURNING
+    return False
+
+
+def _is_string_context(node: ir.BinaryOp) -> bool:
+    """Whether *node*'s operands are compared **as strings**.
+
+    Two cases. The `contains`/`has`/`startswith` family always is. Equality is
+    polymorphic — measured, `datetime_col == "2020-01-01"` coerces the literal
+    to a datetime and answers true — so it counts only when the other side is
+    visibly a string, which is when a `dynamic` on this side must be unwrapped.
+    """
+    if node.op in _STRING_OPERATORS:
+        return True
+    if node.op in ("==", "!=", "<>"):
+        return _is_string_expr(node.left) or _is_string_expr(node.right)
+    return False
+
+
+def _may_be_dynamic(node: ir.Expr) -> bool:
+    """Whether *node* could turn out to be a `dynamic` at run time.
+
+    A bare column: the schema carries names, not types, so `mv-expand`'s output
+    is indistinguishable here from a `string` column. Everything else — a
+    literal, a bound parameter, a call with a known mapping — is decided
+    statically by :func:`_is_dynamic_expr` and needs no run-time guard.
+    """
+    return isinstance(node, ir.ColumnRef)
+
+
+def _in_string_context(
+    operands: Sequence[tuple[ir.Expr, str]],
+    build: Callable[[Sequence[str]], str],
+    index: int = 0,
+) -> str:
+    """Render ``build`` with each operand seen as KQL sees it in a string context.
+
+    KQL coerces a `dynamic` to its **unwrapped** text before any string
+    operator, so `s == "x"` over `dynamic(["x"])` is true and ``k contains s``
+    finds `x`, not `"x"`. Rendering the comparison against the raw JSON instead
+    is wrong in two directions at once: `s == "x"` crashed (DuckDB casts the
+    literal to JSON, and `x` is not JSON) while `s startswith "x"` quietly
+    answered **false**, the quote getting in the way.
+
+    A column's type is unknown here, so an unwrap cannot simply be emitted: a
+    `datetime` column compared to a string must keep comparing as a datetime.
+    The discrimination is therefore left to DuckDB, which does know — one
+    ``typeof(...) = 'JSON'`` guard per unresolved operand, with the whole
+    operator rendered on each side of it. Only the taken branch evaluates, so
+    the JSON cast that used to crash is never reached; and a branch that cannot
+    even *bind* keeps its refusal, which is how `long_col contains "1"` stays
+    an error rather than becoming a string match Kusto rejects.
+    """
+    if index == len(operands):
+        return build([sql for _, sql in operands])
+
+    expr, sql = operands[index]
+    if _is_dynamic_expr(expr):
+        # Statically a dynamic: unwrap outright, no branch needed.
+        resolved = list(operands)
+        resolved[index] = (expr, _unwrap_json_scalar(sql))
+        return _in_string_context(resolved, build, index + 1)
+    if not _may_be_dynamic(expr):
+        return _in_string_context(operands, build, index + 1)
+
+    unwrapped = list(operands)
+    unwrapped[index] = (expr, _unwrap_json_scalar(sql))
+    return (
+        f"CASE WHEN typeof({sql}) = 'JSON' "
+        f"THEN {_in_string_context(unwrapped, build, index + 1)} "
+        f"ELSE {_in_string_context(operands, build, index + 1)} END"
+    )
+
+
+#: Function name -> the argument positions KQL reads as **strings**, for the
+#: functions the emulator *accepts* over a `dynamic`. It refuses several
+#: neighbours — `countof`, `extract`, `replace_string`, `trim`, `url_encode`
+#: all answer SEM02xx — so this is an allow-list of measured behaviour rather
+#: than a guess at which functions "look stringy".
+#:
+#: Unlike the operators, these need no ``typeof`` branch around the whole call:
+#: the argument is a string either way, so routing it through
+#: :func:`render_kql_tostring` — which already dispatches on `typeof` — is
+#: exactly right, and leaves a `string` column rendering as itself.
+_STRING_ARG_POSITIONS: dict[str, tuple[int, ...]] = {
+    "strlen": (0,),
+    "toupper": (0,),
+    "tolower": (0,),
+    "substring": (0,),
+    "split": (0,),
+    "indexof": (0, 1),
+    # `isempty`/`isnotempty` ask whether the *string form* is empty, so a
+    # dynamic goes through the same unwrap: measured, `isempty(dynamic(''))` is
+    # true while `isempty(dynamic([]))` is false — the JSON text `[]` is not
+    # empty, and the difference only appears once the quoting is gone.
+    "isempty": (0,),
+    "isnotempty": (0,),
+}
+
+
+def _render_arg(name: str, index: int, node: ir.Expr) -> str:
+    """Render one function argument, as a string where KQL reads one."""
+    positions = _STRING_ARG_POSITIONS.get(name.lower())
+    if positions and index in positions and (
+        _is_dynamic_expr(node) or _may_be_dynamic(node)
+    ):
+        return render_kql_tostring(node)
+    return render_expr(node)
 
 
 def render_range(source: ir.RangeSource) -> str:
@@ -1697,7 +1894,7 @@ def _json_path_key(name: str) -> str:
     return f'"{escaped}"'
 
 
-def render_mv_expand(op: ir.MvExpand, prev: str) -> str:
+def render_mv_expand(op: ir.MvExpand, prev: str, cols: list[str] | None = None) -> str:
     """``mv-expand col`` — one output row per element.
 
     Three shapes, all measured on the emulator:
@@ -1707,9 +1904,27 @@ def render_mv_expand(op: ir.MvExpand, prev: str) -> str:
       ``{"a":1,"b":2}`` becomes two rows, not one;
     * a **null** yields one row carrying null, while an **empty array** yields
       *no* rows at all.
+
+    The **column shape** follows `extend`'s rule, which is not what the operator
+    looks like it does. Measured on ``datatable(id, a, b)``:
+
+        mv-expand a       -> id, a, b     the expansion replaces `a` in place
+        mv-expand x = a   -> id, a, b, x  a NEW column; `a` keeps the whole array
+        mv-expand b = a   -> id, a, b     `b` is replaced in place, `a` kept
+
+    So the alias names an *output* column that replaces a same-named input and
+    is appended otherwise — the source column only disappears when it happens to
+    be the target. Rendering as ``* EXCLUDE (a), UNNEST(...) AS a`` got both
+    halves wrong: it moved the expanded column to the end (column order is
+    user-visible, R1) and it dropped `a` under an alias. Writing the list out
+    needs the incoming columns; without them the ``EXCLUDE`` form is kept and
+    the position is the residual divergence, exactly as for `extend`.
     """
+    from ..schema import disambiguate, mv_expand_output_columns
+
     col = quote_ident(op.column)
-    out = quote_ident(op.name or op.column)
+    name = op.name or op.column
+    out = quote_ident(name)
     expanded = (
         f"CAST(CASE json_type({col}) "
         f"WHEN 'ARRAY' THEN json_extract({col}, '$[*]') "
@@ -1717,8 +1932,22 @@ def render_mv_expand(op: ir.MvExpand, prev: str) -> str:
         f"k -> json_object(k, json_extract({col}, '$.\"' || k || '\"'))) "
         f"ELSE json_array({col}) END AS JSON[])"
     )
-    select = f"* EXCLUDE ({col}), UNNEST({expanded}) AS {out}"
-    if op.item_index:
+    unnested = f"UNNEST({expanded}) AS {out}"
+
+    if cols is None:
+        select = [f"* EXCLUDE ({col})", unnested] if name == op.column else ["*", unnested]
+        index_name = op.item_index
+    else:
+        select = [unnested if c == name else quote_ident(c) for c in cols]
+        if name not in cols:
+            select.append(unnested)
+        index_name = (
+            disambiguate(op.item_index, mv_expand_output_columns(op, cols)[:-1])
+            if op.item_index
+            else None
+        )
+
+    if index_name:
         # The index list must be exactly as long as the expanded list, or the
         # two UNNESTs fall out of step and the shorter one pads with nulls.
         length = (
@@ -1727,11 +1956,11 @@ def render_mv_expand(op: ir.MvExpand, prev: str) -> str:
             f"WHEN 'OBJECT' THEN CAST(json_array_length(json_keys({col})) AS BIGINT) "
             f"ELSE CAST(1 AS BIGINT) END"
         )
-        select += (
-            f", UNNEST(generate_series(CAST(0 AS BIGINT), "
-            f"greatest({length}, CAST(1 AS BIGINT)) - 1)) AS {quote_ident(op.item_index)}"
+        select.append(
+            f"UNNEST(generate_series(CAST(0 AS BIGINT), "
+            f"greatest({length}, CAST(1 AS BIGINT)) - 1)) AS {quote_ident(index_name)}"
         )
-    return f"SELECT {select} FROM {prev}"
+    return f"SELECT {', '.join(select)} FROM {prev}"
 
 
 def render_kql_tostring(node: ir.Expr) -> str:
@@ -1742,13 +1971,23 @@ def render_kql_tostring(node: ir.Expr) -> str:
     * a **datetime** is ``2020-01-01T00:00:00.0000000Z`` — ISO 8601 with seven
       fractional digits and a ``Z``, not ``2020-01-01 00:00:00``;
     * a **bool** is ``True``/``False`` (.NET capitalisation), not ``true``;
-    * a **dynamic string** is the string itself, not its quoted JSON form.
+    * a **dynamic string** is the string itself, not its quoted JSON form, and
+      a **dynamic null** is the empty string — measured,
+      ``isempty(tostring(dynamic(null)))`` is true and ``isnull`` is false.
 
     This matters beyond formatting: ``hash_md5()`` hashes the string form, so
-    the wrong spelling produces a wrong digest with no error at all.
+    the wrong spelling produces a wrong digest with no error at all. And it is
+    where `mv-expand` lands: every expanded element is a dynamic, so
+    ``strlen(tostring(s))`` answered **3** for ``'x'`` where Kusto says 1.
+
+    The dynamic case is decided at **runtime**, by `typeof`, not statically. A
+    bare column carries no type here — which is why the static check missed
+    exactly the case that matters, an mv-expanded column — and DuckDB does know
+    the type at execution. The guard also keeps a genuine VARCHAR holding the
+    text ``"q"`` intact rather than unwrapping it to ``q``.
     """
     if _is_dynamic_expr(node):
-        return f"json_extract_string({render_expr(node)}, '$')"
+        return _unwrap_json_scalar(render_expr(node))
 
     rendered = render_expr(node)
     if _is_datetime_expr(node):
@@ -1757,7 +1996,36 @@ def render_kql_tostring(node: ir.Expr) -> str:
         return f"(strftime({rendered}, '%Y-%m-%dT%H:%M:%S.%f') || '0Z')"
     if _is_bool_expr(node):
         return f"CASE WHEN {rendered} THEN 'True' ELSE 'False' END"
-    return f"CAST({rendered} AS VARCHAR)"
+    return (
+        f"CASE WHEN typeof({rendered}) = 'JSON' "
+        f"THEN {_unwrap_json_scalar(rendered)} "
+        f"ELSE CAST({rendered} AS VARCHAR) END"
+    )
+
+
+def _unwrap_json_scalar(rendered: str) -> str:
+    """A `dynamic` as KQL spells it: the value, not its JSON encoding.
+
+    Measured against the emulator, `strlen` included so it is the value and not
+    the display being pinned:
+
+        tostring(dynamic('x'))      -> 'x'        (1, not 3)
+        tostring(dynamic(null))     -> ''         (0, and isnull is FALSE)
+        tostring(dynamic(1))        -> '1'
+        tostring(dynamic([1,2]))    -> '[1,2]'
+        tostring(dynamic({'a':1}))  -> '{"a":1}'
+
+    So only a JSON *string* unwraps and a JSON *null* becomes empty; a
+    composite keeps its JSON text, which DuckDB already spells the same way.
+
+    DuckDB's ``->> '$'`` happens to be exactly that rule already — it unquotes a
+    string and leaves every other form as its JSON text — with one hole: it
+    returns SQL NULL for a JSON null, where KQL returns the empty string. So the
+    whole conversion is one ``coalesce``. It is worth having as its own function
+    anyway: it is emitted twice per guarded operand, and the reason `''` is
+    right rather than null is the surprising part.
+    """
+    return f"coalesce({rendered} ->> '$', '')"
 
 
 #: Functions whose result is a datetime, for static type reasoning.
@@ -1827,6 +2095,40 @@ def _render_case(node: ir.FunctionCall) -> str:
     return f"CASE {' '.join(parts)} ELSE {args[-1]} END"
 
 
+def _render_strcat(node: ir.FunctionCall) -> str:
+    """``strcat(a, b, …)`` — every argument in **KQL's** string form.
+
+    Not DuckDB's `concat` over the raw values. Measured,
+    `strcat('a', 1, true, dynamic([1,2]))` is `a1True[1,2]`: the bool is .NET's
+    `True`, a datetime is `2020-01-02T00:00:00.0000000Z`, and a dynamic string
+    is unquoted. Concatenating the raw values got the last two wrong — silently,
+    since the answer is still a plausible string.
+
+    A **null** argument contributes the empty string, measured: `strcat('a',
+    dynamic(null), 'b')` is `ab` with length 2.
+    """
+    return f"concat({', '.join(_stringified(a) for a in node.args)})"
+
+
+def _render_strcat_delim(node: ir.FunctionCall) -> str:
+    """``strcat_delim(delim, a, b, …)`` — as `strcat`, joined by *delim*.
+
+    The `coalesce` is load-bearing: DuckDB's `concat_ws` **skips** a NULL
+    argument, so `strcat_delim('-', 'a', dynamic(null), 'b')` would come back
+    as `a-b` where Kusto measures `a--b` — the empty value keeps its slot.
+    """
+    if not node.args:
+        raise KqlUnsupportedError("strcat_delim", hint="expects a delimiter")
+    delim, *rest = node.args
+    joined = ", ".join(_stringified(a) for a in rest)
+    return f"concat_ws({_stringified(delim)}, {joined})"
+
+
+def _stringified(node: ir.Expr) -> str:
+    """One argument as KQL spells it, with null as the empty string."""
+    return f"coalesce({render_kql_tostring(node)}, '')"
+
+
 def _render_substring(node: ir.FunctionCall) -> str:
     """``substring(source, start [, length])`` — 0-based, clamping, R11.
 
@@ -1851,7 +2153,7 @@ def _render_substring(node: ir.FunctionCall) -> str:
         raise KqlUnsupportedError(
             "substring", hint="expects (source, start) or (source, start, length)"
         )
-    source = render_expr(node.args[0])
+    source = _render_arg("substring", 0, node.args[0])
     start = render_expr(node.args[1])
     # `start` is repeated, so a volatile expression would be evaluated twice.
     # Every KQL function that could be volatile here (`rand`) returns a real,
@@ -2026,6 +2328,8 @@ def _render_round(node: ir.FunctionCall) -> str:
 
 _SPECIAL_FORMS = {
     "case": _render_case,
+    "strcat": _render_strcat,
+    "strcat_delim": _render_strcat_delim,
     "substring": _render_substring,
     "round": _render_round,
     "countof": _render_countof,

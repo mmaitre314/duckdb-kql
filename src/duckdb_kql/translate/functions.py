@@ -117,10 +117,10 @@ SCALAR_FUNCTIONS: dict[str, FunctionSpec] = {
     s.name: s
     for s in [
         # --- strings (R11: character-oriented, not byte-oriented) ----------
-        _f("strlen", "native", "length({0})", (1,), ("R11",)),
-        _f("toupper", "native", "upper({0})", (1,)),
-        _f("tolower", "native", "lower({0})", (1,)),
-        _f("strcat", "template", "concat({})", (), (), "variadic"),
+        _f("strlen", "native", "length({0})", (1,), ("R11", "R17")),
+        _f("toupper", "native", "upper({0})", (1,), ("R17",)),
+        _f("tolower", "native", "lower({0})", (1,), ("R17",)),
+        _f("strcat", "template", "concat({})", (), ("R17",), "variadic"),
         _f("trim_start", "native", "regexp_replace({1}, '^' || {0}, '')", (2,)),
         _f("strrep", "native", "repeat({0}, {1})", (2,)),
         _f("reverse", "native", "reverse({0})", (1,)),
@@ -135,11 +135,11 @@ SCALAR_FUNCTIONS: dict[str, FunctionSpec] = {
         # the end but pairs the length differently, so the offset is resolved
         # here and only a non-negative index ever reaches `substring`.
         # Rendered by `_render_substring`; this row carries the arities.
-        _f("substring", "template", "", (2, 3), ("R11",)),
-        _f("split", "native", "str_split({0}, {1})", (2,)),
+        _f("substring", "template", "", (2, 3), ("R11", "R17")),
+        _f("split", "native", "str_split({0}, {1})", (2,), ("R17",)),
         _f("replace_string", "native", "replace({0}, {1}, {2})", (3,)),
-        _f("indexof", "template", "(position({1} IN {0}) - 1)", (2,), ("R11",)),
-        _f("strcat_delim", "template", "concat_ws({})", (), (), "variadic"),
+        _f("indexof", "template", "(position({1} IN {0}) - 1)", (2,), ("R11", "R17")),
+        _f("strcat_delim", "template", "concat_ws({})", (), ("R17",), "variadic"),
         _f("replace_regex", "template", "regexp_replace({0}, {1}, {2}, 'g')", (3,)),
         _f("replace", "native", "replace({0}, {1}, {2})", (3,),
            note="Azure Monitor spells replace_string as replace"),
@@ -168,9 +168,10 @@ SCALAR_FUNCTIONS: dict[str, FunctionSpec] = {
         # isempty is null OR empty string — NOT the same as isnull. The CAST is
         # load-bearing: these accept any type, and comparing a DOUBLE column to
         # '' makes DuckDB raise a conversion error instead of answering false.
-        _f("isempty", "template", "({0} IS NULL OR CAST({0} AS VARCHAR) = '')", (1,), ("R4",)),
+        _f("isempty", "template",
+           "({0} IS NULL OR CAST({0} AS VARCHAR) = '')", (1,), ("R4", "R17")),
         _f("isnotempty", "template",
-           "({0} IS NOT NULL AND CAST({0} AS VARCHAR) <> '')", (1,), ("R4",)),
+           "({0} IS NOT NULL AND CAST({0} AS VARCHAR) <> '')", (1,), ("R4", "R17")),
         _f("coalesce", "template", "coalesce({})", (), ("R4",), "variadic"),
         _f("isnan", "native", "isnan({0})", (1,)),
         _f("isfinite", "native", "isfinite({0})", (1,)),
@@ -192,7 +193,7 @@ SCALAR_FUNCTIONS: dict[str, FunctionSpec] = {
            "TRY_CAST({0} AS BIGINT))", (1,), ("R1",)),
         _f("todouble", "template", "TRY_CAST({0} AS DOUBLE)", (1,), ("R1",)),
         _f("toreal", "template", "TRY_CAST({0} AS DOUBLE)", (1,), ("R1",)),
-        _f("tostring", "template", "CAST({0} AS VARCHAR)", (1,), ("R1",)),
+        _f("tostring", "template", "CAST({0} AS VARCHAR)", (1,), ("R1", "R17")),
         _f("tobool", "template", "TRY_CAST({0} AS BOOLEAN)", (1,), ("R1",)),
         _f("toboolean", "template", "TRY_CAST({0} AS BOOLEAN)", (1,), ("R1",)),
         _f("todatetime", "template", _TODATETIME, (1,), ("R1", "R8"),
@@ -497,43 +498,43 @@ BINARY_OPERATORS: dict[str, BinarySpec] = {
         # silently lose every null row. Measured on the emulator, per operator.
         # Ordering comparisons above (`<`, `>`, `<=`, `>=`) are NOT total —
         # they stay null in KQL too, which is why they carry no null_result.
-        BinarySpec("==", "({0} = {1})", ("R2", "R4"), "case-SENSITIVE",
+        BinarySpec("==", "({0} = {1})", ("R2", "R4", "R17"), "case-SENSITIVE",
                    null_result="FALSE"),
-        BinarySpec("!=", "({0} <> {1})", ("R2", "R4"), null_result="TRUE"),
-        BinarySpec("<>", "({0} <> {1})", ("R2", "R4"), null_result="TRUE"),
-        BinarySpec("=~", "(lower({0}) = lower({1}))", ("R2", "R4"),
+        BinarySpec("!=", "({0} <> {1})", ("R2", "R4", "R17"), null_result="TRUE"),
+        BinarySpec("<>", "({0} <> {1})", ("R2", "R4", "R17"), null_result="TRUE"),
+        BinarySpec("=~", "(lower({0}) = lower({1}))", ("R2", "R4", "R17"),
                    "case-INsensitive", null_result="FALSE"),
-        BinarySpec("!~", "(lower({0}) <> lower({1}))", ("R2", "R4"),
+        BinarySpec("!~", "(lower({0}) <> lower({1}))", ("R2", "R4", "R17"),
                    null_result="TRUE"),
         # R3 — contains is SUBSTRING, case-insensitive by default
-        BinarySpec("contains", _CONTAINS, ("R3", "R4"), null_result="FALSE"),
-        BinarySpec("!contains", f"NOT {_CONTAINS}", ("R3", "R4"), null_result="TRUE"),
-        BinarySpec("contains_cs", _CONTAINS_CS, ("R3", "R4"), null_result="FALSE"),
-        BinarySpec("!contains_cs", f"NOT {_CONTAINS_CS}", ("R3", "R4"),
+        BinarySpec("contains", _CONTAINS, ("R3", "R4", "R17"), null_result="FALSE"),
+        BinarySpec("!contains", f"NOT {_CONTAINS}", ("R3", "R4", "R17"), null_result="TRUE"),
+        BinarySpec("contains_cs", _CONTAINS_CS, ("R3", "R4", "R17"), null_result="FALSE"),
+        BinarySpec("!contains_cs", f"NOT {_CONTAINS_CS}", ("R3", "R4", "R17"),
                    null_result="TRUE"),
         # R3 — has is TERM-based, not substring
-        BinarySpec("has", _HAS, ("R3", "R4"), "whole-term match", null_result="FALSE"),
-        BinarySpec("!has", f"NOT {_HAS}", ("R3", "R4"), null_result="TRUE"),
-        BinarySpec("has_cs", _HAS_CS, ("R3", "R4"), null_result="FALSE"),
-        BinarySpec("!has_cs", f"NOT {_HAS_CS}", ("R3", "R4"), null_result="TRUE"),
+        BinarySpec("has", _HAS, ("R3", "R4", "R17"), "whole-term match", null_result="FALSE"),
+        BinarySpec("!has", f"NOT {_HAS}", ("R3", "R4", "R17"), null_result="TRUE"),
+        BinarySpec("has_cs", _HAS_CS, ("R3", "R4", "R17"), null_result="FALSE"),
+        BinarySpec("!has_cs", f"NOT {_HAS_CS}", ("R3", "R4", "R17"), null_result="TRUE"),
         # R3 — prefix / suffix, case-insensitive by default
-        BinarySpec("startswith", _STARTSWITH, ("R3", "R4"), null_result="FALSE"),
-        BinarySpec("!startswith", f"NOT {_STARTSWITH}", ("R3", "R4"),
+        BinarySpec("startswith", _STARTSWITH, ("R3", "R4", "R17"), null_result="FALSE"),
+        BinarySpec("!startswith", f"NOT {_STARTSWITH}", ("R3", "R4", "R17"),
                    null_result="TRUE"),
-        BinarySpec("startswith_cs", "starts_with({0}, {1})", ("R3", "R4"),
+        BinarySpec("startswith_cs", "starts_with({0}, {1})", ("R3", "R4", "R17"),
                    null_result="FALSE"),
-        BinarySpec("endswith", _ENDSWITH, ("R3", "R4"), null_result="FALSE"),
-        BinarySpec("!endswith", f"NOT {_ENDSWITH}", ("R3", "R4"), null_result="TRUE"),
-        BinarySpec("endswith_cs", "ends_with({0}, {1})", ("R3", "R4"),
+        BinarySpec("endswith", _ENDSWITH, ("R3", "R4", "R17"), null_result="FALSE"),
+        BinarySpec("!endswith", f"NOT {_ENDSWITH}", ("R3", "R4", "R17"), null_result="TRUE"),
+        BinarySpec("endswith_cs", "ends_with({0}, {1})", ("R3", "R4", "R17"),
                    null_result="FALSE"),
-        BinarySpec("!endswith_cs", "NOT ends_with({0}, {1})", ("R3", "R4"),
+        BinarySpec("!endswith_cs", "NOT ends_with({0}, {1})", ("R3", "R4", "R17"),
                    null_result="TRUE"),
-        BinarySpec("!startswith_cs", "NOT starts_with({0}, {1})", ("R3", "R4"),
+        BinarySpec("!startswith_cs", "NOT starts_with({0}, {1})", ("R3", "R4", "R17"),
                    null_result="TRUE"),
         # `matches regex` is a FULL-string match in Azure Monitor transformations
         # but a partial match in Log Analytics; KQL proper is partial, which is
         # what regexp_matches does.
-        BinarySpec("matches regex", "regexp_matches({0}, {1})", ("R3", "R4"),
+        BinarySpec("matches regex", "regexp_matches({0}, {1})", ("R3", "R4", "R17"),
                    null_result="FALSE"),
     ]
 }

@@ -20,7 +20,8 @@ from .errors import KqlSchemaError
 
 __all__ = [
     "Schema", "output_columns", "join_output_columns", "lookup_output_columns",
-    "union_output_columns", "match_wildcard", "surviving_branches",
+    "union_output_columns", "mv_expand_output_columns", "match_wildcard",
+    "surviving_branches",
     "disambiguate",
 ]
 
@@ -138,9 +139,7 @@ def _operator_columns(
         mapping = dict(op.renames)
         return [mapping.get(c, c) for c in cols]
     if isinstance(op, ir.MvExpand):
-        return [op.name or c if c == op.column else c for c in cols] + (
-            [op.item_index] if op.item_index else []
-        )
+        return mv_expand_output_columns(op, cols)
     if isinstance(op, ir.GetSchema):
         return ["ColumnName", "ColumnOrdinal", "DataType", "ColumnType"]
     if isinstance(op, ir.Count):
@@ -269,6 +268,27 @@ def lookup_output_columns(
             continue
         out.append(disambiguate(name, taken))
         taken.append(out[-1])
+    return out
+
+
+def mv_expand_output_columns(op: ir.MvExpand, cols: list[str]) -> list[str]:
+    """``mv-expand``'s output columns — `extend`'s rule, not a rename.
+
+    Measured on ``datatable(id, a, b)``: `mv-expand a` answers `id, a, b`,
+    `mv-expand x = a` answers `id, a, b, x` (with `a` still holding the whole
+    array), and `mv-expand b = a` answers `id, a, b`. So the alias names an
+    *output* column that replaces a same-named input in place and is appended
+    otherwise; the source column survives unless it is that target.
+
+    ``with_itemindex`` always lands last, and collides like a join key rather
+    than like DuckDB's own de-duplication: measured, `with_itemindex=b` over a
+    table that already has `b` answers **b1**, where two columns both called
+    `b` would have left DuckDB naming the second `b_1`.
+    """
+    name = op.name or op.column
+    out = list(cols) if name in cols else [*cols, name]
+    if op.item_index:
+        out.append(disambiguate(op.item_index, out))
     return out
 
 
