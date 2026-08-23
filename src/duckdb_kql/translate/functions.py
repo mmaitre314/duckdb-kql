@@ -323,25 +323,6 @@ SCALAR_FUNCTIONS: dict[str, FunctionSpec] = {
         _f("hourofday", "native", "hour({0})", (1,), ("R8",)),
         _f("weekofyear", "native", "weekofyear({0})", (1,), ("R8",)),
         _f("week_of_year", "native", "weekofyear({0})", (1,), ("R8",)),
-        # KQL weeks start on SUNDAY; DuckDB's date_trunc('week') starts Monday,
-        # so using it would shift the boundary by a day for every Sunday.
-        _f("startofweek", "template",
-           "(date_trunc('day', {0}) - to_days(CAST(dayofweek({0}) AS INTEGER)))",
-           (1, 2), ("R8",)),
-        # KQL's end-of-* is the last representable instant *inside* the period,
-        # not the start of the next one.
-        _f("endofday", "template",
-           "(date_trunc('day', {0}) + INTERVAL 1 DAY - INTERVAL 1 MICROSECOND)",
-           (1, 2), ("R8",)),
-        _f("endofmonth", "template",
-           "(date_trunc('month', {0}) + INTERVAL 1 MONTH - INTERVAL 1 MICROSECOND)",
-           (1, 2), ("R8",)),
-        _f("endofyear", "template",
-           "(date_trunc('year', {0}) + INTERVAL 1 YEAR - INTERVAL 1 MICROSECOND)",
-           (1, 2), ("R8",)),
-        _f("endofweek", "template",
-           "(date_trunc('day', {0}) - to_days(CAST(dayofweek({0}) AS INTEGER)) "
-           "+ INTERVAL 7 DAY - INTERVAL 1 MICROSECOND)", (1, 2), ("R8",)),
         _f("make_datetime", "template", "", (3, 6), ("R8",), "variadic:make_datetime"),
         _f("make_timespan", "template", "", (2, 3), ("R8",), "variadic:make_timespan"),
         # --- conditional -----------------------------------------------------
