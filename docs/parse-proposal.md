@@ -260,31 +260,85 @@ then each column is `CASE WHEN _ok THEN <value> ELSE <not-matched> END`, and
 `parse-where` is `WHERE _ok`. `relaxed` skips `_ok` entirely. A pattern with no
 typed columns reduces `_ok` to the `regexp_matches` alone.
 
-## 4. Risk: RE2 is not .NET
+## 4. Phase 4 — `kind=regex`, and what it is actually exposed to
 
-The one place this could be quietly wrong. `kind=regex` splices the user's
-regex fragments into a pattern that DuckDB runs on **RE2**, while Kusto runs
-.NET's backtracking engine. They agree on the common cases and differ on
-others; RE2 also refuses constructs .NET accepts — backreferences and
-lookaround, most notably.
+Re-measured after phases 1–3 shipped. **The headline risk turned out to be much
+smaller than this section originally claimed**, and three smaller ones turned
+out to be real.
 
-One measured case already looks like an engine difference rather than a rule:
+### 4.1 The RE2-versus-.NET fear was mostly unfounded
+
+`kind=regex` splices the user's regex into a pattern DuckDB runs on **RE2**
+while Kusto runs .NET's backtracking engine. That sounded like an open-ended
+silent-wrong-answer surface. Two measurements bound it:
+
+**Kusto's own validator refuses lookaround** — every form, with SEM0476
+*"Invalid regex pattern"*:
 
 ```
-datatable(s:string)['ab12cd34'] | parse kind=regex s with "[a-z]+" v "[a-z]+" w
-    Kusto:  v = '12c',  w = '34'
+parse kind=regex s with "(?=a)" v      REJECTED      (?!a) and (?<=a) likewise
 ```
 
-which is what a *greedy* `v` gives, consistent with §2.2 — but it is the kind of
-answer that depends on how the engine resolves competing quantifiers, and RE2
-resolving it differently would be a silent wrong answer.
+That is precisely RE2's principal gap, so the dialect Kusto accepts here is
+already close to the dialect DuckDB can run. Everything else tried is common to
+both: named groups, `(?:…)`, counted repetition, POSIX classes, `\p{L}`,
+alternation, inline flags.
 
-The honest response is to **not treat `kind=regex` as done when it translates**.
-Either ship `simple` first and gate `regex` behind its own corpus verification,
-or ship both and put the regex cases through a differential sweep the way R17's
-term matching was. A lookaround or backreference in a literal must be refused
-outright, since RE2 will reject the pattern anyway — better a `KqlUnsupportedError`
-naming the construct than a raw DuckDB binder error.
+**And the hardest pattern in the corpus agrees, field for field.**
+`parse-operator-03` — user `(.*?)` groups, `\s*\d+`, an optional `(previous)?`,
+and greedy captures throughout — hand-translated to `regexp_extract` returns
+exactly what the emulator returns for all five columns. That is the case most
+likely to expose a backtracking difference, and it does not.
+
+The residual risk is therefore ordinary rather than structural, and the
+differential sweep in §5 is how it stays that way.
+
+### 4.2 Regex mode is a second capture policy, not a flag
+
+Three rules differ from `kind=simple`, and only the first was known:
+
+| | `simple` | `regex` |
+|---|---|---|
+| literals | escaped | verbatim |
+| string column | `(.*?)` lazy | `(.*)` **greedy** |
+| typed column | shaped **only** before a `*` | shaped **always** |
+
+That last row is the new one. Measured, `"n=" n: long` *trailing*:
+
+```
+parse            s with "n=" n: long   over 'n=27 junk'  ->  null
+parse kind=regex s with "n=" n: long   over 'n=27 junk'  ->  27
+```
+
+and `flags=U` inverts the shapes too, not just the wildcards:
+
+```
+parse kind=regex flags=U s with "n=" n: long  over 'n=27 junk'  ->  2
+```
+
+So `_parse_capture` grows a mode branch rather than a parameter. A `*` is
+non-greedy in **both** modes — that one does not change.
+
+### 4.3 The group-neutralising scanner is the real work
+
+DuckDB's group-name list is **positional** (§3.1), so every capturing group in
+a user literal shifts the column mapping. Two of the six regex corpus patterns
+contain `(.*?)`, so this is needed on day one, not eventually.
+
+The scanner rewrites each capturing `(` to `(?:`, and has to respect: an
+escaped `\(`, a `[...]` character class (including `[]]` and `[^]]`), an
+existing `(?:` or `(?i)`, and `(?<name>` — which Kusto accepts and which must
+also become non-capturing, since a user group named the same as a column would
+otherwise collide. A prototype handling all five cases translates
+`parse-operator-03` correctly; it wants its own unit tests independent of
+`parse`.
+
+### 4.4 One construct to refuse
+
+**Backreferences.** Kusto accepts `(a)\1` (it parses, and answers no match);
+RE2 rejects the pattern outright — `Binder Error: invalid escape sequence: \1`.
+Left alone that surfaces as a raw DuckDB error, so phase 4 should detect `\1`–`\9`
+outside a character class and raise `KqlUnsupportedError` naming it.
 
 ## 5. Phases
 
@@ -305,13 +359,16 @@ parse-where kind=regex     2     (parse-where-operator-03, -04;  -04 uses flags)
 | ~~1~~ | **Done.** `kind=simple` (the default): segments, `*`, typed columns, the not-matched rule, the all-or-nothing rule, replace-in-place output columns | 3 of 11 |
 | ~~2~~ | **Done.** `parse-where` (`_ok` in a `WHERE`), and refusing `parse-where kind=relaxed` | +1 |
 | ~~3~~ | **Done.** `kind=relaxed` — which turned out to relax the *pattern* too, not only the atomicity: an anchored typed column captures lazily there | +1 |
-| 4 | `kind=regex` + `flags=i/s/U`, the capturing-group scanner, the differential sweep of §4 | **+6** |
+| 4 | `kind=regex` + `flags=i/s/U`: the second capture policy (§4.2), the capturing-group scanner (§4.3), the backreference refusal (§4.4), and a differential sweep | **+6** |
 | 5 | `parse-kv` | 0 today |
 
-**The awkward part of this plan is that the value is in the risky phase.**
-Phase 1 is the one that has to be right and is worth 3 cases; phase 4 carries
-all of §4's RE2-versus-.NET exposure and is worth 6. Phases 2 and 3 are a
-boolean and its absence.
+**The awkward part of this plan is that the value is in the riskiest phase.**
+Phase 1 is the one that has to be right and is worth 3 cases; phase 4 is worth
+6. Phases 2 and 3 are a boolean and its absence.
+
+Since §4 was re-measured that reads better than it did: phase 4's exposure is
+now three concrete, testable pieces of work rather than an open question about
+two regex engines.
 
 That is an argument for the split rather than against it — phases 1–3 are
 shippable on their own and leave `kind=regex` raising `KqlUnsupportedError`
