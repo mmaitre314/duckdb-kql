@@ -757,14 +757,47 @@ independently. `parse-where` is then exactly *matched **and** every conversion
 succeeded* — and `parse-where kind=relaxed` is refused, as Kusto refuses it
 (SEM0477).
 
-**A capture is lazy, except before a `*`.** `"a" v "c"` over `aXcYc` gives `X` —
-the first `c`, not the last — and `*` skips non-greedily too. The exception is
-the one position with nothing to stop the capture: a column immediately
-followed by a `*`. There a **typed** column matches its *type's shape*
-(`\s*[-+]?\d+` for an integer, and so on), which is why Kusto allows `*` after
-a typed column and refuses it after a **string** one (SEM0476) — we refuse it
-too. A *trailing* `*` is a no-op and makes the shape optional; a `*` in the
-middle does not.
+**`kind=simple` reaches the end of the input; `kind=regex` does not.** The
+pattern is anchored at end-of-text in `simple` and `relaxed`, which is only
+visible when it ends with a *literal* rather than a column:
+
+```
+'aXcYc'        parse s with "a" v "c"    ->  'XcY'   a lazy capture, forced long
+'abcbd'        parse s with "a" v "b"    ->  ''      no match at all
+'aXc' + \n     parse s with "a" v "c"    ->  ''      the newline is not consumed
+```
+
+The anchor is RE2's bare `$`, which means end of *text* — Python's and .NET's
+would match before that final newline and answer `'X'`. `kind=regex` has no
+anchor, and the same three inputs give `'XcY'`, `'bc'` and `'X'`.
+
+**A capture is lazy, except before a `*` — and in `kind=regex` it is greedy.**
+`"a" v "c"` over `aXcYc` gives `X` in simple mode, the first `c` and not the
+last, and `*` skips non-greedily too. The exception in simple mode is the one
+position with nothing to stop the capture: a column immediately followed by a
+`*`. There a **typed** column matches its *type's shape* (`\s*[-+]?\d+` for an
+integer, and so on), which is why Kusto allows `*` after a typed column and
+refuses it after a **string** one (SEM0476) — we refuse it too. A *trailing*
+`*` is a no-op and makes the shape optional; a `*` in the middle does not.
+
+**`kind=regex` is a different capture policy, not a flag on the same one.**
+Literals become the user's regex, string columns are greedy, and typed columns
+are shaped *everywhere* rather than only before a `*` — `"n=" n: long` over
+`n=27x` is 27 in regex mode and null in simple. The shapes themselves differ
+too: `bool` is `true`/`false` only here (`12` is null, where simple mode reads
+it as true) and `real` takes no leading dot (`.5` is null, where simple mode
+reads 0.5). `flags=i`, `s`, `m` and `U` become one inline `(?…)` prefix, which
+is how Kusto composes them as well — it reports a bad flag as `(?I)`. `U` has
+to be global: it inverts the `*` skips along with everything else.
+
+Two things a user's regex fragment cannot be passed through as written.
+`regexp_extract` maps its name list onto groups **by position**, so any
+capturing group in a fragment would shift every column after it; each one is
+rewritten to `(?:…)` by `translate.regexfrag`. And an **unbalanced**
+parenthesis is a literal to Kusto (`parse kind=regex s with ")" v` over `a)b`
+is `b`) where RE2 rejects the whole pattern, so it is escaped. Lookaround and
+backreferences are refused: RE2 has neither, and Kusto's own analysis refuses
+lookaround too (SEM0476).
 
 **The conversions are KQL's, not DuckDB's.** Three places where `TRY_CAST` is
 too generous, each one a silent wrong answer if taken:
@@ -783,11 +816,45 @@ argument (`tolong(1.5)` really is 2), and telling the cases apart needs column
 types. **Their divergence is unfixed and recorded**: `tolong('1.5')` answers 1
 here and null on a cluster.
 
-**Not implemented:** `kind=regex` (it splices user regex into a pattern RE2 runs
-where Kusto runs .NET), `flags=`, `: decimal` (DuckDB renders the scale —
-`1.000000000`, not `1`), a `datetime`/`timespan` column before a `*` (no
-measured shape), and `parse-kv`. Each refuses rather than guessing. See
+`todynamic` has a recorded residue of its own, found by the `parse` sweep and
+not yet fixed: KQL wraps text that is not JSON as a dynamic **string**, so
+`todynamic('abc')` is `'abc'` on a cluster and null here, and a `: dynamic`
+column in `parse` inherits that. `totimespan` had the mirror-image bug and *is*
+fixed — DuckDB's `INTERVAL` cast silently ignores trailing text, so
+`totimespan('00:01:00 junk')` answered one minute where a cluster answers null,
+and a shape test now guards it.
+
+**Not implemented:** `: decimal` (DuckDB renders the scale — `1.000000000`, not
+`1`), `flags=x` (RE2 has no ignore-pattern-whitespace mode), a
+`datetime`/`timespan` column before a `*` in simple mode (no measured shape), a
+temporal column at the **end** of a `kind=regex` pattern or under `flags=U`
+(see below), and `parse-kv`. Each refuses rather than guessing. See
 [`parse-proposal.md`](parse-proposal.md).
+
+**The temporal shapes have an edge.** `datetime` and `timespan` are the only
+declared types whose `kind=regex` capture is not a plain regex on the
+emulator's side. Two positions give it away, and both are refused rather than
+approximated:
+
+* at the very end of the pattern, a character in the **data** after the value
+  changes the answer — `'v=2020/01/01T00:00:00'` is null and
+  `'v=2020/01/01T00:00:00X'` is the datetime, which no shape can do;
+* under `flags=U`, where every other shape simply inverts, a temporal capture
+  stops answering at all.
+
+The refusal is **positional**, so one case slips past it: a fragment that can
+itself match the empty string — `"|"`, `"(x)?"` — leaves a temporal column
+effectively at the end of the pattern without being last in the source. There a
+cluster answers null and we answer a value; a fragment that must consume a
+character agrees. That is the only place a disagreement runs in this direction.
+
+Everywhere else the shapes hold across the differential sweep, and the residue
+runs the other way: this translator answers null where a cluster answers a
+value — a blank row rather than a wrong one. Two such are known and recorded
+rather than fixed: a trailing `datetime` column in `simple`/`relaxed` over text
+with trailing junk (Kusto parses a prefix; we take the whole capture and fail),
+and `: dynamic`, which is the `todynamic` gap noted above rather than a `parse`
+one.
 
 ---
 

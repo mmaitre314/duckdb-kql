@@ -104,8 +104,18 @@ _TODATETIME = (
 # A KQL timespan string is `[-][d.]hh:mm:ss[.fffffff]`. DuckDB's INTERVAL cast
 # handles `hh:mm:ss` but returns NULL for the leading day part, so `4.00:00:00`
 # silently became null. Split the days off and add them back.
+#
+# The shape test in front is not decoration. DuckDB's INTERVAL cast **ignores
+# trailing text** — measured, `TRY_CAST('00:01:00 junk' AS INTERVAL)` is one
+# minute and `TRY_CAST('00:01:00xyz' AS INTERVAL)` is too, where Kusto's
+# `totimespan` answers null for both. Without the test that is a silent wrong
+# answer rather than a missing one.
+_TIMESPAN_TEXT = (
+    "^\\s*-?[0-9]+(\\.[0-9]{{1,2}})?:[0-9]{{1,2}}(:[0-9]{{1,2}})?(\\.[0-9]+)?\\s*$"
+)
 _TOTIMESPAN = (
-    "CASE WHEN regexp_matches({0}, '^-?[0-9]+\\.[0-9]{{1,2}}:') THEN "
+    f"CASE WHEN NOT regexp_matches(CAST({{0}} AS VARCHAR), '{_TIMESPAN_TEXT}') THEN NULL "
+    "WHEN regexp_matches({0}, '^-?[0-9]+\\.[0-9]{{1,2}}:') THEN "
     "(CASE WHEN starts_with({0}, '-') THEN -1 ELSE 1 END) * "
     "(to_days(CAST(regexp_extract(ltrim({0}, '-'), '^([0-9]+)\\.', 1) AS INTEGER)) "
     "+ CAST(regexp_replace(ltrim({0}, '-'), '^[0-9]+\\.', '') AS INTERVAL)) "

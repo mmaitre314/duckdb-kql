@@ -1,17 +1,18 @@
 # Proposal — the `parse` family
 
-> **Status: phases 1–3 implemented** (`kind=simple`, `parse-where`,
-> `kind=relaxed`) — 5 of the 11 corpus cases, with the rules written up as
-> **R19** in `TRANSLATION.md` and `tests/test_parse.py` holding the
-> measurements. Phase 4 (`kind=regex`, worth the other 6) and phase 5
-> (`parse-kv`) are outstanding and refuse rather than guess. Every behavioural
+> **Status: phases 1–4 implemented** (`kind=simple`, `parse-where`,
+> `kind=relaxed`, `kind=regex` with `flags=i/s/m/U`) — all 11 corpus cases, with
+> the rules written up as **R19** in `TRANSLATION.md` and `tests/test_parse.py`
+> and `tests/test_regexfrag.py` holding the measurements. Phase 5 (`parse-kv`)
+> is outstanding and refuses rather than guesses, as do four narrow places
+> inside `kind=regex` (§4.5). Every behavioural
 > claim was measured on the pinned Kusto Emulator and the measurement is quoted
 > beside it; every structural claim is cited to
 > `microsoft/Kusto-Query-Language` at commit `12608cc`, read under the
 > attribution terms [`column-types-proposal.md`](column-types-proposal.md) §2.0
 > settles.
 >
-> **Four things this document got wrong**, all found by implementing it and all
+> **Six things this document got wrong**, all found by implementing it and all
 > now corrected in place:
 >
 > 1. **A capture is not always `.*?`.** Immediately before a `*` — the one
@@ -30,13 +31,38 @@
 > 4. **`: string` written explicitly** is the same column as a bare name and
 >    earns the same `*`-after-it refusal. Missing that produced 57 sweep
 >    failures in one run.
+> 5. **`kind=simple` anchors the pattern at end-of-text**, and phases 1–3
+>    shipped without it. `"a" v "c"` over `aXcYc` is `'XcY'` and not `'X'`,
+>    because the pattern has to reach the end; over `abcbd`, `"a" v "b"` does
+>    not match at all. §2.2 described the capture as lazy and stopped there,
+>    which is right about the quantifier and wrong about the answer. `relaxed`
+>    is anchored too; `kind=regex` is not.
+> 6. **The regex-mode shapes are not the simple-mode shapes.** §4.2 assumed one
+>    table read differently. Measured, `bool` in regex mode is `true`/`false`
+>    only where simple mode also takes an integer, and `real` takes no leading
+>    dot where simple mode does. Two tables.
 >
-> **A bug found in shipped code on the way.** `tolong('1.5')` answers **1** here
-> and **null** on a cluster; `toint`, `toreal`'s neighbours and `tobool('2')`
-> are the same family. `parse` can be exact because what it converts is always
-> *text*; `tolong` cannot, because it must also serve `tolong(1.5)` — which
-> really is 2 — and telling those apart needs
-> [column types](column-types-proposal.md). Recorded, not fixed.
+> **Three bugs found in shipped code on the way**, all by the phase-4 sweep:
+>
+> * **`totimespan` ignored trailing text.** DuckDB's `INTERVAL` cast does, so
+>   `totimespan('00:01:00 junk')` answered one minute where a cluster answers
+>   null. **Fixed** with a shape test.
+> * **Adjacent string literals were not concatenated.** KQL joins them the way
+>   C does — `print x = 'a' 'b'` is `ab` — and the lowering read the combined
+>   token text instead, answering `a''b`. It also mis-read a verbatim `@'a''b'`,
+>   where the doubled quote is an escape. **Fixed** by decoding each literal
+>   token separately, which is the only place the boundary survives.
+> * **`todynamic` drops non-JSON text.** KQL wraps it as a dynamic *string*, so
+>   `todynamic('abc')` is `'abc'` on a cluster and null here, and `: dynamic`
+>   in `parse` inherits it. **Recorded, not fixed** — it belongs to `todynamic`
+>   and deserves its own measured change.
+>
+> **And one recorded earlier and still unfixed.** `tolong('1.5')` answers **1**
+> here and **null** on a cluster; `toint`, `toreal`'s neighbours and
+> `tobool('2')` are the same family. `parse` can be exact because what it
+> converts is always *text*; `tolong` cannot, because it must also serve
+> `tolong(1.5)` — which really is 2 — and telling those apart needs
+> [column types](column-types-proposal.md).
 
 ## 0. Why this one
 
@@ -297,13 +323,29 @@ differential sweep in §5 is how it stays that way.
 
 Three rules differ from `kind=simple`, and only the first was known:
 
-| | `simple` | `regex` |
+| | `simple` / `relaxed` | `regex` |
 |---|---|---|
-| literals | escaped | verbatim |
+| literals | escaped | the user's regex |
 | string column | `(.*?)` lazy | `(.*)` **greedy** |
 | typed column | shaped **only** before a `*` | shaped **always** |
+| the shapes themselves | one table | **a different table** |
+| the whole pattern | anchored at end-of-text | unanchored |
 
-That last row is the new one. Measured, `"n=" n: long` *trailing*:
+The last two rows were added while implementing, and both were wrong here
+before. The shapes differ in two measured places — `bool` in regex mode is
+`true`/`false` only where simple mode also accepts an integer, and `real` takes
+no leading dot where simple mode does:
+
+```
+parse            s with "q=" b: bool * "m=" m   over 'q=12x m=1'  ->  true
+parse kind=regex s with "q=" b: bool * "m=" m   over 'q=12x m=1'  ->  null
+```
+
+The anchor is the more consequential one, because it is a rule about
+`kind=simple` that phases 1–3 shipped without — see erratum 5 at the top.
+
+The third row is what this section originally called new. Measured,
+`"n=" n: long` *trailing*:
 
 ```
 parse            s with "n=" n: long   over 'n=27 junk'  ->  null
@@ -333,12 +375,93 @@ otherwise collide. A prototype handling all five cases translates
 `parse-operator-03` correctly; it wants its own unit tests independent of
 `parse`.
 
-### 4.4 One construct to refuse
+One thing this section predicted correctly and one it missed. The five cases
+listed are all real. The sixth, found by the sweep, is that an **unbalanced**
+parenthesis is a *literal* to Kusto and a fatal error to RE2:
+
+```
+parse kind=regex s with ")"    v   over 'a)b'   ->  'b'
+parse kind=regex s with "(a"   v   over '(ab'   ->  'b'
+parse kind=regex s with "(a))" v   over 'a)b'   ->  'b'
+```
+
+Finding which parentheses are stray is why the scanner is two passes: a stack
+over the ones that survive the first pass, and anything left unpaired escaped.
+A counter would mis-pair `)(`.
+
+The result lives in `translate/regexfrag.py` with its own tests, and the
+property those tests assert is mechanical rather than by eye — after the
+rewrite the fragment must contain **zero** capturing groups, checked against
+DuckDB itself, and must still match the same text.
+
+### 4.4 Two constructs to refuse
 
 **Backreferences.** Kusto accepts `(a)\1` (it parses, and answers no match);
 RE2 rejects the pattern outright — `Binder Error: invalid escape sequence: \1`.
-Left alone that surfaces as a raw DuckDB error, so phase 4 should detect `\1`–`\9`
-outside a character class and raise `KqlUnsupportedError` naming it.
+Left alone that surfaces as a raw DuckDB error, so the scanner detects `\1`–`\9`
+outside a character class, and `(?P=name)`, and raises `KqlUnsupportedError`.
+
+**`flags=x`.** Kusto accepts it and it does something measurable — `"a ="`
+matches `a=` only under `x`. RE2 has no ignore-pattern-whitespace mode at all
+(`invalid perl operator: (?x`), so it is refused rather than dropped, which
+would silently change what the pattern matches.
+
+### 4.5 The temporal shapes have an edge, and it is refused
+
+`datetime` and `timespan` are the only declared types whose `kind=regex`
+capture does not behave like a regex on the emulator's side. The shape itself
+was recovered by **boundary scan** — for every way of splitting a value into
+`<capture><literal>`, ask whether the pattern still answers; the splits that do
+are exactly the prefixes the shape matches — and over `2020-01-01T00:00:00Z` it
+answers at cuts 10, 15, 16, 18, 19 and 20, which reads as a date, an optional
+`hh:mm[:ss[.f]]` and an optional zone.
+
+That shape agrees with the emulator everywhere except two positions, and in
+both the emulator stops behaving like a matcher:
+
+```
+parse kind=regex s with "v=" c: datetime      over 'v=2020/01/01T00:00:00'   ->  null
+parse kind=regex s with "v=" c: datetime      over 'v=2020/01/01T00:00:00X'  ->  the datetime
+```
+
+A trailing `X` in the **data** cannot make a shape match *more*. Three other
+forms flip the same way at that position, and a `timespan` there answers null
+for every value tried. Under `flags=U`, where every other shape simply
+inverts, a temporal capture stops answering at all. Both positions raise
+`KqlUnsupportedError`; every other position is swept clean.
+
+### 4.6 What the sweep actually caught
+
+The sweep was written before the code, generating what the phase 1–3 sweep did
+not: patterns whose last element is a **literal**, `kind=regex`, and every
+`flags=` combination — including `U` crossed with a typed column, which no
+corpus case does. It is two programs, one random over patterns and one
+exhaustive over 11 declared types × 39 awkward values × 4 positions × 6 flag
+settings.
+
+It found the missing end-of-text anchor (erratum 5), the two shape-table
+differences (erratum 6), the unbalanced-parenthesis rule (§4.3), the two
+temporal edges (§4.5), and three bugs in already-shipped code (top of this
+document). None of those would have been found by the corpus, which all six
+regex cases now pass.
+
+What residue is left is almost **one-directional**, which is the property
+worth stating: nearly every disagreement still findable is this translator
+answering null where a cluster answers a value — a blank row, not a wrong one.
+
+The exception is worth naming because it is the same §4.5 edge reached
+sideways. That refusal is positional, and a fragment that can match the empty
+string leaves a temporal column effectively terminal without being last:
+
+```
+parse kind=regex s with "p: " a: string ".q: " b: date "x"   ->  both answer null
+parse kind=regex s with "p: " a: string ".q: " b: date "|"   ->  Kusto null, we answer
+parse kind=regex s with "p: " a: string ".q: " b: date "(x)?"  ->  the same
+```
+
+Catching it properly means asking whether an arbitrary fragment is nullable,
+which is a real analysis rather than a position test. Recorded rather than
+approximated.
 
 ## 5. Phases
 
@@ -359,23 +482,24 @@ parse-where kind=regex     2     (parse-where-operator-03, -04;  -04 uses flags)
 | ~~1~~ | **Done.** `kind=simple` (the default): segments, `*`, typed columns, the not-matched rule, the all-or-nothing rule, replace-in-place output columns | 3 of 11 |
 | ~~2~~ | **Done.** `parse-where` (`_ok` in a `WHERE`), and refusing `parse-where kind=relaxed` | +1 |
 | ~~3~~ | **Done.** `kind=relaxed` — which turned out to relax the *pattern* too, not only the atomicity: an anchored typed column captures lazily there | +1 |
-| 4 | `kind=regex` + `flags=i/s/U`: the second capture policy (§4.2), the capturing-group scanner (§4.3), the backreference refusal (§4.4), and a differential sweep | **+6** |
+| ~~4~~ | **Done.** `kind=regex` + `flags=i/s/m/U`: the second capture policy (§4.2), the capturing-group scanner (§4.3), the refusals (§4.4, §4.5), and the differential sweep — which found three bugs outside `kind=regex` on the way (§4.6) | **+6** |
 | 5 | `parse-kv` | 0 today |
 
-**The awkward part of this plan is that the value is in the riskiest phase.**
-Phase 1 is the one that has to be right and is worth 3 cases; phase 4 is worth
+**The awkward part of this plan was that the value sat in the riskiest phase.**
+Phase 1 is the one that had to be right and is worth 3 cases; phase 4 was worth
 6. Phases 2 and 3 are a boolean and its absence.
 
-Since §4 was re-measured that reads better than it did: phase 4's exposure is
-now three concrete, testable pieces of work rather than an open question about
-two regex engines.
+That worked out, but not the way the plan expected. The RE2-versus-.NET
+question — the reason phase 4 was scheduled last — was the *easy* part (§4.1).
+What cost the time was that `kind=regex` is a genuinely different capture
+policy whose details are only visible by measurement, and that measuring it
+exposed a rule about `kind=simple` that phases 1–3 had shipped wrong.
 
-That is an argument for the split rather than against it — phases 1–3 are
-shippable on their own and leave `kind=regex` raising `KqlUnsupportedError`
-exactly as it does today, which is the honest state while its faithfulness is
-unproven. But it does mean nobody should treat "parse is done" as reached at
-phase 3, and it means the differential sweep in phase 4 is the deliverable
-rather than an afterthought.
+The general lesson is in §4.6: **the sweep was the deliverable, and it had to
+be written to generate what the previous sweep did not.** The end-of-text
+anchor survived three commits and a full corpus pass because every pattern the
+phase 1–3 sweep generated happened to end on a column. A sweep only covers the
+shapes it emits.
 
 `parse-kv` earns no corpus cases and is listed last for that reason, but it is
 small — measured working on the emulator as
@@ -384,8 +508,11 @@ small — measured working on the emulator as
 
 ## 6. Out of scope, and open questions
 
-* **`flags=m` and `flags=x`.** Accepted by the parser, no measured effect.
-  Refuse until there is a case that shows what they do.
+* ~~**`flags=m` and `flags=x`.**~~ Settled in phase 4. `m` *does* have a
+  measured effect — `'^a='` over `"x\na=1"` matches only under it — and RE2 has
+  the same flag, so it is implemented. `x` is refused: RE2 has no
+  ignore-pattern-whitespace mode and DuckDB answers *"invalid perl operator:
+  (?x"*.
 * **`parse-kv`'s `regex`, `quote`, `escape`, `greedy` properties**
   (`QueryOperatorParameters.ParseKvWithProperties`). Phase 5 should implement
   `pair_delimiter` and `kv_delimiter` only, and refuse the rest.

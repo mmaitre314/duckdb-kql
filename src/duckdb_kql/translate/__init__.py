@@ -25,6 +25,7 @@ from .functions import (
     lookup_aggregate,
     term_match_sql,
 )
+from .regexfrag import neutralise_groups
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -2058,12 +2059,6 @@ def _json_path_key(name: str) -> str:
     return f'"{escaped}"'
 
 
-#: `flags=` letters -> the RE2 inline flag that means the same thing. `m` and
-#: `x` are parsed by Kusto and left out on purpose: neither produced a measured
-#: difference on the emulator, so mapping them would be a guess (see
-#: docs/parse-proposal.md §2.4).
-_PARSE_FLAGS = {"i": "i", "s": "s", "U": "U"}
-
 #: The struct one `regexp_extract` produces, holding every captured column.
 _PARSE_CAPTURES = "_parse"
 
@@ -2082,22 +2077,20 @@ def render_parse(op: ir.Parse, prev: str, cols: list[str] | None = None) -> str:
     * a **non-match returns the empty string in every field**, which is exactly
       what Kusto gives an unmatched *string* column — measured, `'nomatch'`
       parsed with `"a=" a` yields `''`, not null;
-    * RE2's inline ``(?i)``/``(?s)``/``(?U)`` are Kusto's `i`/`s`/`U` flags;
+    * RE2's inline ``(?i)``/``(?s)``/``(?m)``/``(?U)`` are Kusto's flags, and
+      RE2's bare ``$`` means end-of-*text* (not "before a final newline", the
+      way Python and .NET read it), which is what `kind=simple` needs;
     * ``regexp_matches`` over the same pattern gives `parse-where` its
       predicate.
 
-    See :func:`_parse_pattern` for how the pattern is built and
+    See :func:`_parse_pattern` for how the pattern is built — the difference
+    between `kind=simple` and `kind=regex` lives almost entirely there — and
     :func:`_parse_row_ok` for the all-or-nothing conversion rule, which is the
     part that is not guessable.
     """
-    if op.kind not in ("simple", "relaxed"):
-        # `kind=regex` splices the user's regex into a pattern RE2 runs while
-        # Kusto runs .NET, so agreement is a question about two backtracking
-        # engines rather than about this mapping (docs/parse-proposal.md §4).
+    if op.kind not in ("simple", "relaxed", "regex"):
         raise KqlUnsupportedError(
-            f"parse kind={op.kind}",
-            hint="kind=simple and kind=relaxed are implemented; see "
-            "docs/parse-proposal.md",
+            f"parse kind={op.kind}", hint="expected simple, regex or relaxed"
         )
     if op.kind == "relaxed" and op.drop_unmatched:
         # Kusto refuses this outright — SEM0477, "parse-where: only simple or
@@ -2108,10 +2101,7 @@ def render_parse(op: ir.Parse, prev: str, cols: list[str] | None = None) -> str:
             hint="Kusto refuses it too (SEM0477): parse-where supports only "
             "simple and regex",
         )
-    if op.flags:
-        raise KqlUnsupportedError(
-            f"parse flags={op.flags}", hint="flags apply to kind=regex, not yet supported"
-        )
+    _parse_flags(op)
 
     source = render_expr(op.expression)
     declared = [s for s in op.segments if s.name]
@@ -2119,6 +2109,7 @@ def render_parse(op: ir.Parse, prev: str, cols: list[str] | None = None) -> str:
     if len(set(names)) != len(names):
         # Kusto refuses a repeated declaration; DuckDB would silently keep one.
         raise KqlUnsupportedError("parse", hint="a column is declared twice")
+    _refuse_empty_literal(op)
     _refuse_unanchored_string_column(op)
 
     pattern = quote_string(_parse_pattern(op))
@@ -2155,6 +2146,39 @@ def render_parse(op: ir.Parse, prev: str, cols: list[str] | None = None) -> str:
     return sql
 
 
+#: Hyphenated, bare, or braced — all three answered on the emulator, and the
+#: braces are an **alternation** rather than an optional `\{?…\}?` pair on
+#: purpose: under `flags=U` RE2 reads `?` as lazy, the closing brace would be
+#: dropped, and `TRY_CAST('{74be…3642' AS UUID)` is null. Alternation is
+#: greediness-neutral, so `U` cannot break the pair apart.
+_GUID_SHAPE = (
+    r"\s*(?:\{[0-9a-fA-F]{8}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}"
+    r"-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{12}\}"
+    r"|[0-9a-fA-F]{8}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}"
+    r"-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{12})"
+)
+
+#: The two date orders are separate branches because the separator picks the
+#: order: `2020-01-01` and `02/17/2016 08:40:01` both answer, and
+#: `2020/01/01T00:00:00` — the ISO order with slashes — answers **null**. A
+#: single `[-/]` branch would accept it and quietly disagree. Years are four
+#: digits with `-` and one to four with `/`, also measured (`20-01-01T00:00:00`
+#: is null, `1/2/34` is 2034).
+_DATETIME_SHAPE = (
+    r"\s*(?:\d{4}-\d{1,2}-\d{1,2}|\d{1,2}/\d{1,2}/\d{1,4})"
+    r"(?:[Tt ]\s*\d{1,2}:\d{1,2}(?::\d{1,2}(?:\.\d*)?)?)?"
+    r"(?:[Zz]|[-+]\d{1,2}(?::\d{1,2})?)?"
+)
+
+#: `hh:mm[:ss]`, or `d.hh:mm:ss` where the seconds stop being optional.
+#: Measured: `00:01` answers, `1.02:03` does not, `1d` and `3` never do — so the
+#: suffix forms `totimespan` accepts are not part of the shape.
+_TIMESPAN_SHAPE = (
+    r"\s*-?(?:\d+\.\d{1,2}:\d{1,2}:\d{1,2}|\d{1,2}:\d{1,2}(?::\d{1,2})?)"
+    r"(?:\.\d*)?"
+)
+
+
 #: `name: T` compiles to a **type-shaped** capture, not a wildcard. Measured by
 #: putting the column before a `*` — which lets the capture take as much as its
 #: shape allows — and reading back what it took:
@@ -2181,11 +2205,195 @@ _PARSE_TYPE_PATTERNS = {
     "decimal": r"\s*[-+]?(?:\d+\.?\d*|\.\d+)",
     "bool": r"\s*(?:[tT][rR][uU][eE]|[fF][aA][lL][sS][eE]|[-+]?\d+)",
     "boolean": r"\s*(?:[tT][rR][uU][eE]|[fF][aA][lL][sS][eE]|[-+]?\d+)",
-    "guid": r"\s*[0-9a-fA-F]{8}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}"
-            r"-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{12}",
-    "uuid": r"\s*[0-9a-fA-F]{8}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}"
-            r"-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{12}",
+    "guid": _GUID_SHAPE,
+    "uuid": _GUID_SHAPE,
 }
+
+
+#: `kind=regex` shapes **every** typed column, not only the one before a `*`,
+#: and the shapes are not the same ones — see `_PARSE_TYPE_PATTERNS`. Measured
+#: by *boundary scan* rather than by guessing: for every way of splitting a
+#: value into `<capture><literal>`, ask the emulator whether the pattern still
+#: answers, and the splits that do are exactly the prefixes the shape matches.
+#:
+#: The scan is what makes these exact rather than plausible. Over `27xy` a
+#: `long` answers at cuts 1, 2 and 4 and not 3, which is `\s*[-+]?\d+` and
+#: nothing else; over `2020-01-01T00:00:00Z` a `datetime` answers at 10, 15, 16,
+#: 18, 19 and 20 — so the date alone is enough, minutes may be one digit,
+#: seconds are optional, and a bare `:` is not a stopping point.
+#:
+#: Two differences from the simple-mode table are worth naming, because both
+#: are silent if got wrong:
+#:
+#: * `bool` here is **true/false only** — `q=12` answers null in regex mode and
+#:   true in simple;
+#: * `real` here has **no leading dot** — `.5` answers null in regex mode and
+#:   0.5 in simple.
+_PARSE_REGEX_TYPE_PATTERNS = {
+    "long": r"\s*[-+]?\d+",
+    "int": r"\s*[-+]?\d+",
+    "int32": r"\s*[-+]?\d+", "int64": r"\s*[-+]?\d+",
+    "uint": r"\s*[-+]?\d+", "uint32": r"\s*[-+]?\d+", "uint64": r"\s*[-+]?\d+",
+    "ulong": r"\s*[-+]?\d+", "int8": r"\s*[-+]?\d+", "uint8": r"\s*[-+]?\d+",
+    "int16": r"\s*[-+]?\d+", "uint16": r"\s*[-+]?\d+",
+    # No bare trailing dot: measured, `1.` before a literal answers null where
+    # `1.5` answers 1.5, so the shape stops at `1` and the `.` has to be matched
+    # by whatever follows.
+    "real": r"\s*[-+]?\d+(?:\.\d+)?",
+    "double": r"\s*[-+]?\d+(?:\.\d+)?",
+    "float": r"\s*[-+]?\d+(?:\.\d+)?",
+    "decimal": r"\s*[-+]?\d+(?:\.\d+)?",
+    "bool": r"\s*(?i:true|false)",
+    "boolean": r"\s*(?i:true|false)",
+    "guid": _GUID_SHAPE,
+    "uuid": _GUID_SHAPE,
+    "datetime": _DATETIME_SHAPE,
+    "date": _DATETIME_SHAPE,
+    "timespan": _TIMESPAN_SHAPE,
+    "time": _TIMESPAN_SHAPE,
+}
+
+
+def _parse_regex_capture(op: ir.Parse, index: int) -> str:
+    """One column's fragment under `kind=regex`: a shape, or a greedy wildcard.
+
+    Greedy and not lazy — measured, `"a" v "c"` over `aXcYc` gives `XcY` in
+    regex mode against `X` in simple. `flags=U` inverts it, which is why the
+    quantifier is written in its ordinary sense and left to `(?U)`.
+    """
+    segment = op.segments[index]
+    if segment.type in (None, "string", "dynamic"):
+        return ".*"
+    shape = _PARSE_REGEX_TYPE_PATTERNS.get(str(segment.type))
+    if shape is None:
+        raise KqlUnsupportedError(
+            f"parse kind=regex type:{segment.type}",
+            hint="the text this type's capture matches has not been measured; "
+            f"known: {sorted(_PARSE_REGEX_TYPE_PATTERNS)}",
+        )
+    if str(segment.type) in _PARSE_TEMPORAL:
+        # The two temporal shapes hold up everywhere the sweep can see them
+        # *except* two positions, and in both the emulator stops behaving like a
+        # regex engine at all.
+        #
+        # At the very end of the pattern, with nothing after the column:
+        #
+        #     'v=2020/01/01T00:00:00'    ->  null
+        #     'v=2020/01/01T00:00:00X'   ->  2020-01-01T00:00:00Z
+        #
+        # A trailing `X` in the *data* cannot make a shape match more, so
+        # whatever runs there is not one; three other forms flip the same way
+        # (a bare date, `hh:mm` without seconds, and a UTC offset), and a
+        # `timespan` in that position answers null for every value tried.
+        #
+        # Under `flags=U`, where every other shape simply inverts, the temporal
+        # ones answer null instead — `02/17/2016 08:40:01` under `U` is null on
+        # the emulator and would be `0002-02-17` from a lazily-read shape.
+        if _ends_the_pattern(op, index):
+            raise KqlUnsupportedError(
+                f"parse kind=regex type:{segment.type} at the end of the pattern",
+                hint="Kusto's answer here does not follow from the capture — a "
+                "trailing character in the data changes it — so put a literal "
+                "or a '*' after the column, where the behaviour is measured",
+            )
+        if op.flags and "U" in op.flags:
+            raise KqlUnsupportedError(
+                f"parse kind=regex flags=U type:{segment.type}",
+                hint=f"`U` inverts every quantifier, but a {segment.type} "
+                "capture does not invert with them — it stops answering "
+                "altogether, which no lazy reading of a shape reproduces",
+            )
+    return shape
+
+
+#: The types whose `kind=regex` capture is only reproducible in the middle of a
+#: pattern. See `_parse_regex_capture` for the two positions and why.
+_PARSE_TEMPORAL = ("datetime", "date", "timespan", "time")
+
+
+def _ends_the_pattern(op: ir.Parse, index: int) -> bool:
+    """Whether nothing at all follows this column — no literal, no `*`."""
+    return index == len(op.segments) - 1 and not op.trailing_star
+
+
+#: `flags=` letters that map onto an RE2 inline flag with the same meaning. All
+#: four were measured to *do* something on the emulator, one flag at a time:
+#:
+#:     i   "A=5"     "a=" v          ->  '5'  where without it there is no match
+#:     s   "a=x\ny"  "a=x." v        ->  'y'  `.` crossed the newline
+#:     m   "x\na=1"  "^a=" v         ->  '1'  `^` matched mid-string
+#:     U   "y=1,x=2,x=9,"  * "x=" v ","  ->  '9' against '2,x=9'
+#:
+#: `x` is Kusto's fifth and is refused: RE2 has no ignore-pattern-whitespace
+#: mode at all, and DuckDB answers *"invalid perl operator: (?x"*.
+_PARSE_FLAGS = "ismU"
+
+
+def _parse_flags(op: ir.Parse) -> str:
+    """The inline flag prefix for the assembled pattern, e.g. ``(?iU)``.
+
+    `U` is the reason this is written inline rather than passed to
+    `regexp_extract`'s options argument: DuckDB accepts `i`, `s` and `m` there
+    and rejects `U` outright. Inline, RE2 takes all of them.
+
+    And `U` has to be **global**, which is worth stating because it looks like
+    it should not be. It swaps the greediness of *everything* in the pattern,
+    the `*` skips included — measured on `y=1,x=2,x=9,`:
+
+        parse kind=regex          s with * "x=" v ","   ->  '2,x=9'
+        parse kind=regex flags=U  s with * "x=" v ","   ->  '9'
+
+    A greedy skip reached the *last* `x=` under `U`. So the emitter writes
+    every quantifier in its ordinary sense and lets one `(?U)` invert the lot,
+    rather than trying to emit inverted forms itself.
+    """
+    if not op.flags:
+        return ""
+    if op.kind != "regex":
+        # SEM0472: "parse: regex flags can be provided only on regex mode".
+        raise KqlUnsupportedError(
+            f"parse kind={op.kind} flags={op.flags}",
+            hint="Kusto refuses flags outside regex mode too (SEM0472)",
+        )
+    unknown = sorted(set(op.flags) - set(_PARSE_FLAGS))
+    if unknown:
+        raise KqlUnsupportedError(
+            f"parse flags={op.flags}",
+            hint=f"unmapped flag(s) {''.join(unknown)!r}; i, s, m and U are "
+            "implemented, and RE2 has no equivalent of x",
+        )
+    # Deduplicated and ordered so the emitted SQL is stable.
+    return "(?" + "".join(f for f in _PARSE_FLAGS if f in op.flags) + ")"
+
+
+def _refuse_empty_literal(op: ir.Parse) -> None:
+    """An empty string literal anywhere in the pattern, which Kusto refuses.
+
+    Two columns with nothing between them is the case that matters — written as
+    two bare names (`parse s with "t=" t rest`) the grammar catches it first,
+    and written with an empty literal (`parse s with "a=" a "" b`) it parses
+    cleanly and would translate to two adjacent wildcards whose split is
+    undefined: the first takes everything and the second nothing.
+
+    Kusto's own rule is broader and simpler, so it is the one reproduced here —
+    measured, every one of these is SEM0476 *"Empty string …"*:
+
+        parse s with "" v
+        parse s with "a=" v ""
+        parse s with "a=" a "" b
+        parse s with * "" v
+
+    A *leading* column, which is the one place an empty literal would be
+    natural, is a different production and is refused in `lower` instead.
+    """
+    for segment in op.segments:
+        if segment.literal:
+            continue
+        raise KqlUnsupportedError(
+            "parse: empty string literal in the pattern",
+            hint="Kusto refuses it too (SEM0476); with nothing between two "
+            "captures there is no defined place for the first to end",
+        )
 
 
 def _refuse_unanchored_string_column(op: ir.Parse) -> None:
@@ -2217,17 +2425,23 @@ def _refuse_unanchored_string_column(op: ir.Parse) -> None:
 def _parse_capture(op: ir.Parse, index: int) -> str:
     """The regex a declared column compiles to.
 
-    A **string** column is `.*?` and needs the next literal to stop it — lazy,
-    measured: `"a" v "c"` over `aXcYc` gives `X`, the first `c` and not the last.
+    Two policies, because `kind=regex` is not `kind=simple` with a flag on it.
 
-    A **typed** column uses its shape only where a ``*`` follows — the one
-    position with nothing to stop the capture. Everywhere else the shape is not
-    merely unnecessary but *wrong*: measured, `"q=" b: bool` over `q=12x`
-    answers null, where a shaped capture would have taken `12` and answered
-    true. `datetime` and `timespan` have no measured shape, so they are refused
-    in that one position and work everywhere else.
+    In **regex** mode every column is a plain regex fragment: a string column is
+    `.*` (greedy, unanchored) and a typed column is its **shape**, everywhere in
+    the pattern rather than only before a `*`. Measured, `"n=" n: long` over
+    `n=27x` answers 27 in regex mode and null in simple.
+
+    In **simple**/**relaxed** mode a string column is `.*?` and relies on the
+    next literal — or the end anchor — to stop it, and a typed column carries a
+    shape only where a ``*`` follows, the one position with nothing to stop it.
+    Everywhere else the shape is not merely unnecessary but *wrong*: measured,
+    `"q=" b: bool` over `q=12x` answers null, where a shaped capture would have
+    taken `12` and answered true.
     """
     segment = op.segments[index]
+    if op.kind == "regex":
+        return _parse_regex_capture(op, index)
     if not _followed_by_skip(op, index):
         # Something concrete follows — the next segment's literal, or the end of
         # the input — so a lazy wildcard knows where to stop and no shape is
@@ -2238,17 +2452,21 @@ def _parse_capture(op: ir.Parse, index: int) -> str:
         #   `"q=" b: bool` over `q=12x`                             ->  null
         #       a *trailing* column takes everything and then fails to convert,
         #       where a shaped one would have taken `12` and answered true.
-        last = index == len(op.segments) - 1
-        return ".*?$" if last else ".*?"
+        #
+        # The end anchor that stops the *last* column is on the whole pattern,
+        # not here — see `_parse_pattern`, which needs it for a trailing literal
+        # as well.
+        return ".*?"
 
     shape = _PARSE_TYPE_PATTERNS.get(str(segment.type))
     if shape is not None:
         if index == len(op.segments) - 1:
-            # A *trailing* `*` makes the shape **optional**: measured,
-            # `"p|" a: string "-q|" b: long *` over `p|1-q|xx` answers
-            # `('1', null)` — the pattern still matched, so `b`'s shape was
-            # allowed to match nothing. A `*` in the middle is not optional:
-            # the same value under `"p|" a: long * "-q|" b` blanks the row.
+            # Before a *trailing* `*` the shape is **optional**, which is only
+            # observable in `kind=relaxed`: measured, `"p|" a: string "-q|"
+            # b: long *` over `p|1-q|xx` answers `('1', null)` relaxed, where a
+            # required shape would have failed the match and blanked `a` too.
+            # (Under `simple` the all-or-nothing rule blanks `a` either way, so
+            # the two spellings are indistinguishable there.)
             return f"(?:{shape})?"
         return shape
     # A string column here is refused by `_refuse_unanchored_string_column`,
@@ -2277,18 +2495,53 @@ def _followed_by_skip(op: ir.Parse, index: int) -> bool:
 def _parse_pattern(op: ir.Parse) -> str:
     """The whole pattern as one regex.
 
-    A ``*`` is a **non-greedy skip** capturing nothing — measured, `* "x=" v ","`
-    over `y=1,x=2,x=9` gives `2`, so it stops at the *first* `x=`.
+    Four pieces, and the mode changes three of them:
 
-    Literals are escaped: `parse s with "a.b" v` does not match `axbZ`.
+    ==============  =========================  ==========================
+    piece           `simple` / `relaxed`       `regex`
+    ==============  =========================  ==========================
+    a literal       escaped — matched as text  the user's own regex
+    a `*` skip      ``.*?``                    ``.*?``
+    a string column ``.*?`` — lazy             ``.*`` — greedy
+    the whole thing anchored at end-of-text    unanchored
+    ==============  =========================  ==========================
+
+    The **end anchor** is the one that is easy to miss, because it only shows
+    when the pattern ends with a *literal* rather than a column. Measured, and
+    the same in `simple` and `relaxed`:
+
+        'aXcYc'       parse s with "a" v "c"      ->  'XcY'   not 'X'
+        'abcbd'       parse s with "a" v "b"      ->  ''      no match at all
+        'k=1,k=2,end' parse s with "k=" v ","     ->  ''      no match at all
+        'aXc' + \\n    parse s with "a" v "c"      ->  ''      \\n is not consumed
+
+    A lazy capture with nothing after it stops at the first `c`; Kusto's stops
+    at the last, because the whole pattern has to reach the end of the input.
+    The last line is why the anchor is RE2's bare ``$`` and not Python's or
+    .NET's: those match *before* a final newline, RE2's means end of text.
+
+    `kind=regex` is not anchored — the same four inputs give `'XcY'`, `'bc'`,
+    `'1,k=2'` and `'X'` — and its columns are greedy rather than lazy, which
+    `flags=U` then inverts wholesale. See :func:`_parse_flags`.
     """
-    out = []
+    out = [_parse_flags(op)]
     for index, segment in enumerate(op.segments):
         if segment.skip:
+            # `.*?` and not `.*`: measured, `* "x=" v ","` over `y=1,x=2,x=9,`
+            # stops at the *first* `x=`. Under `(?U)` RE2 reads this as greedy,
+            # which is exactly what Kusto's `flags=U` does to the skip too.
             out.append(".*?")
-        out.append(re.escape(segment.literal))
+        out.append(
+            neutralise_groups(segment.literal)
+            if op.kind == "regex"
+            else re.escape(segment.literal)
+        )
         if segment.name:
             out.append(f"(?P<{segment.name}>{_parse_capture(op, index)})")
+    if op.trailing_star:
+        out.append(".*?")
+    if op.kind != "regex":
+        out.append("$")
     return "".join(out)
 
 

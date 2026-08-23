@@ -38,7 +38,7 @@ pytestmark = pytest.mark.skipif(not CORPUS.is_file(), reason=f"no corpus at {COR
 #: anything and `has_all` over an empty needle set is true, neither of which the
 #: old `list_filter` / `bool_and` shapes could express. Then 280 -> 285 with
 #: `parse` / `parse-where` in `kind=simple` and `kind=relaxed`.
-BASELINE_PASSING = 285
+BASELINE_PASSING = 291
 
 #: Cases whose *data* makes them nondeterministic, which the query text cannot
 #: show. Not a divergence and not a waiver — there is no single right answer to

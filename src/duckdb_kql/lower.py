@@ -157,7 +157,7 @@ def _lower_expr(node: Any) -> ir.Expr:
         return _typed_literal(node, "real", float)
 
     if kind == "StringLiteralExpression":
-        return ir.Literal(_string_value(node.getText()), "string")
+        return ir.Literal(_string_literal(node), "string")
 
     if kind == "BooleanLiteralExpression":
         return _typed_literal(node, "bool", lambda t: t.strip().lower() == "true")
@@ -298,17 +298,38 @@ def _lower_bare_literal(node: Any) -> ir.Expr:
     raise _unsupported(node, "literal")
 
 
+def _string_literal(node: Any) -> str:
+    """Decode a ``StringLiteralExpression``, which may be **several** literals.
+
+    KQL concatenates adjacent string literals the way C does — measured,
+    ``print x = 'a' 'b'`` is `ab`, and so is ``'a'"b"``. The lexer has already
+    split them into one token child each, which is the only place the boundary
+    survives: ``getText()`` drops the whitespace, so ``@'a' 'b'`` (two verbatim
+    literals, `ab`) and ``@'a''b'`` (one verbatim literal holding a doubled
+    quote, `a'b`) arrive as the same string. Decoding the children rather than
+    the text keeps them apart.
+    """
+    children = list(getattr(node, "children", None) or [])
+    if not children:
+        return _string_value(node.getText())
+    return "".join(_string_value(c.getText()) for c in children)
+
+
 def _string_value(text: str) -> str:
-    """Decode a KQL string literal, including the ``@`` verbatim form."""
+    """Decode one KQL string literal, including the ``@`` verbatim form."""
     verbatim = text.startswith("@")
     if verbatim:
         text = text[1:]
-    if len(text) >= 2 and text[0] == text[-1] and text[0] in "'\"":
+    quote = text[0] if text[:1] in "'\"" else ""
+    if quote and len(text) >= 2 and text[-1] == quote:
         body = text[1:-1]
     else:
         body = text
     if verbatim:
-        return body
+        # A verbatim literal has no backslash escapes; the one escape it does
+        # have is a **doubled quote**. Measured, `@'a''b'` is `a'b` where the
+        # non-verbatim `'a''b'` is two literals and reads `ab`.
+        return body.replace(quote * 2, quote) if quote else body
     out, i = [], 0
     escapes = {"n": "\n", "t": "\t", "r": "\r", "\\": "\\", "'": "'", '"': '"', "0": "\0"}
     while i < len(body):
@@ -2028,7 +2049,7 @@ def _lower_parse_segment(node: Any) -> ir.ParseSegment:
     for k in _rule_children(node):
         cls = _cls(k)
         if cls == "StringLiteralExpression":
-            literal = _string_value(k.getText())
+            literal = _string_literal(k)
         elif cls == "ParseOperatorNameAndOptionalType":
             names = _find_names(k)
             if not names:
