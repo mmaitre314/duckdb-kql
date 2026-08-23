@@ -147,18 +147,21 @@ the rest of it. Deletion is provable by the gate and free to review.
 
 ### Retire a suppression — *Safe to Careful*
 
-The suppression ledger currently stands at **125 `# noqa` directives, all of
-which ruff reports as unused** against the enabled rule set (`select = ["E", "F",
-"I", "UP", "B"]`). They name rules — `PLC0415`, `BLE001`, `S603`, `N802` — that
-nothing runs. That is a checker that has quietly stopped checking, in a repo
-whose charter is about exactly that failure mode. There are only two honest
-resolutions, and both are maintenance work someone should do deliberately:
+The suppression ledger stands at 125 `# noqa` directives, of which ruff reports
+**113 as unused** against the enabled rule set (`select = ["E", "F", "I", "UP",
+"B"]`). Measure it with `ruff check --extend-select RUF100`, never `--select
+RUF100` — the latter *replaces* the configured rules, so every directive looks
+unused and the count comes back 125. The 113 name rules — `PLC0415` (73), `BLE001` (21), `S603`, `N802` — that nothing
+runs; the other 12 are load-bearing and must stay. A directive that suppresses
+nothing is a checker that has quietly stopped checking, in a repo whose charter
+is about exactly that failure mode. There are only two honest resolutions, and
+both are maintenance work someone should do deliberately:
 
 1. **Widen `select`** so the suppressions become load-bearing and their written
    reasons get enforced. Expect real findings on the way — that is the point.
 2. **Delete them** and stop annotating for a rule set the project does not run.
 
-Do not do the third thing, which is to leave 125 directives that look like
+Do not do the third thing, which is to leave 113 directives that look like
 enforced discipline and are not. Whichever way it goes, it is a single mechanical
 commit plus a `pyproject.toml` change — and it is the only item in this catalog
 whose diff is allowed to be large, because it is generated (`ruff --fix`), not

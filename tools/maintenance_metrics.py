@@ -321,8 +321,12 @@ def suppressions() -> dict[str, Any]:
 
 def _unused_noqa() -> int | None:
     """RUF100 count, or None when ruff is not installed."""
+    # `--extend-select`, never `--select`: the latter REPLACES the configured
+    # rule set, so every rule a directive names would look unselected and all
+    # of them would be reported unused. That overcounts (125 vs 113 here)
+    # and, worse, hides which directives are load-bearing.
     proc = subprocess.run(
-        [sys.executable, "-m", "ruff", "check", "--select", "RUF100",
+        [sys.executable, "-m", "ruff", "check", "--extend-select", "RUF100",
          "--statistics", "src", "tools", "tests", "demo"],
         cwd=ROOT, capture_output=True, text=True, check=False,
     )

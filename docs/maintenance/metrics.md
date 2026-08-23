@@ -95,7 +95,7 @@ do to it, and the tests to decide whether it is safe to.
 |---|---|---|
 | `noqa_total`, `noqa_by_rule` | flat or down | Each is a linter told to look away |
 | `noqa_without_a_reason` | **0** | M11. A reason may sit after the code or on the line above |
-| `noqa_suppressing_an_unselected_rule` | **0** | Ruff's own RUF100: a directive suppressing a rule the config never runs. The reason written beside it is enforced by nothing |
+| `noqa_suppressing_an_unselected_rule` | **0** | Ruff's own RUF100, measured with `--extend-select` so the project's configured rules stay on. A directive suppressing a rule the config never runs; the reason written beside it is enforced by nothing |
 | `type_ignore` | flat or down | The package ships `py.typed`; each ignore is a hole in that promise |
 | `skipped_tests`, `xfail_tests` | **0** | An unconditional skip is a deleted test with better manners (M5) |
 | `conditionally_skipped_tests` | context | `skipif`/`importorskip` are legitimate here (no duckdb, no emulator, no corpus) — but a check that skips itself in CI is [green because it did not run](../code-review/tooling-packaging-ci-docs.md) |
@@ -215,7 +215,7 @@ HOTSPOTS (commits x lines)
 SUPPRESSIONS
   noqa total: 125   (PLC0415 73, BLE001 21, E402 12, B017 7, N802 4, S603 4, ...)
   noqa without a reason: 81
-  noqa suppressing an unselected rule: 125
+  noqa suppressing an unselected rule: 113
   type ignore: 9
   skipped tests: 0    xfail tests: 0    conditionally skipped: 76
   mypy module overrides: 3    ruff per file ignores: 1
@@ -229,14 +229,16 @@ DIFF DISCIPLINE (last 50 commits, generated paths excluded)
   over review budget (400): 18
 ```
 
-Three things this baseline says out loud:
+The first survey run against this baseline is
+[`survey-2026-08-23.md`](survey-2026-08-23.md). Three things it says out loud:
 
 1. **Two files carry the maintenance burden.** `translate/__init__.py` and
    `lower.py` are the two largest modules, the two hottest files, and hold four
    of the five branchiest functions. Every other structural number is noise next
    to that.
-2. **The suppression ledger is not doing its job.** All 125 `# noqa` directives
-   name rules the enabled `select` set never runs, and 81 carry no reason. The
+2. **The suppression ledger is not doing its job.** 113 of the 125 `# noqa`
+   directives name rules the enabled `select` set never runs, and 81 carry no
+   reason. The
    [playbook](refactoring-playbook.md#retire-a-suppression--safe-to-careful) has
    the two honest resolutions; both are one deliberate commit.
 3. **Commits are at or over the review ceiling.** Median 285, p90 975. The

@@ -186,6 +186,15 @@ that performed the refactor does not review it**, and the reviewer sees the diff
 without the refactorer's reasoning. An agent that restructured the code wants the
 restructuring to be accepted.
 
+## Past surveys
+
+- [`survey-2026-08-23.md`](survey-2026-08-23.md) — the first full pass, at
+  `6f12ed4`: 5 findings (1 Safe/Careful, 1 Careful, 2 Safe, 1 docs-only), 9 areas
+  enumerated as healthy. It also caught a defect in the metrics tool itself — the
+  RUF100 check was measured with `--select` rather than `--extend-select`, which
+  overcounted unused suppressions 125 against a true 113. That is fixed; the rest
+  is open.
+
 ## What "done" looks like
 
 A maintenance change is finished when all five are true:
