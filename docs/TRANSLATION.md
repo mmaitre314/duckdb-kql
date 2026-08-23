@@ -70,7 +70,7 @@ SELECT * FROM _s3
 | `int` | `INTEGER` | 32-bit |
 | `long` | `BIGINT` | 64-bit; KQL's default integer type |
 | `real` | `DOUBLE` | |
-| `decimal` | `DECIMAL(38,·)` | precision policy TBD (§9) |
+| `decimal` | `DECIMAL(38,9)` | the scale is rendered, so `1` reads as `1.000000000` — which is why `todecimal` and `parse … : decimal` are refused rather than mapped |
 | `string` | `VARCHAR` | UTF-8; `strlen` counts **characters** (§4 R11) |
 | `datetime` | `TIMESTAMP` | **always UTC** (§4 R8) |
 | `timespan` | `INTERVAL` | see §3 literals |
@@ -346,11 +346,19 @@ we must never claim a specific row order absent a terminal `sort`.
 - `strlen` counts **characters**, not bytes → `length()` (not `octet_length`).
   `substring` uses **0-based** indices and must tolerate negative/out-of-range
   input without erroring (KQL clamps; SQL's `substring` is 1-based).
-- `dcount`/`dcountif` are **approximate** (HLL) → `approx_count_distinct`; never
-  assert exact equality in tests.
-- `percentile`/`percentiles` use a specific estimation algorithm — pin the
-  algorithm choice (`quantile_cont` vs `quantile_disc` vs `approx_quantile`)
-  against the oracle and record the tolerance.
+- `dcount`/`dcountif` are **approximate** (HLL) in KQL, and the honest-looking
+  mapping to `approx_count_distinct` is nevertheless the wrong one. Measured
+  against the emulator, at corpus cardinalities KQL's estimate returns the
+  *exact* value while `approx_count_distinct` is ~13% low (37 against 32) —
+  outside any sane tolerance, and enough to reorder `top N by dcount`. So the
+  mapping is exact `count(DISTINCT …)`: it matches the oracle and is
+  reproducible. The residual risk runs the other way — at cardinalities high
+  enough for KQL's own estimate to drift — and is what the drift lane is for.
+- `percentile`/`percentiles` use **nearest-rank**, not linear interpolation →
+  `quantile_disc`. Measured per state on the fixture, `disc` matched all 52
+  groups exactly where `quantile_cont` was off by up to 39%. At large N KQL
+  switches to an estimate and the 5% approximate-function tolerance covers the
+  remaining ~0.07%.
 
 ---
 
@@ -939,18 +947,35 @@ wrong answer (principle 5).
 
 ## 9. Open items
 
-- `decimal` precision/scale policy (§2).
-- Exact `percentile` algorithm + tolerance (R11).
-- `has` tokenization: regex boundaries vs UDF — decide after the R3 trap tests
-  run against the emulator.
-- `mv-expand` null/empty-array row preservation (R9).
+One item is genuinely open. The rest are kept, struck through and dated, because
+a settled question that vanishes gets re-opened by the next reader — and §10
+sends every contributor through §4 before they map anything.
+
+- Whether the emitter builds SQL strings directly or via `sqlglot`
+  (`implementation-options.md` Option 2) — deferred; keep the emitter behind a
+  narrow interface either way.
 - ~~Null-ordering defaults for `sort` (R6).~~ **Settled 2026-08-05:** KQL treats
   null as the **smallest** value — `sort by x asc` returns null first, `desc`
   returns it last. The emitter had this inverted while its comments asserted the
   opposite as fact. Pinned by `tests/test_column_order_and_null_sort.py`.
-- Whether the emitter builds SQL strings directly or via `sqlglot`
-  (`implementation-options.md` Option 2) — deferred; keep the emitter behind a
-  narrow interface either way.
+- ~~`decimal` precision/scale policy (§2).~~ **Settled:** `DECIMAL(38,9)`
+  (`translate/__init__.py`, `TYPE_MAP`). The scale is *why* `todecimal` and
+  `parse … : decimal` are refused rather than mapped — DuckDB renders the scale,
+  so `1` comes back as `1.000000000`. §2's table says so now instead of pointing
+  back here.
+- ~~Exact `percentile` algorithm + tolerance (R11).~~ **Settled:**
+  `quantile_disc`, because KQL uses nearest-rank rather than linear
+  interpolation. Measured per state on the fixture: `disc` matched all 52 groups
+  exactly, `cont` was off by up to 39% — a gap the 5% approximate-function
+  tolerance would have hidden on smaller inputs (`functions.py`, `percentile`).
+- ~~`has` tokenization: regex boundaries vs UDF.~~ **Settled:** regex boundaries,
+  in one place — `term_match_sql` (`functions.py`), shared by the binary and list
+  forms. No UDF exists, and R3 records the boundary rule that a bare `\b` gets
+  wrong (`_` is a term separator in Kusto and a word character in regex).
+- ~~`mv-expand` null/empty-array row preservation (R9).~~ **Settled:** measured
+  in full and written up as **R18**, including the two edges that do not follow
+  from each other — a null is *one* element rather than zero, and an empty array
+  contributes no row alone but a null row when zipped against a non-empty one.
 
 ## 10. Adding a mapping — checklist
 
