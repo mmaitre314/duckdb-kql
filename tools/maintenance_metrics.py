@@ -114,6 +114,23 @@ def ratchets() -> dict[str, int | None]:
     return found
 
 
+#: `FunctionSpec.note` is overloaded: most rows carry one of these bare labels,
+#: which restate the `kind`/`arities` columns and warn of nothing. Nothing reads
+#: them — the dispatcher uses `arities` for variadic and `_SPECIAL_FORMS` for
+#: special — so they are documentation, and thin documentation at that.
+#:
+#: Counting them made `rows_with_a_gotcha_note` read 29 where the number of rows
+#: that actually warn about a limitation is 7. Same defect as the RUF100
+#: `--select` one the first survey found: a metric measuring something adjacent
+#: to what it is named for.
+_NOT_A_GOTCHA = ("special", "variadic")
+
+
+def _is_gotcha(note: str) -> bool:
+    """Whether *note* warns about something, rather than labelling the row."""
+    return bool(note) and not note.startswith(_NOT_A_GOTCHA)
+
+
 def mapping_surface() -> dict[str, Any]:
     """Registry rows by kind — the coverage surface, and how it is expressed.
 
@@ -149,7 +166,9 @@ def mapping_surface() -> dict[str, Any]:
         # up is a design signal, not a coverage win.
         "udf_mappings": kinds.get("udf", 0),
         "rows_citing_an_r_rule": sum(1 for s in SCALAR_FUNCTIONS.values() if s.rules),
-        "rows_with_a_gotcha_note": sum(1 for s in SCALAR_FUNCTIONS.values() if s.note),
+        "rows_with_a_gotcha_note": sum(
+            1 for s in SCALAR_FUNCTIONS.values() if _is_gotcha(s.note)
+        ),
         "translate_loc": translate_loc,
         "hand_written_loc_per_row": round((translate_loc - registry_loc) / rows, 1)
         if rows

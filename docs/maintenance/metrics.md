@@ -62,7 +62,7 @@ commit wearing a refactor's clothes (M1).
 | `hand_written_loc_per_row` | **down or flat** | The architecture's health. Support is meant to grow by adding rows, not emitter branches (M8, `../ai-cost-strategy.md` §6.2). A rising number means the table is losing to the code |
 | `udf_mappings` | flat at 0 | A Python UDF leaves DuckDB's engine: slow, and ours to keep correct. `TRANSLATION.md` §7 makes it the last resort — a rise is a design signal, not a coverage win |
 | `rows_citing_an_r_rule` | up, as a share of rows | A row that cites no R-rule was either checked against the trap catalog and cleared, or never checked. The share is a proxy for which |
-| `rows_with_a_gotcha_note` | up | The `Limitations and gotchas` column is [the point of the support matrix](../../CONTRIBUTING.md) |
+| `rows_with_a_gotcha_note` | up | The `Limitations and gotchas` column is [the point of the support matrix](../../CONTRIBUTING.md). **Counts prose only since 2026-08-23**: `FunctionSpec.note` also holds the bare labels `special` and `variadic:…`, which restate other columns, are read by nothing, and warn of nothing. Counting them read 29 against a true 7, so the baseline below is not comparable across that change |
 | `deliberate_refusals` | up is *good* | A refusal with a reason is a contribution. This number falling without matching new mappings means something started guessing |
 
 ### 3. Structure — *how hard is the code to change?*
