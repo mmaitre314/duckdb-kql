@@ -614,7 +614,7 @@ def test_ingesting_nothing_reports_no_extent(writable) -> None:
 
 def test_the_client_and_kql_agree(writable) -> None:
     """The bug in one sentence: these two ran the same command differently."""
-    import duckdb_kql  # noqa: PLC0415
+    import duckdb_kql
 
     con = writable._connection
     duckdb_kql.kql(con, f".set-or-replace ViaKql <| {DT}", database="MyDatabase")
@@ -704,7 +704,7 @@ def test_dynamic_renders_as_json_not_a_python_repr(client) -> None:
 
 
 def test_a_long_table_is_truncated_with_a_count(client) -> None:
-    from duckdb_kql.kusto._display import MAX_ROWS  # noqa: PLC0415
+    from duckdb_kql.kusto._display import MAX_ROWS
 
     total = MAX_ROWS + 25
     html = client.execute("db", f"range i from 1 to {total} step 1")._repr_html_()
@@ -713,7 +713,7 @@ def test_a_long_table_is_truncated_with_a_count(client) -> None:
 
 
 def test_a_long_cell_is_elided(client) -> None:
-    from duckdb_kql.kusto._display import MAX_CELL  # noqa: PLC0415
+    from duckdb_kql.kusto._display import MAX_CELL
 
     html = client.execute("db", f"print s = strrep('x', {MAX_CELL + 50})")._repr_html_()
     assert "…" in html
@@ -738,7 +738,7 @@ def test_reprs_say_what_the_object_holds(client) -> None:
 
 def test_rendering_does_not_need_pandas(client, monkeypatch) -> None:
     """pandas is an optional extra; a response must still print without it."""
-    import builtins  # noqa: PLC0415
+    import builtins
 
     real_import = builtins.__import__
 

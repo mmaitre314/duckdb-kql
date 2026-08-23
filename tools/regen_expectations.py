@@ -28,12 +28,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from duckdb_kql.comparison import (  # noqa: E402
+from duckdb_kql.comparison import (
     ComparisonOptions,
     compare,
     is_nondeterministic,
 )
-from duckdb_kql.oracle import DEFAULT_ENDPOINT, EmulatorError, KustoEmulator  # noqa: E402
+from duckdb_kql.oracle import DEFAULT_ENDPOINT, EmulatorError, KustoEmulator
 
 DEFAULT_CORPUS = Path("tests/cases/docs/docs-corpus.json")
 

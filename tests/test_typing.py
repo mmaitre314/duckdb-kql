@@ -131,7 +131,7 @@ def test_py_typed_is_shipped_in_the_wheel() -> None:
     Hatchling includes package data by default, but "by default" is a thing
     that changes; the wheel is what the user gets.
     """
-    from conftest import read_pyproject  # noqa: PLC0415
+    from conftest import read_pyproject
 
     config = read_pyproject()
     packages = config["tool"]["hatch"]["build"]["targets"]["wheel"]["packages"]

@@ -321,7 +321,7 @@ def test_the_boundary_is_only_folded_where_python_agrees_with_duckdb(con) -> Non
     "wherever we fold, Python agrees". `can_fold_term_boundary` withholds the
     fold outside ASCII, which every Unicode version has always agreed on.
     """
-    from duckdb_kql.translate.functions import (  # noqa: PLC0415
+    from duckdb_kql.translate.functions import (
         can_fold_term_boundary,
         is_term_char,
     )

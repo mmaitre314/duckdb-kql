@@ -23,7 +23,7 @@ pytestmark = pytest.mark.skipif(
 
 def _generator():
     sys.path.insert(0, str(TOOLS))
-    import gen_support_matrix  # noqa: PLC0415
+    import gen_support_matrix
 
     return gen_support_matrix
 
@@ -43,7 +43,7 @@ def test_every_registry_entry_appears() -> None:
     reader checks the table, does not find the function, and assumes it raises.
     """
     gen = _generator()
-    from duckdb_kql.translate.functions import (  # noqa: PLC0415
+    from duckdb_kql.translate.functions import (
         AGGREGATE_FUNCTIONS,
         BINARY_OPERATORS,
         SCALAR_FUNCTIONS,
@@ -68,16 +68,16 @@ def test_every_probe_is_a_real_query() -> None:
     the second belongs in the "not supported" column.
     """
     gen = _generator()
-    import duckdb_kql  # noqa: PLC0415
-    from duckdb_kql.errors import KqlSyntaxError  # noqa: PLC0415
+    import duckdb_kql
+    from duckdb_kql.errors import KqlSyntaxError
 
     broken = []
     for _, kql, _ in gen.OPERATORS + gen.SOURCES:
         try:
             duckdb_kql.to_sql(kql, schema=gen.PROBE_SCHEMA)
-        except KqlSyntaxError:
+        except KqlSyntaxError:  # noqa: PERF203 - one probe per operator, by design
             broken.append(kql)
-        except Exception:  # noqa: BLE001, S110 - unsupported is the expected outcome
+        except Exception:  # noqa: BLE001 - unsupported is the expected outcome
             pass
     assert not broken, (
         "these probes no longer parse, so their rows report 'not supported' for "

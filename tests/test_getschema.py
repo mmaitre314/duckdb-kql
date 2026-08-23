@@ -121,7 +121,7 @@ def test_the_sql_expression_and_the_python_function_agree() -> None:
     `getschema` contradicting the column types printed beside it is a peculiarly
     confusing thing to ship.
     """
-    from duckdb_kql.types import DUCKDB_TO_KQL, kusto_type  # noqa: PLC0415
+    from duckdb_kql.types import DUCKDB_TO_KQL, kusto_type
 
     con = duckdb_kql.connect()
     for duckdb_type, expected in DUCKDB_TO_KQL.items():

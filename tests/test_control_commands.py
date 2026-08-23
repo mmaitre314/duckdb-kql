@@ -295,7 +295,7 @@ def test_a_query_is_still_a_query() -> None:
 @pytest.mark.parametrize("command", SUPPORTED)
 def test_the_kusto_client_returns_the_same_shape(con, command: str) -> None:
     """One implementation. The two used to be written separately, and drifted."""
-    from duckdb_kql.kusto import KustoClient  # noqa: PLC0415
+    from duckdb_kql.kusto import KustoClient
 
     with KustoClient(con) as client:
         table = client.execute_mgmt("db", command).primary_results[0]
@@ -319,8 +319,8 @@ def test_layer_2_refuses_with_its_own_error_type() -> None:
     through one translation quietly changed this to `KustoServiceError` until
     the client's own tests caught it.
     """
-    from duckdb_kql.kusto import KustoClient  # noqa: PLC0415
-    from duckdb_kql.kusto.exceptions import KustoUnsupportedError  # noqa: PLC0415
+    from duckdb_kql.kusto import KustoClient
+    from duckdb_kql.kusto.exceptions import KustoUnsupportedError
 
     with KustoClient(":memory:") as client, pytest.raises(KustoUnsupportedError) as caught:
         client.execute_mgmt("db", ".drop table T")
@@ -403,7 +403,7 @@ def test_the_split_matches_the_command_before_looking_for_a_pipe() -> None:
     head first means only commands whose syntax we know are ever divided, and an
     unsupported one is reported whole rather than mis-split.
     """
-    from duckdb_kql.control import split_command  # noqa: PLC0415
+    from duckdb_kql.control import split_command
 
     assert split_command(".show tables") == (".show tables", "")
     assert split_command(".show tables | limit 3") == (".show tables", "| limit 3")

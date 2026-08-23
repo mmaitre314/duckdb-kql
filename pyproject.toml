@@ -169,7 +169,28 @@ line-length = 100
 extend-exclude = ["src/duckdb_kql/_antlr", "src/duckdb_kql/_version.py"]
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B"]
+# The five codes after the families are there because the code was already
+# annotated for them: 113 `# noqa` directives named rules nothing ran, which is
+# a checker that has quietly stopped checking in a repo whose charter is about
+# exactly that (docs/maintenance/README.md M11). Each of these costs a handful
+# of new suppressions and makes ~50 existing ones load-bearing, with RUF100
+# below keeping them true.
+#
+# Two rules the code was also annotated for are deliberately NOT here, because
+# enabling them would buy nothing:
+#
+#   S101   — 1,277 findings, essentially every `assert` in the test suite. An
+#            assert in a test is the test.
+#   PLC0415 — 177 findings against 73 annotations. Function-level imports are
+#            how the layering promise is kept (importing `duckdb_kql` must not
+#            import `duckdb`), so the rule would be suppressed at every site
+#            that matters and enforced at none.
+#
+# Their directives were deleted rather than left to look like discipline.
+select = ["E", "F", "I", "UP", "B", "BLE001", "N802", "PERF203", "RUF012", "S603"]
+# A directive that suppresses nothing is the ledger drifting back. Enforced, not
+# merely measured.
+extend-select = ["RUF100"]
 
 [tool.mypy]
 files = ["src/duckdb_kql"]

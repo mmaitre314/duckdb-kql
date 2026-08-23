@@ -26,7 +26,7 @@ from collections import Counter
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
-from duckdb_kql import fixtures, validate  # noqa: E402
+from duckdb_kql import fixtures, validate
 
 FENCE_RE = re.compile(r"^```[kK]usto\s*$(.*?)^```\s*$", re.MULTILINE | re.DOTALL)
 LINE_COMMENT_RE = re.compile(r"//[^\n]*")
@@ -190,10 +190,10 @@ def main() -> int:
         return 1
 
     try:
-        commit = subprocess.check_output(
+        commit = subprocess.check_output(  # noqa: S603 - literal argv, no shell
             ["git", "-C", str(args.repo), "rev-parse", "HEAD"], text=True
         ).strip()
-    except Exception:
+    except Exception:  # noqa: BLE001 - no git, no repo, no HEAD: all mean "unknown"
         commit = "unknown"
 
     r = harvest(args.repo, args.out, commit)

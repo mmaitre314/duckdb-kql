@@ -207,10 +207,10 @@ def main() -> int:
         return 1
 
     try:
-        commit = subprocess.check_output(
+        commit = subprocess.check_output(  # noqa: S603 - literal argv, no shell
             ["git", "-C", str(args.repo), "rev-parse", "HEAD"], text=True
         ).strip()
-    except Exception:
+    except Exception:  # noqa: BLE001 - no git, no repo, no HEAD: all mean "unknown"
         commit = "unknown"
 
     result = scan(query_dir)

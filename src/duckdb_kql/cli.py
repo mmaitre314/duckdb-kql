@@ -141,7 +141,7 @@ def _translate_command(args: argparse.Namespace) -> int:
 
 def _script_command(args: argparse.Namespace) -> int:
     """``duckdb-kql script`` — run a KQL script against a DuckDB database."""
-    from . import engine  # noqa: PLC0415
+    from . import engine
 
     try:
         text = sys.stdin.read() if args.file == "-" else Path(args.file).read_text(
@@ -158,7 +158,7 @@ def _script_command(args: argparse.Namespace) -> int:
         # is worth more for a script than for a query: several of its statements
         # write, and the ones after a mistake have already run by the time it
         # shows up.
-        from . import to_sql  # noqa: PLC0415
+        from . import to_sql
 
         for index, (line, statement) in enumerate(statements, start=1):
             try:
@@ -231,7 +231,7 @@ def _serve_command(args: argparse.Namespace) -> int:
     """``duckdb-kql serve`` — a local Kusto endpoint over a DuckDB database."""
     # Imported here, not at module scope: this is the only subcommand that needs
     # a database, and `translate` is documented to run without one installed.
-    from .server import serve  # noqa: PLC0415
+    from .server import serve
 
     origins = tuple(args.allow_origin) if args.allow_origin else ADX_ORIGINS
     clusters = None

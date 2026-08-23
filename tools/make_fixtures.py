@@ -18,8 +18,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from duckdb_kql import fixtures  # noqa: E402
-from duckdb_kql.oracle import DEFAULT_ENDPOINT, EmulatorError, KustoEmulator  # noqa: E402
+from duckdb_kql import fixtures
+from duckdb_kql.oracle import DEFAULT_ENDPOINT, EmulatorError, KustoEmulator
 
 
 def main() -> int:

@@ -912,7 +912,7 @@ def _lower_entity(node: Any) -> Entity | None:
         and calls[0][1]
         and calls[1][1]
     ):
-        from .clusters import normalize_cluster  # noqa: PLC0415
+        from .clusters import normalize_cluster
 
         return Entity(database=calls[1][1], cluster=normalize_cluster(calls[0][1]))
     return None
@@ -1860,7 +1860,10 @@ def _lower_in_list(node: Any) -> ir.Expr:
     for r in rules[1:]:
         try:
             items.append(_lower_expr(r))
-        except KqlUnsupportedError:
+        # The PERF203 suppression below: the handler is per-item on purpose —
+        # one rule failing to lower is what identifies the tabular form, so it
+        # cannot be hoisted out of the loop.
+        except KqlUnsupportedError:  # noqa: PERF203 - per-item, see above
             # The right-hand side may be a whole tabular expression rather than
             # a value list -- `x in (T | project col)`. That is what the vendored
             # grammar patch (grammar/UPSTREAM.md, PATCH 001) exists to accept.
@@ -1902,7 +1905,7 @@ def _lower_has_list(node: Any, rules: list[Any], op: str) -> ir.Expr:
     for r in rules[1:]:
         try:
             items.append(_lower_expr(r))
-        except KqlUnsupportedError:
+        except KqlUnsupportedError:  # noqa: PERF203 - per-item, as in `in` above
             # Same shape as the `in` case: a tabular right-hand side rather than
             # a value list. `x has_any (T | project col)` is accepted by Kusto.
             if len(rules) != 2:
@@ -2234,7 +2237,7 @@ def _qualify_table(
 ) -> ir.TableRef:
     """Resolve a cluster reference, or apply the default database."""
     if source.cluster is not None:
-        from .clusters import resolve  # noqa: PLC0415
+        from .clusters import resolve
 
         target = resolve(source.cluster, source.database or "", clusters)
         return dataclasses.replace(source, database=target, cluster=None)

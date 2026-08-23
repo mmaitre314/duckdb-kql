@@ -147,7 +147,7 @@ def test_documented_support_level_matches_the_code() -> None:
 
 
 def _pyproject() -> dict:
-    from conftest import read_pyproject  # noqa: PLC0415
+    from conftest import read_pyproject
 
     return read_pyproject()
 
@@ -240,7 +240,7 @@ def test_the_query_entry_point_is_not_called_sql() -> None:
     reach for: DuckDB's own method is `con.sql()`, and a well-meaning alias would
     put the confusion straight back.
     """
-    import duckdb_kql  # noqa: PLC0415
+    import duckdb_kql
 
     assert "kql" in duckdb_kql.__all__
     assert "sql" not in duckdb_kql.__all__, (

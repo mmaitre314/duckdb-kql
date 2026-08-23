@@ -109,9 +109,9 @@ def test_it_binds_to_loopback_only(server) -> None:
 
 def test_the_cli_cannot_ask_for_a_different_bind_address() -> None:
     """`--host` must not exist. A flag is all it would take to undo the above."""
-    import argparse  # noqa: PLC0415
+    import argparse
 
-    from duckdb_kql.cli import _parser  # noqa: PLC0415
+    from duckdb_kql.cli import _parser
 
     (subparsers,) = [
         action
@@ -246,7 +246,7 @@ def test_the_post_the_web_ui_makes_after_the_preflight_succeeds(server) -> None:
 
 def test_the_server_header_reports_a_version(server) -> None:
     """It read `duckdb-kql/duckdb-kql` — the cluster name in the version slot."""
-    from duckdb_kql import __version__  # noqa: PLC0415
+    from duckdb_kql import __version__
 
     _, headers, _ = call(server, "/", method="GET")
     assert headers["Server"].startswith(f"duckdb-kql/{__version__} ")
@@ -645,7 +645,7 @@ def two_databases(tmp_path):
     quietly resolved both sides in the first, because `Name` exists in only one
     of the files.
     """
-    import duckdb  # noqa: PLC0415
+    import duckdb
 
     con = duckdb.connect(str(tmp_path / "sales.duckdb"))
     con.execute("CREATE TABLE Orders(CustomerId BIGINT, Amount DOUBLE)")
@@ -697,7 +697,7 @@ def test_a_failing_init_script_stops_the_server_starting(tmp_path) -> None:
 
 
 def test_an_init_script_must_be_sql(tmp_path) -> None:
-    from duckdb_kql.server import read_init_script  # noqa: PLC0415
+    from duckdb_kql.server import read_init_script
 
     script = tmp_path / "setup.txt"
     script.write_text("ATTACH 'x' AS y;")
@@ -712,7 +712,7 @@ def test_a_kql_init_script_is_refused_by_name_not_by_accident(tmp_path) -> None:
     a typo, and handing it to DuckDB would fail as a SQL syntax error partway
     down someone's file.
     """
-    from duckdb_kql.server import INIT_SCRIPT_LANGUAGES, read_init_script  # noqa: PLC0415
+    from duckdb_kql.server import INIT_SCRIPT_LANGUAGES, read_init_script
 
     assert ".kql" in INIT_SCRIPT_LANGUAGES
     script = tmp_path / "setup.kql"

@@ -178,7 +178,7 @@ def coerce(value: Any, kind: str, name: str) -> Any:
             raise _mismatch(name, kind, value)
         try:
             return Decimal(value)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             raise _mismatch(name, kind, value) from exc
 
     if kind == "datetime":

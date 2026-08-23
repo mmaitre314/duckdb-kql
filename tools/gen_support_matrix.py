@@ -26,6 +26,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
+# E402 x4 below: these follow the `sys.path` shim above, which is the whole
+# point of it — the tool runs from a checkout without the package installed.
 import duckdb_kql  # noqa: E402
 from duckdb_kql.errors import KqlError  # noqa: E402
 from duckdb_kql.translate import _SPECIAL_FORMS  # noqa: E402

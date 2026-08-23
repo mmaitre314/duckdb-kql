@@ -132,7 +132,7 @@ class Result(NamedTuple):
 
 def _wire(value: Any, kind: str) -> Any:
     """A DuckDB value as the REST wire form, which is mostly JSON's."""
-    from .kusto._models import to_wire  # noqa: PLC0415
+    from .kusto._models import to_wire
 
     return to_wire(value, kind)
 
@@ -305,7 +305,7 @@ def check_options(options: dict[str, Any]) -> list[str]:
 
     Empty when every option is honoured or is a no-op that means what it says.
     """
-    from .kusto.client_request_properties import (  # noqa: PLC0415
+    from .kusto.client_request_properties import (
         OPTION_SUPPORT,
         OptionSupport,
     )
@@ -409,7 +409,7 @@ class _Handler(BaseHTTPRequestHandler):
 
     # -- routes -----------------------------------------------------------
 
-    def do_OPTIONS(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler's interface
+    def do_OPTIONS(self) -> None:  # BaseHTTPRequestHandler's interface
         """CORS preflight. Without this the browser never sends the real request."""
         origin = self._origin_allowed()
         if origin is None:
@@ -451,7 +451,7 @@ class _Handler(BaseHTTPRequestHandler):
         """
         return self.headers.get("Access-Control-Request-Headers", _DEFAULT_ALLOW_HEADERS)
 
-    def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler's interface
+    def do_GET(self) -> None:  # BaseHTTPRequestHandler's interface
         """A human landing page. Anything else 404s."""
         if not self._is_local():
             self._send(403, error_response("local connections only"))
@@ -472,7 +472,7 @@ class _Handler(BaseHTTPRequestHandler):
             return
         self._send(404, error_response(f"no route for {self.path}"))
 
-    def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler's interface
+    def do_POST(self) -> None:  # BaseHTTPRequestHandler's interface
         if not self._is_local():
             # Unreachable while the socket is bound to loopback. Kept because a
             # bind address is one edit away from being widened, and this is the
@@ -663,7 +663,7 @@ class KustoRestServer(ThreadingHTTPServer):
         Serialized: a DuckDB connection is not safe to use from several threads
         at once, and ThreadingHTTPServer will happily try.
         """
-        from .engine import kql  # noqa: PLC0415
+        from .engine import kql
 
         # `default` is the placeholder name the ADX UI shows before a database
         # has been chosen; it is not a database this process can qualify with.
@@ -703,7 +703,7 @@ def _declared_schema(csl: str) -> tuple[CommandColumn, ...] | None:
     the query operators over it and the answer is typed like any other query —
     so only the bare form gets the transcribed labels.
     """
-    from .databases import database_command_schema, is_database_command  # noqa: PLC0415
+    from .databases import database_command_schema, is_database_command
 
     if is_database_command(csl):
         # A lifecycle command is not in `SCHEMA` — it takes arguments, so it is
@@ -800,7 +800,7 @@ def build_server(
     *init* runs before the socket is bound, so a client can never observe the
     database halfway through its own setup.
     """
-    from .engine import connect  # noqa: PLC0415
+    from .engine import connect
 
     con = connect(database)
     if init is not None:

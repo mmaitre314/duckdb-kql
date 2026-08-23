@@ -92,6 +92,8 @@ def dataframe_from_result_table(
         elif converters_by_type and kind in converters_by_type:
             converter = converters_by_type.get(kind)
         elif nullable_bools and kind == "bool":
+            # E731 is suppressed below: every other arm of this chain binds
+            # a callable, and a def here would read as a different thing.
             converter = lambda col, df: df[col].astype(pd.BooleanDtype())  # noqa: E731
         else:
             converter = default.get(kind)

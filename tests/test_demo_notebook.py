@@ -59,8 +59,8 @@ def test_the_notebook_json_has_no_duplicate_keys(path: Path) -> None:
 
     Checked here so the failure names the key and the cell instead.
     """
-    import json  # noqa: PLC0415
-    from collections import Counter  # noqa: PLC0415
+    import json
+    from collections import Counter
 
     duplicated: list[str] = []
 
@@ -174,8 +174,8 @@ def test_the_notebook_still_runs(path: Path) -> None:
     the API it demonstrates. Its first cell installs the package only when it is
     not already importable, so this runs against the working tree, not PyPI.
     """
-    from nbclient import NotebookClient  # noqa: PLC0415
-    from nbclient.exceptions import CellExecutionError  # noqa: PLC0415
+    from nbclient import NotebookClient
+    from nbclient.exceptions import CellExecutionError
 
     nb = _notebook(path)
     client = NotebookClient(

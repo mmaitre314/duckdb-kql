@@ -24,7 +24,7 @@ import uuid
 from collections.abc import Callable, Iterator, Sequence
 from decimal import Decimal
 from enum import Enum
-from typing import Any
+from typing import Any, ClassVar
 
 from ..types import kusto_type
 
@@ -269,7 +269,7 @@ class KustoResultRow:
 
     #: Wire form -> Python, matching the SDK's own conversion table. Note that
     #: `dynamic` is absent from it there too: JSON arrives parsed.
-    conversion_funcs: dict[str, Callable[[Any], Any]] = {
+    conversion_funcs: ClassVar[dict[str, Callable[[Any], Any]]] = {
         "datetime": _parse_datetime,
         "timespan": _parse_timespan,
         "decimal": Decimal,

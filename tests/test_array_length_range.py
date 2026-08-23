@@ -135,7 +135,7 @@ def test_a_temporal_range_is_not_cast_to_bigint(con) -> None:
     a datetime does not even convert. Pinned because the first attempt at the
     numeric fix broke exactly this.
     """
-    import datetime as dt  # noqa: PLC0415
+    import datetime as dt
 
     rows = _rows(
         con,

@@ -59,7 +59,7 @@ MECHANICAL = (
 
 
 def _run(*args: str) -> str:
-    return subprocess.run(
+    return subprocess.run(  # noqa: S603 - every caller passes a literal argv, no shell
         args, cwd=ROOT, capture_output=True, text=True, check=False
     ).stdout
 
@@ -124,7 +124,7 @@ def mapping_surface() -> dict[str, Any]:
     """
     sys.path.insert(0, str(ROOT / "src"))
     try:
-        from duckdb_kql.translate.functions import (  # noqa: PLC0415 - optional import
+        from duckdb_kql.translate.functions import (  # optional import
             AGGREGATE_FUNCTIONS,
             BINARY_OPERATORS,
             SCALAR_FUNCTIONS,

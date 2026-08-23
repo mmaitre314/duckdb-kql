@@ -158,7 +158,7 @@ def _run(case: dict) -> tuple[str, str]:
         sql = duckdb_kql.to_sql(case["kql"], schema=_schema())
     except KqlError as e:
         return "unsupported", type(e).__name__
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001 - a crash is a result to report, not to raise
         # The public API must never leak an internal exception; surface these
         # rather than letting one abort the whole sweep.
         return "crash", f"{type(e).__name__}: {e}"
@@ -213,7 +213,9 @@ def _is_reproducible(sql: object, first: dict, attempts: int = 3) -> bool:
         try:
             if _execute(sql) != first:
                 return False
-        except Exception:  # noqa: BLE001 - an inconsistent failure is instability too
+        # PERF203 is suppressed below: catching per attempt *is* the
+        # measurement — the loop exists to see whether one of N runs differs.
+        except Exception:  # noqa: BLE001, PERF203 - an inconsistent failure is instability too
             return False
     return True
 

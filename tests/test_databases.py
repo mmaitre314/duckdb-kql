@@ -216,7 +216,7 @@ def test_they_translate_without_a_connection() -> None:
 
 
 def test_the_kusto_client_runs_them(con) -> None:
-    from duckdb_kql.kusto import KustoClient  # noqa: PLC0415
+    from duckdb_kql.kusto import KustoClient
 
     client = KustoClient(con)
     table = client.execute("db", ".create database ViaClient volatile").primary_results[0]
@@ -231,8 +231,8 @@ def test_the_kusto_client_runs_them(con) -> None:
 
 
 def test_the_kusto_client_honours_allow_write(con) -> None:
-    from duckdb_kql.kusto import KustoClient  # noqa: PLC0415
-    from duckdb_kql.kusto.exceptions import KustoUnsupportedError  # noqa: PLC0415
+    from duckdb_kql.kusto import KustoClient
+    from duckdb_kql.kusto.exceptions import KustoUnsupportedError
 
     read_only = KustoClient(con, allow_write=False)
     with pytest.raises(KustoUnsupportedError):

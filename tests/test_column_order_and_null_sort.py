@@ -85,7 +85,7 @@ def test_output_columns_agrees_with_what_runs(con) -> None:
     It computed `kept + added` too, so a join after an overwriting `extend`
     inherited the wrong names — the reason this is not merely cosmetic.
     """
-    from duckdb_kql.lower import lower  # noqa: PLC0415
+    from duckdb_kql.lower import lower
     from duckdb_kql.schema import output_columns
 
     query = lower("T | extend a = 99")

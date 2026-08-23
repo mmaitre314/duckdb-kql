@@ -134,7 +134,7 @@ def test_a_shared_connection_still_needs_external_serialization(con) -> None:
         for _ in range(40):
             try:
                 duckdb_kql.kql(con, "T | project v").fetchall()
-            except Exception as exc:  # noqa: BLE001 - collecting is the point
+            except Exception as exc:  # noqa: BLE001, PERF203 - collecting per iteration is the point
                 errors.append(type(exc).__name__)
 
     threads = [threading.Thread(target=run) for _ in range(3)]

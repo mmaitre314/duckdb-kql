@@ -44,8 +44,8 @@ def _cases() -> list[tuple[str, str]]:
 
 def snapshot() -> str:
     """One block per case: the emitted SQL, or the refusal it raised."""
-    from duckdb_kql import to_sql  # noqa: PLC0415 - keeps --help import-free
-    from duckdb_kql.errors import KqlError  # noqa: PLC0415
+    from duckdb_kql import to_sql  # keeps --help import-free
+    from duckdb_kql.errors import KqlError
 
     lines: list[str] = []
     for case_id, kql in _cases():
@@ -63,7 +63,7 @@ def snapshot() -> str:
 
 
 def compare(baseline: Path, current: str, limit: int) -> int:
-    import difflib  # noqa: PLC0415 - only needed on this path
+    import difflib  # only needed on this path
 
     before = baseline.read_text(encoding="utf-8").splitlines()
     after = current.splitlines()

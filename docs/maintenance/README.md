@@ -192,8 +192,8 @@ restructuring to be accepted.
   `6f12ed4`: 5 findings (1 Safe/Careful, 1 Careful, 2 Safe, 1 docs-only), 9 areas
   enumerated as healthy. It also caught a defect in the metrics tool itself — the
   RUF100 check was measured with `--select` rather than `--extend-select`, which
-  overcounted unused suppressions 125 against a true 113. That is fixed; the rest
-  is open.
+  overcounted unused suppressions 125 against a true 113. Findings 1, 3 and 5
+  are closed; see the survey's Disposition table for where each landed.
 
 ## What "done" looks like
 

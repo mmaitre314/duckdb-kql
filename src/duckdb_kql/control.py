@@ -318,7 +318,7 @@ def _entity_groups_sql(groups: ResolvedGroups | None) -> str:
     of the entity references, separators and all —
     ``["database('a')","database('b')"]``, with no space after the comma.
     """
-    import json  # noqa: PLC0415
+    import json
 
     if not groups:
         return (

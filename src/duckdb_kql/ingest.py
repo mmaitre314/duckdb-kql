@@ -275,8 +275,8 @@ def _schema_guard(target: str, body: str) -> str:
     cluster does. Mapping both sides through :func:`types.kusto_type_sql` also
     means the types named in the message are the ones that were compared.
     """
-    from .translate import quote_string  # noqa: PLC0415
-    from .types import kusto_type_sql  # noqa: PLC0415
+    from .translate import quote_string
+    from .types import kusto_type_sql
 
     def types_of(relation: str) -> str:
         # `DESCRIBE` as a subquery gives one row per column, in order. The order

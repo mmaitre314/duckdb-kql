@@ -76,7 +76,7 @@ def test_the_embedded_kql_query_still_translates(tmp_path) -> None:
     Extracted from the script rather than copied here: a copy would keep passing
     after the script's query drifted, which is the failure this is for.
     """
-    import duckdb_kql  # noqa: PLC0415
+    import duckdb_kql
 
     script = _script()
     # Everything between the heredoc marker and its terminator. The `.split`

@@ -1239,7 +1239,7 @@ def render_lookup(
             f"lookup kind:{op.kind}", hint="lookup supports only leftouter and inner"
         )
 
-    from ..schema import lookup_output_columns  # noqa: PLC0415 - avoids a cycle
+    from ..schema import lookup_output_columns  # avoids a cycle
 
     dropped = {k.right for k in op.keys}
     kept = [c for c in right_cols if c not in dropped]
@@ -2012,7 +2012,7 @@ def render_path(node: ir.PathAccess) -> str:
         if step.name is not None:
             sql = f"json_extract({sql}, {quote_string('$.' + _json_path_key(step.name))})"
         else:
-            assert step.index is not None  # noqa: S101 - a step is a name or an index
+            assert step.index is not None  # a step is a name or an index
             idx = render_expr(step.index)
             frag = (
                 f"'$[' || CASE WHEN {idx} < 0 THEN '#' || CAST({idx} AS VARCHAR) "

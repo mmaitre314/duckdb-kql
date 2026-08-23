@@ -107,8 +107,8 @@ def _parse_entity(group: str, text: object) -> Entity:
     # Parsed by the ordinary KQL path, against a probe table name, so an entry
     # behaves exactly as the same text written inline in a query would. Doing
     # the string-splitting by hand here would be a second syntax to keep in step.
-    from .errors import KqlError  # noqa: PLC0415
-    from .lower import parse_entity_reference  # noqa: PLC0415
+    from .errors import KqlError
+    from .lower import parse_entity_reference
 
     try:
         entity = parse_entity_reference(text)

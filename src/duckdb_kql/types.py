@@ -121,7 +121,7 @@ def kusto_type_sql(column: str) -> str:
     Generated from the same table, so the types ``getschema`` reports and the
     types the Kusto client labels its columns with cannot disagree.
     """
-    from .translate import quote_string  # noqa: PLC0415
+    from .translate import quote_string
 
     whens = [
         f"WHEN {column} = {quote_string(duckdb)} THEN {quote_string(kql)}"
@@ -140,7 +140,7 @@ def kusto_type_sql(column: str) -> str:
 
 def net_type_sql(column: str) -> str:
     """:func:`net_type`, as a SQL expression over a *KQL* type name."""
-    from .translate import quote_string  # noqa: PLC0415
+    from .translate import quote_string
 
     whens = [
         f"WHEN {column} = {quote_string(kql)} THEN {quote_string(net)}"

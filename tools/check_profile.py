@@ -26,9 +26,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-import duckdb_kql  # noqa: E402
-from duckdb_kql import engine  # noqa: E402
-from duckdb_kql.errors import KqlError  # noqa: E402
+import duckdb_kql
+from duckdb_kql import engine
+from duckdb_kql.errors import KqlError
 
 DEFAULT_PROFILE = Path("tests/profiles/azure-monitor.json")
 
@@ -50,11 +50,11 @@ def probe(con, kql: str) -> tuple[bool, str]:
         sql = duckdb_kql.to_sql(kql, schema=engine.schema(con))
     except KqlError as e:
         return False, f"{type(e).__name__}: {e}"
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001 - a crash is a result to report, not to raise
         return False, f"crash: {type(e).__name__}: {e}"
     try:
         con.sql(sql).fetchall()
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001 - a crash is a result to report, not to raise
         return False, f"sql: {type(e).__name__}: {str(e).splitlines()[0]}"
     return True, ""
 

@@ -75,7 +75,7 @@ def test_output_directory_is_created(project: Path) -> None:
 def test_stdin_is_readable(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    import io  # noqa: PLC0415
+    import io
 
     monkeypatch.setattr("sys.stdin", io.StringIO("print x = 1"))
     assert main(["translate", "-"]) == EXIT_OK
@@ -150,7 +150,7 @@ def test_header_carries_no_version_or_timestamp(project: Path) -> None:
 
     A gate that cries wolf gets ignored, and then it is not a gate.
     """
-    from duckdb_kql import __version__  # noqa: PLC0415
+    from duckdb_kql import __version__
 
     out = project / "build"
     main(["translate", str(project / "queries"), "-o", str(out)])
@@ -321,7 +321,7 @@ def test_python_m_duckdb_kql_works(tmp_path: Path) -> None:
 
 
 def test_the_console_script_is_declared() -> None:
-    from conftest import read_pyproject  # noqa: PLC0415
+    from conftest import read_pyproject
 
     scripts = read_pyproject()["project"]["scripts"]
     assert scripts["duckdb-kql"] == "duckdb_kql.cli:main"
@@ -337,7 +337,7 @@ SUBCOMMANDS = ["translate", "script", "serve"]
 
 
 def test_the_subcommands_are_the_documented_ones() -> None:
-    from duckdb_kql.cli import _parser  # noqa: PLC0415
+    from duckdb_kql.cli import _parser
 
     (subparsers,) = [
         action
@@ -351,7 +351,7 @@ def test_the_subcommands_are_the_documented_ones() -> None:
 def test_every_subcommand_is_wired_to_a_handler(command: str) -> None:
     """Registering a subparser and forgetting `set_defaults(run=...)` would
     parse fine and then fail on the attribute, in front of the user."""
-    from duckdb_kql.cli import _parser  # noqa: PLC0415
+    from duckdb_kql.cli import _parser
 
     required = {"translate": ["x.kql"], "script": ["x.kql"]}
     args = _parser().parse_args([command, *required.get(command, [])])
@@ -408,7 +408,7 @@ def test_serve_help_describes_the_local_only_guarantee(
 
 
 def test_serve_defaults_to_an_in_memory_database() -> None:
-    from duckdb_kql.cli import _parser  # noqa: PLC0415
+    from duckdb_kql.cli import _parser
 
     args = _parser().parse_args(["serve"])
     assert args.database == ":memory:"
@@ -416,7 +416,7 @@ def test_serve_defaults_to_an_in_memory_database() -> None:
 
 
 def test_serve_takes_a_port_override() -> None:
-    from duckdb_kql.cli import _parser  # noqa: PLC0415
+    from duckdb_kql.cli import _parser
 
     assert _parser().parse_args(["serve", "--port", "9000"]).port == 9000
     assert _parser().parse_args(["serve", "-p", "9000"]).port == 9000

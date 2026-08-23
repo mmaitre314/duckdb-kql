@@ -147,25 +147,47 @@ the rest of it. Deletion is provable by the gate and free to review.
 
 ### Retire a suppression — *Safe to Careful*
 
-The suppression ledger stands at 125 `# noqa` directives, of which ruff reports
-**113 as unused** against the enabled rule set (`select = ["E", "F", "I", "UP",
-"B"]`). Measure it with `ruff check --extend-select RUF100`, never `--select
-RUF100` — the latter *replaces* the configured rules, so every directive looks
-unused and the count comes back 125. The 113 name rules — `PLC0415` (73), `BLE001` (21), `S603`, `N802` — that nothing
-runs; the other 12 are load-bearing and must stay. A directive that suppresses
+**Settled 2026-08-23 — the ledger is at zero and now self-enforcing.** Kept as a
+worked example, because the shape recurs and the reasoning is the reusable part.
+
+The ledger stood at 125 `# noqa` directives, of which **113 suppressed a rule
+nothing ran**. Measure that with `ruff check --extend-select RUF100`, never
+`--select RUF100` — the latter *replaces* the configured rules, so every
+directive looks unused and the count comes back 125. A directive that suppresses
 nothing is a checker that has quietly stopped checking, in a repo whose charter
-is about exactly that failure mode. There are only two honest resolutions, and
-both are maintenance work someone should do deliberately:
+is about exactly that failure mode. There were two honest resolutions:
 
 1. **Widen `select`** so the suppressions become load-bearing and their written
    reasons get enforced. Expect real findings on the way — that is the point.
 2. **Delete them** and stop annotating for a rule set the project does not run.
 
-Do not do the third thing, which is to leave 113 directives that look like
-enforced discipline and are not. Whichever way it goes, it is a single mechanical
-commit plus a `pyproject.toml` change — and it is the only item in this catalog
-whose diff is allowed to be large, because it is generated (`ruff --fix`), not
-written.
+Do not do the third thing, which is to leave directives that look like enforced
+discipline and are not.
+
+**Both, split by measurement** — which is the part worth copying. Counting each
+rule's true population (`--ignore-noqa --statistics`) turned "which resolution"
+from a matter of taste into arithmetic:
+
+| Rule | True findings | Already annotated | Verdict |
+|---|---|---|---|
+| `BLE001` | 19 | 21 | widen — costs 2 |
+| `PERF203` | 6 | 1 | widen — costs 5 |
+| `S603` | 7 | 4 | widen — costs 3 |
+| `N802` | 3 | 4 | widen — costs 2 |
+| `RUF012` | 3 | 1 | widen — and both were *fixable*, with `ClassVar` |
+| `PLC0415` | 177 | 73 | delete — function-level imports are how the layering promise is kept, so the rule would be suppressed wherever it matters and enforced nowhere |
+| `S101` | 1,277 | 1 | delete — an `assert` in a test is the test |
+
+Enabling whole families instead (`S`, `N`, `PERF`, `RUF`, `PL`) surfaces 1,849
+findings, which is a project rather than a maintenance commit. The narrow five
+cost 14.
+
+`RUF100` is now in `extend-select`, so the gate fails on a directive that
+suppresses nothing and the ledger cannot drift back. Two traps worth knowing if
+you do this again: `ruff --fix` deletes the *prose* along with the directive, so
+generate the edit if the reasons are worth keeping (11 were); and a comment that
+begins `# noqa` — even in prose, even mid-sentence — **is** a blanket directive,
+which RUF100 then flags. Both were hit while doing exactly this.
 
 ### Unify duplicated emitter branches — *Careful*
 

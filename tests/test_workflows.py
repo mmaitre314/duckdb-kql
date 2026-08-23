@@ -57,7 +57,7 @@ def test_the_ci_matrix_spans_the_supported_range() -> None:
     resolves on the newer interpreters, and it broke a lane nobody had run
     locally. So adding a classifier without adding the lane fails here.
     """
-    from conftest import read_pyproject  # noqa: PLC0415
+    from conftest import read_pyproject
 
     project = read_pyproject()["project"]
     matrix = [
@@ -101,9 +101,9 @@ def test_nothing_imports_a_stdlib_module_newer_than_the_floor() -> None:
     Module scope only. Importing inside a function with a fallback is the
     sanctioned pattern — `conftest.read_pyproject` is exactly that.
     """
-    import ast  # noqa: PLC0415
+    import ast
 
-    from conftest import read_pyproject  # noqa: PLC0415
+    from conftest import read_pyproject
 
     floor = tuple(
         int(p) for p in read_pyproject()["project"]["requires-python"].lstrip(">=").split(".")
@@ -146,7 +146,7 @@ def test_http_error_responses_are_closed_in_tests() -> None:
     `test_server.py` had the right pattern already (`with exc:`); a later file
     did not. This checks the convention instead of relying on remembering it.
     """
-    import ast  # noqa: PLC0415
+    import ast
 
     offenders = []
     for path in Path("tests").glob("*.py"):
@@ -212,7 +212,7 @@ def test_publishing_uses_trusted_publishing_not_a_stored_token() -> None:
 
 def test_readme_badges_point_at_workflows_that_exist() -> None:
     """A badge for a deleted workflow renders as a broken image, forever."""
-    import re  # noqa: PLC0415
+    import re
 
     readme = Path("README.md").read_text(encoding="utf-8")
     referenced = set(
@@ -250,7 +250,7 @@ def test_the_version_is_not_written_down_anywhere() -> None:
     A literal version in pyproject.toml is what made a release a multi-file
     edit, and what made it possible for the tag and the package to disagree.
     """
-    from conftest import read_pyproject  # noqa: PLC0415
+    from conftest import read_pyproject
 
     project = read_pyproject()["project"]
     assert "version" not in project, (
@@ -272,7 +272,7 @@ def test_the_version_is_taken_from_the_tag_verbatim() -> None:
     `only-version` returns the tag as written and lets the local segment
     (`+g1a2b3c`) distinguish builds, so any PEP 440 tag works.
     """
-    from conftest import read_pyproject  # noqa: PLC0415
+    from conftest import read_pyproject
 
     raw = read_pyproject()["tool"]["hatch"]["version"]["raw-options"]
     assert raw.get("version_scheme") == "only-version", (

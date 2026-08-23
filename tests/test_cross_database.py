@@ -73,7 +73,7 @@ def test_a_join_may_cross_databases() -> None:
 def test_the_ir_records_the_database_rather_than_flattening_the_name() -> None:
     """`TableRef("Sales.Orders")` would quote as one identifier and never
     resolve; the two parts have to stay apart until they are quoted."""
-    from duckdb_kql.lower import lower  # noqa: PLC0415
+    from duckdb_kql.lower import lower
 
     source = lower('database("Sales").Orders | count').source
     assert isinstance(source, ir.TableRef)
@@ -82,7 +82,7 @@ def test_the_ir_records_the_database_rather_than_flattening_the_name() -> None:
 
 
 def test_an_unqualified_ref_has_no_database() -> None:
-    from duckdb_kql.lower import lower  # noqa: PLC0415
+    from duckdb_kql.lower import lower
 
     source = lower("Local | count").source
     assert isinstance(source, ir.TableRef)

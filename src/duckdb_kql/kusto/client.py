@@ -27,7 +27,7 @@ import datetime as dt
 import re
 import threading
 import uuid
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 from ..entity_groups import EntityGroupMap
 from ..errors import KqlError
@@ -65,7 +65,7 @@ class KustoConnectionStringBuilder:
     """
 
     #: SDK keyword -> our attribute, for the subset that means something locally.
-    _KEYWORDS = {
+    _KEYWORDS: ClassVar[dict[str, str]] = {
         "data source": "data_source",
         "addr": "data_source",
         "address": "data_source",
@@ -225,7 +225,7 @@ class KustoClient:
         self.allow_write = allow_write
         #: Entities each **named** entity group stands for, for `macro-expand`.
         #: Parsed once here so a malformed entry fails at construction.
-        from ..entity_groups import parse_entity_groups  # noqa: PLC0415
+        from ..entity_groups import parse_entity_groups
 
         self.entity_groups = parse_entity_groups(entity_groups)
         self._connection: DuckDBPyConnection
@@ -331,7 +331,7 @@ class KustoClient:
                     columns = list(rel.columns)
                     types = [kusto_type(t) for t in rel.types]
                     rows = rel.fetchall()
-            except Exception as exc:  # noqa: BLE001 - any engine failure is the answer
+            except Exception as exc:  # any engine failure is the answer
                 raise KustoServiceError(str(exc)) from exc
 
         return self._response(query, columns, types, rows, properties)
@@ -395,7 +395,7 @@ class KustoClient:
                     columns = list(rel.columns)
                     types = [kusto_type(t) for t in rel.types]
                     rows = rel.fetchall()
-            except Exception as exc:  # noqa: BLE001 - any engine failure is the answer
+            except Exception as exc:  # any engine failure is the answer
                 raise KustoServiceError(str(exc)) from exc
 
         return self._response(query, columns, types, rows, properties)
@@ -457,7 +457,7 @@ class KustoClient:
                     columns = list(rel.columns)
                     types = [kusto_type(t) for t in rel.types]
                     rows = rel.fetchall()
-            except Exception as exc:  # noqa: BLE001 - any engine failure is the answer
+            except Exception as exc:  # any engine failure is the answer
                 raise KustoServiceError(str(exc)) from exc
 
         return self._response(query, columns, types, rows, properties)

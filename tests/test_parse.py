@@ -409,7 +409,12 @@ def test_each_flag_does_what_it_says(
     assert _rows(con, q) == [(expected,)]
 
 
-def test_the_flags_are_inline_because_duckdb_rejects_U_as_an_option(con) -> None:
+# N802 is suppressed on this and on `..._flags_U` below: the capital is the
+# KQL flag's own name, and flags are case-sensitive — `flags=I` is refused
+# (SEM0473). Lowercasing would misname the thing under test.
+def test_the_flags_are_inline_because_duckdb_rejects_U_as_an_option(  # noqa: N802
+    con,
+) -> None:
     """`regexp_extract`'s options argument takes `i`, `s` and `m` and answers
     *"Unrecognized Regex option U"* — so the prefix has to be `(?…)` in the
     pattern. Kusto composes one too: `flags=I` is refused as `(?I)`."""
@@ -448,7 +453,8 @@ def test_the_regex_shapes_are_not_the_simple_mode_shapes(
     assert _rows(con, q) == [(expected,)]
 
 
-def test_a_braced_guid_survives_flags_U(con) -> None:
+# N802 again, same reason: `U` is the flag, not a stray capital.
+def test_a_braced_guid_survives_flags_U(con) -> None:  # noqa: N802
     """The braces are an alternation rather than `\\{?…\\}?` for exactly this:
     under `U` the optional closing brace would go lazy and drop off, leaving
     `{74be…3642` for the cast."""
