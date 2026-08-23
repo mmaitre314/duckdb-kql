@@ -4,6 +4,7 @@
 
     duckdb-kql translate queries/ -o build/sql/           # KQL files -> SQL files
     duckdb-kql translate queries/ -o build/sql/ --check   # ... and fail if stale
+    duckdb-kql script schema.kql -d logs.duckdb           # set a database up
     duckdb-kql serve logs.duckdb                          # a local Kusto endpoint
 
 **translate** is the build-time path, and the point of it is that the *output*
@@ -16,6 +17,12 @@ the build instead of shipping a stale query.
 
 It is Layer 0 only — no database is opened and ``duckdb`` is never imported, so
 ``pip install duckdb-kql`` alone is enough to run it.
+
+**script** runs a KQL script — several statements separated by blank lines — in
+order against a DuckDB database, which is how a database gets set up and how the
+file that sets it up stays in the repository. Unlike ``translate`` it opens a
+database, so it needs the ``duckdb`` extra; ``--dry-run`` prints the SQL each
+statement would run and needs nothing.
 
 **serve** is a different job entirely: a local Kusto-compatible HTTP endpoint
 over a DuckDB database, so Kusto tools — including the Azure Data Explorer web
@@ -39,7 +46,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from . import __version__, to_sql
-from .errors import KqlError, KqlSyntaxError
+from .errors import KqlError, KqlScriptError, KqlSyntaxError
 
 # Layer 0: `server` is stdlib-only at import time and reaches for duckdb only
 # once a server is actually built, so naming its defaults here costs nothing.
@@ -125,6 +132,94 @@ def _translate_command(args: argparse.Namespace) -> int:
         )
         return EXIT_STALE
     return EXIT_OK
+
+
+# ---------------------------------------------------------------------------
+# script
+# ---------------------------------------------------------------------------
+
+
+def _script_command(args: argparse.Namespace) -> int:
+    """``duckdb-kql script`` — run a KQL script against a DuckDB database."""
+    from . import engine  # noqa: PLC0415
+
+    try:
+        text = sys.stdin.read() if args.file == "-" else Path(args.file).read_text(
+            encoding="utf-8"
+        )
+    except OSError as exc:
+        print(f"duckdb-kql script: {exc}", file=sys.stderr)
+        return EXIT_TRANSLATION_ERROR
+
+    statements = engine.split_script(text)
+    if args.dry_run:
+        # Translate every statement and print the SQL, touching no database.
+        # The point is to see what a script *would* do before letting it, which
+        # is worth more for a script than for a query: several of its statements
+        # write, and the ones after a mistake have already run by the time it
+        # shows up.
+        from . import to_sql  # noqa: PLC0415
+
+        for index, (line, statement) in enumerate(statements, start=1):
+            try:
+                sql = to_sql(statement, database=args.use)
+            except KqlError as exc:
+                print(
+                    f"duckdb-kql script: {args.file}:{line}: statement {index}: {exc}",
+                    file=sys.stderr,
+                )
+                return EXIT_TRANSLATION_ERROR
+            print(f"-- statement {index} ({args.file}:{line})\n{sql};\n")
+        return EXIT_OK
+
+    try:
+        con = engine.connect(args.database)
+    except ImportError as exc:  # pragma: no cover - depends on the install
+        print(f"duckdb-kql script: {exc}", file=sys.stderr)
+        return EXIT_TRANSLATION_ERROR
+
+    try:
+        results = engine.script(
+            con,
+            text,
+            database=args.use,
+            continue_on_errors=args.continue_on_errors,
+        )
+    except KqlScriptError as exc:
+        # `file:line:` first, so an editor and a CI log annotator can both find
+        # the statement without being taught this tool's format.
+        print(
+            f"duckdb-kql script: {args.file}:{exc.line}: "
+            f"statement {exc.index}: {exc.__cause__ or exc}",
+            file=sys.stderr,
+        )
+        return EXIT_TRANSLATION_ERROR
+    except Exception as exc:  # noqa: BLE001 - the connection itself, not a statement
+        print(f"duckdb-kql script: {exc}", file=sys.stderr)
+        return EXIT_TRANSLATION_ERROR
+    finally:
+        con.close()
+
+    failed = [r for r in results if not r.ok]
+    for result in failed:
+        print(
+            f"duckdb-kql script: {args.file}:{result.line}: "
+            f"statement {result.index}: {result.error}",
+            file=sys.stderr,
+        )
+    if args.verbose:
+        for result in results:
+            state = "ok" if result.ok else "FAILED"
+            rows = f"{len(result.rows)} row(s)" if result.ok else ""
+            print(
+                f"[{result.index}] {args.file}:{result.line} {state} {rows}".rstrip(),
+                file=sys.stderr,
+            )
+    print(
+        f"{len(results) - len(failed)}/{len(results)} statement(s) ran",
+        file=sys.stderr,
+    )
+    return EXIT_TRANSLATION_ERROR if failed else EXIT_OK
 
 
 # ---------------------------------------------------------------------------
@@ -365,8 +460,8 @@ def _parser() -> argparse.ArgumentParser:
         prog="duckdb-kql",
         description=(
             "Run KQL on DuckDB. `translate` turns .kql files into .sql at build "
-            "time; `serve` puts a local Kusto REST endpoint in front of a DuckDB "
-            "database."
+            "time; `script` runs a KQL script against a database, to set one "
+            "up; `serve` puts a local Kusto REST endpoint in front of one."
         ),
         epilog=(
             "exit codes: 0 ok; 1 a query failed to translate, or the server "
@@ -436,6 +531,76 @@ def _parser() -> argparse.ArgumentParser:
         "--verbose",
         action="store_true",
         help="report each file written, on stderr",
+    )
+
+    script = subcommands.add_parser(
+        "script",
+        help="run a KQL script against a DuckDB database",
+        description=(
+            "Run a KQL script — several statements separated by blank lines, "
+            "in order — against a DuckDB database. The shape Azure Data "
+            "Explorer calls a database script, for setting a database up and "
+            "keeping the file that does it in the repository."
+        ),
+        epilog=(
+            "Every statement this package can run is allowed, ingestion "
+            "included: seeding a database is what the command is for. Stops at "
+            "the first failure and names the file, line and statement.\n\n"
+            "exit codes: 0 ok; 1 a statement failed, or the file could not be "
+            "read; 2 bad usage"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    script.set_defaults(run=_script_command)
+    script.add_argument(
+        "file",
+        metavar="FILE",
+        help="the KQL script to run; '-' reads stdin",
+    )
+    script.add_argument(
+        "-d",
+        "--database",
+        default=":memory:",
+        metavar="PATH",
+        help=(
+            "DuckDB database file to run against, created if absent. Omit for "
+            "an in-memory one, which is only useful with --dry-run."
+        ),
+    )
+    script.add_argument(
+        "--use",
+        metavar="NAME",
+        help=(
+            "the database unqualified table names belong to, as KQL's `database "
+            "= ` does. Only needed when the script writes into an attached "
+            "database rather than the main one."
+        ),
+    )
+    script.add_argument(
+        "--continue-on-errors",
+        action="store_true",
+        help=(
+            "run the remaining statements after one fails, and report every "
+            "failure at the end. Azure Data Explorer's continueOnErrors, and "
+            "off by default for the same reason: a half-applied script is "
+            "harder to reason about than one that stopped where it broke."
+        ),
+    )
+    script.add_argument(
+        "--dry-run",
+        action="store_true",
+        help=(
+            "translate every statement and print the SQL without opening a "
+            "database. Worth more here than for a single query: several "
+            "statements write, so by the time a mistake shows up the ones "
+            "before it have already run."
+        ),
+    )
+    script.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="report each statement's outcome, on stderr",
     )
 
     serve = subcommands.add_parser(

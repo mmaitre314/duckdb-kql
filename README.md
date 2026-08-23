@@ -54,6 +54,13 @@ duckdb_kql.script(con, """
 """)
 ```
 
+Keep that in a `.kql` file and the CLI runs it, so the file that sets a database
+up lives in the repository:
+
+```bash
+duckdb-kql script schema.kql -d logs.duckdb
+```
+
 See the [demo](https://github.com/mmaitre314/duckdb-kql/blob/main/demo/demo.ipynb) notebook.
 
 ## Install

@@ -134,6 +134,17 @@ the emulator, including the part that is easy to get wrong — **`.set-or-replac
 replaces the rows and keeps the table's schema**, so a source whose columns
 differ is refused rather than silently redefining the table.
 
+The check is Kusto's, and it runs *before* anything is written:
+
+* the **ordered list of column types** must match; column **names are ignored**,
+  so a `(x:long, y:string)` source appends into an `(a:long, b:string)` table
+  and the table keeps its own names;
+* there is **no widening** — `int` into a `long` column is refused, as it is on
+  a cluster;
+* on refusal the table is left exactly as it was, and the message is Kusto's:
+  `Query schema does not match table schema. QuerySchema=('long'),
+  TableSchema=('long,string')`.
+
 Not supported: `async` (its result is an operation id to poll, and there is no
 queue here) and `with (...)` properties (`extend_schema` and `recreate_schema`
 would change the result, so the clause is refused rather than ignored).

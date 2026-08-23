@@ -305,6 +305,95 @@ def serving(con):
         thread.join(timeout=5)
 
 
+def _schema_of(con, table):
+    return _rows(con, f"{table} | getschema | project ColumnName, ColumnType")
+
+
+# ---------------------------------------------------------------------------
+# The schema check
+#
+# Kusto refuses a source whose column types do not match the table's, and leaves
+# the table exactly as it was. Every expectation here was measured on the
+# emulator across all four verbs.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("verb", [".set-or-replace", ".set-or-append", ".append"])
+@pytest.mark.parametrize(
+    ("label", "source"),
+    [
+        ("fewer columns", "datatable(a: long)[9]"),
+        ("more columns", "datatable(a: long, b: string, c: long)[9, 'z', 1]"),
+        ("reordered types", "datatable(b: string, a: long)['z', 9]"),
+        ("int where long", "datatable(a: int, b: string)[9, 'z']"),
+        ("real where long", "datatable(a: real, b: string)[9.5, 'z']"),
+        ("string where long", "datatable(a: string, b: string)['q', 'z']"),
+    ],
+)
+def test_a_mismatched_schema_is_refused(con, verb: str, label: str, source: str) -> None:
+    _rows(con, ".set-or-replace T <| datatable(a: long, b: string)[1, 'x']")
+    with pytest.raises(Exception, match="Query schema does not match table schema"):
+        _rows(con, f"{verb} T <| {source}")
+
+
+@pytest.mark.parametrize("verb", [".set-or-replace", ".set-or-append", ".append"])
+def test_a_refused_write_leaves_the_table_exactly_as_it_was(con, verb: str) -> None:
+    """The reason the check runs *before* the delete rather than being left to
+    the insert. DuckDB executes a `;`-separated string one statement at a time
+    and does not roll the earlier ones back, so the old design emptied the table
+    and then failed — measured, and `BEGIN`/`COMMIT` around it does not help.
+    """
+    _rows(con, ".set-or-replace T <| datatable(a: long, b: string)[1, 'x']")
+    with pytest.raises(Exception, match="Query schema does not match"):
+        _rows(con, f"{verb} T <| datatable(a: long)[9]")
+    assert _rows(con, "T") == [(1, "x")]
+    assert _schema_of(con, "T") == [("a", "long"), ("b", "string")]
+
+
+def test_column_names_are_ignored_only_the_types_matter(con) -> None:
+    """Measured: appending an `(x, y)` source to an `(a, b)` table works, and
+    the table keeps *its* names."""
+    _rows(con, ".set-or-replace T <| datatable(a: long, b: string)[1, 'x']")
+    _rows(con, ".append T <| datatable(x: long, y: string)[2, 'q']")
+    assert sorted(_rows(con, "T")) == [(1, "x"), (2, "q")]
+    assert _schema_of(con, "T") == [("a", "long"), ("b", "string")]
+
+
+def test_there_is_no_widening(con) -> None:
+    """`int` into a `long` column is refused on a cluster, so it is refused
+    here. This used to be a recorded divergence on the grounds that both map to
+    `BIGINT`; they do not — `int` is `INTEGER` and `long` is `BIGINT`, and the
+    round trip through `types.kusto_type` keeps them apart."""
+    _rows(con, ".set-or-replace I <| datatable(a: long)[1]")
+    with pytest.raises(Exception, match=r"QuerySchema=\('int'\), TableSchema=\('long'\)"):
+        _rows(con, ".append I <| datatable(a: int)[2]")
+
+
+def test_the_message_is_kustos(con) -> None:
+    _rows(con, ".set-or-replace T <| datatable(a: long, b: string)[1, 'x']")
+    with pytest.raises(Exception) as exc:
+        _rows(con, ".set-or-replace T <| datatable(a: long)[9]")
+    assert (
+        "Query schema does not match table schema. "
+        "QuerySchema=('long'), TableSchema=('long,string')" in str(exc.value)
+    )
+
+
+def test_a_matching_schema_is_untouched_by_the_check(con) -> None:
+    _rows(con, ".set-or-replace T <| datatable(a: long, b: string)[1, 'x']")
+    _rows(con, ".set-or-replace T <| datatable(a: long, b: string)[5, 'z']")
+    assert _rows(con, "T") == [(5, "z")]
+
+
+def test_set_needs_no_check_because_it_creates_the_table(con) -> None:
+    """`.set` builds the table from this very source, so nothing can disagree —
+    and it must still fail when the table is already there."""
+    _rows(con, ".set N <| datatable(a: long, b: string)[1, 'x']")
+    assert _rows(con, "N") == [(1, "x")]
+    with pytest.raises(Exception, match="already exists"):
+        _rows(con, ".set N <| datatable(a: long, b: string)[2, 'y']")
+
+
 def test_the_server_refuses_writes_by_default(serving, con) -> None:
     """It answers unauthenticated loopback requests, so writes are opt-in."""
     server = serving(False)

@@ -37,13 +37,10 @@ column           type       here
 A write that ingests nothing returns **zero rows**, not one row saying zero —
 measured, and it follows from the result being one row per extent created.
 
-**Known divergence: Kusto's type check is stricter than ours.** Appending an
-`int` source to a `long` column is rejected there (``QuerySchema=('int'),
-TableSchema=('long')``) and accepted here. It is not fixable at this layer: KQL
-`int` and `long` both map to DuckDB `BIGINT`, so the two are the same type by
-the time any check could run. The failure direction is loud — a script that
-works here is refused by a real cluster — rather than silent, but it is a
-divergence and is recorded rather than left to be discovered.
+**The schema check is Kusto's, and it runs before anything is written.** A
+source whose columns do not match the table's is rejected — see
+:func:`_schema_guard` for the rule, which is measured, and for why the check has
+to come first rather than being left to the ``INSERT``.
 
 What each verb does when the table is missing or present is also measured:
 
@@ -197,14 +194,14 @@ def render_ingestion(command: IngestionCommand, source_sql: str, database: str |
 
     Deliberately **not** ``CREATE OR REPLACE TABLE`` for `.set-or-replace`: that
     redefines the columns, and Kusto keeps the table's schema and rejects a
-    source that disagrees. Create-if-absent + delete + insert keeps the existing
-    definition, so a mismatched source fails on the insert rather than silently
-    reshaping the table.
+    source that disagrees. Create-if-absent, check, delete, insert keeps the
+    existing definition and refuses a mismatched source without touching it.
 
     The source query is evaluated **twice** — once to insert, once to count the
     rows for `RowCount`. These commands exist to load small sample data, and one
     extra pass over a datatable is cheaper than the temporary table it would
-    take to avoid it.
+    take to avoid it. The ``DESCRIBE`` in the guard is a third mention but not a
+    third pass: it binds the query without running it.
     """
     create_if_missing, fail_if_missing, replace = INGESTION_VERBS[command.verb]
     target = _qualified(command.table, database)
@@ -222,6 +219,11 @@ def render_ingestion(command: IngestionCommand, source_sql: str, database: str |
         statements.append(
             f"CREATE TABLE IF NOT EXISTS {target} AS SELECT * FROM {body} WHERE false"
         )
+    if command.verb != ".set":
+        # `.set` has just created the table from this very source, so its schema
+        # cannot disagree; every other verb writes into a table that was already
+        # there and has to be checked against it.
+        statements.append(_schema_guard(target, body))
     if replace:
         statements.append(f"DELETE FROM {target}")
     statements.append(f"INSERT INTO {target} SELECT * FROM {body}")
@@ -237,6 +239,71 @@ def render_ingestion(command: IngestionCommand, source_sql: str, database: str |
         f"WHERE (SELECT count(*) FROM {body}) > 0"
     )
     return ";\n".join(statements)
+
+
+def _schema_guard(target: str, body: str) -> str:
+    """SQL that refuses a source whose schema does not match the table's.
+
+    Kusto's rule, measured on the emulator across all four verbs:
+
+    * the **ordered list of column types** must be equal;
+    * column **names are ignored** — appending a `(x:long, y:string)` source to
+      an `(a:long, b:string)` table works and the table keeps *its* names;
+    * there is **no widening** — `int` into a `long` column is refused, and so
+      is `real`;
+    * on refusal the target is left **exactly as it was**.
+
+    The message is Kusto's, down to the quoting::
+
+        Query schema does not match table schema.
+        QuerySchema=('long'), TableSchema=('long,string')
+
+    Two things about the implementation are load-bearing.
+
+    **It runs before the ``DELETE``, not as a side effect of the ``INSERT``.**
+    Letting the insert fail was the previous design and it loses data: DuckDB
+    executes a `;`-separated string one statement at a time and does *not* roll
+    the earlier ones back, so `.set-or-replace` with a mismatched source emptied
+    the table and then failed. Measured, and wrapping the lot in
+    ``BEGIN``/``COMMIT`` does not help.
+
+    **The comparison is on KQL type names, not DuckDB's.** Partly so the message
+    reads in the language the caller wrote, and partly because it is the more
+    faithful comparison: DuckDB's `TIMESTAMP` and `TIMESTAMP WITH TIME ZONE` are
+    one KQL `datetime` and Kusto would accept the pair, while `INTEGER` and
+    `BIGINT` stay `int` and `long` and are refused — which is exactly what a
+    cluster does. Mapping both sides through :func:`types.kusto_type_sql` also
+    means the types named in the message are the ones that were compared.
+    """
+    from .translate import quote_string  # noqa: PLC0415
+    from .types import kusto_type_sql  # noqa: PLC0415
+
+    def types_of(relation: str) -> str:
+        # `DESCRIBE` as a subquery gives one row per column, in order. The order
+        # is made explicit rather than relied on: `list()` has no defined order
+        # of its own, and a silently permuted list here would compare unequal
+        # and refuse a source that is perfectly good.
+        kql = kusto_type_sql("column_type")
+        return (
+            "(SELECT array_to_string(list(k ORDER BY i), ',') FROM "
+            f"(SELECT row_number() OVER () AS i, {kql} AS k "
+            f"FROM (DESCRIBE SELECT * FROM {relation})))"
+        )
+
+    message = (
+        quote_string("Query schema does not match table schema. QuerySchema=('")
+        + " || q || "
+        + quote_string("'), TableSchema=('")
+        + " || s || "
+        + quote_string("')")
+    )
+    # `error()` sits in the SELECT list of a row that only exists when the two
+    # disagree, so a matching schema evaluates it not at all.
+    return (
+        f"SELECT error({message}) FROM "
+        f"(SELECT {types_of(body)} AS q, {types_of(target)} AS s) "
+        "WHERE q IS DISTINCT FROM s"
+    )
 
 
 def _qualified(table: str, database: str | None) -> str:

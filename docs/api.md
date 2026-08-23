@@ -447,9 +447,11 @@ catching that keeps working.
 
 ## Command line
 
-`duckdb-kql` (also `python -m duckdb_kql`) is Layer 0 as a command: it
-translates `.kql` files to `.sql` so the output can be run without this package
-installed at all. `--check` makes a stale generated file fail CI.
+`duckdb-kql` (also `python -m duckdb_kql`) has three verbs.
+
+**`translate`** is Layer 0 as a command: it turns `.kql` files into `.sql` so
+the output can be run without this package installed at all. `--check` makes a
+stale generated file fail CI.
 
 ```bash
 duckdb-kql translate queries/ -o build/sql/ --check
@@ -457,6 +459,27 @@ duckdb-kql translate queries/ -o build/sql/ --check
 
 Full reference, including the generated header and how to bind the placeholders
 a parameterized query produces: [Build-time translation](cli.md).
+
+**`script`** runs a KQL script — `script()` above, as a command — against a
+DuckDB database, so the file that sets a database up lives in the repository:
+
+```bash
+duckdb-kql script schema.kql -d logs.duckdb
+```
+
+| Option | Meaning |
+|---|---|
+| `-d` · `--database` | the DuckDB file, created if absent. Default `:memory:`. |
+| `--use NAME` | the database unqualified table names belong to |
+| `--continue-on-errors` | run the rest after a failure and report them all |
+| `--dry-run` | print the SQL each statement would run, opening no database |
+| `-v` · `--verbose` | report each statement's outcome |
+
+`FILE` may be `-` to read stdin. A failure names the file, line and statement
+(`schema.kql:12: statement 3: …`) and exits 1; `--dry-run` needs no `duckdb`.
+
+**`serve`** puts a local Kusto REST endpoint in front of a DuckDB database:
+[Local Kusto endpoint](kusto-server.md).
 
 ---
 

@@ -11,6 +11,7 @@ promised not to need.
 from __future__ import annotations
 
 import argparse
+import io
 import re
 import subprocess
 import sys
@@ -332,7 +333,7 @@ def test_the_console_script_is_declared() -> None:
 
 #: Every verb this command answers to. A new one that is not listed here is a
 #: new one nobody checked the wiring of.
-SUBCOMMANDS = ["translate", "serve"]
+SUBCOMMANDS = ["translate", "script", "serve"]
 
 
 def test_the_subcommands_are_the_documented_ones() -> None:
@@ -352,7 +353,8 @@ def test_every_subcommand_is_wired_to_a_handler(command: str) -> None:
     parse fine and then fail on the attribute, in front of the user."""
     from duckdb_kql.cli import _parser  # noqa: PLC0415
 
-    args = _parser().parse_args([command] + (["x.kql"] if command == "translate" else []))
+    required = {"translate": ["x.kql"], "script": ["x.kql"]}
+    args = _parser().parse_args([command, *required.get(command, [])])
     assert callable(args.run)
 
 
@@ -427,3 +429,153 @@ def test_the_top_level_help_names_both_jobs(capsys: pytest.CaptureFixture[str]) 
     printed = capsys.readouterr().out
     for command in SUBCOMMANDS:
         assert command in printed
+
+
+# ---------------------------------------------------------------------------
+# script
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def script_file(tmp_path: Path) -> Path:
+    path = tmp_path / "schema.kql"
+    path.write_text(
+        "// seed it\n"
+        ".set-or-replace Events <| datatable(level: string)['Error', 'Warning', 'Error']\n"
+        "\n"
+        ".set-or-replace ByLevel <| Events | summarize n = count() by level\n"
+        "\n"
+        "ByLevel | count\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_script_runs_against_a_database(script_file: Path, tmp_path: Path) -> None:
+    pytest.importorskip("duckdb")
+    import duckdb_kql
+
+    database = tmp_path / "out.duckdb"
+    assert main(["script", str(script_file), "-d", str(database)]) == EXIT_OK
+
+    con = duckdb_kql.connect(str(database))
+    try:
+        assert duckdb_kql.kql(con, "ByLevel | order by n desc").fetchall() == [
+            ("Error", 2),
+            ("Warning", 1),
+        ]
+    finally:
+        con.close()
+
+
+def test_script_is_rerunnable(script_file: Path, tmp_path: Path) -> None:
+    """The point of writing one with `.set-or-replace`: it is the file you keep,
+    and running it twice is the same as running it once."""
+    pytest.importorskip("duckdb")
+    database = tmp_path / "out.duckdb"
+    assert main(["script", str(script_file), "-d", str(database)]) == EXIT_OK
+    assert main(["script", str(script_file), "-d", str(database)]) == EXIT_OK
+
+
+def test_script_names_the_file_and_line_that_failed(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    pytest.importorskip("duckdb")
+    path = tmp_path / "bad.kql"
+    path.write_text(
+        ".set-or-replace Good <| datatable(a: long)[1]\n\nNoSuchTable | count\n",
+        encoding="utf-8",
+    )
+    assert main(["script", str(path)]) == EXIT_TRANSLATION_ERROR
+    err = capsys.readouterr().err
+    assert f"{path}:3:" in err
+    assert "statement 2" in err
+
+
+def test_script_stops_at_the_first_failure(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    pytest.importorskip("duckdb")
+    path = tmp_path / "bad.kql"
+    path.write_text(
+        ".set-or-replace A <| datatable(a: long)[1]\n\n"
+        "NoSuchTable | count\n\n"
+        ".set-or-replace B <| datatable(a: long)[2]\n",
+        encoding="utf-8",
+    )
+    database = tmp_path / "out.duckdb"
+    assert main(["script", str(path), "-d", str(database)]) == EXIT_TRANSLATION_ERROR
+
+    import duckdb_kql
+
+    con = duckdb_kql.connect(str(database))
+    try:
+        tables = duckdb_kql.kql(con, ".show tables | project TableName").fetchall()
+    finally:
+        con.close()
+    assert tables == [("A",)]
+
+
+def test_script_continue_on_errors_runs_the_rest(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    pytest.importorskip("duckdb")
+    path = tmp_path / "bad.kql"
+    path.write_text(
+        ".set-or-replace A <| datatable(a: long)[1]\n\n"
+        "NoSuchTable | count\n\n"
+        ".set-or-replace B <| datatable(a: long)[2]\n",
+        encoding="utf-8",
+    )
+    database = tmp_path / "out.duckdb"
+    # still a failure exit — the run is reported, not excused
+    assert main(
+        ["script", str(path), "-d", str(database), "--continue-on-errors"]
+    ) == EXIT_TRANSLATION_ERROR
+    assert "2/3 statement(s) ran" in capsys.readouterr().err
+
+    import duckdb_kql
+
+    con = duckdb_kql.connect(str(database))
+    try:
+        tables = duckdb_kql.kql(con, ".show tables | project TableName").fetchall()
+    finally:
+        con.close()
+    assert sorted(tables) == [("A",), ("B",)]
+
+
+def test_script_dry_run_opens_no_database(
+    script_file: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    database = tmp_path / "never.duckdb"
+    assert main(["script", str(script_file), "-d", str(database), "--dry-run"]) == EXIT_OK
+    out = capsys.readouterr().out
+    assert "-- statement 1" in out and "-- statement 3" in out
+    assert not database.exists()
+
+
+def test_script_dry_run_reports_a_bad_statement(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = tmp_path / "bad.kql"
+    path.write_text("print x = 1\n\nprint x = \n", encoding="utf-8")
+    assert main(["script", str(path), "--dry-run"]) == EXIT_TRANSLATION_ERROR
+    assert f"{path}:3:" in capsys.readouterr().err
+
+
+def test_script_reads_stdin(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    pytest.importorskip("duckdb")
+    monkeypatch.setattr(
+        sys, "stdin", io.StringIO(".set T <| datatable(a: long)[1]\n\nT | count\n")
+    )
+    assert main(["script", "-"]) == EXIT_OK
+    assert "2/2 statement(s) ran" in capsys.readouterr().err
+
+
+def test_script_reports_a_missing_file(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert main(["script", str(tmp_path / "nope.kql")]) == EXIT_TRANSLATION_ERROR
+    assert "nope.kql" in capsys.readouterr().err

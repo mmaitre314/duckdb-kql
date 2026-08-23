@@ -133,13 +133,14 @@ which statement broke and on which line; pass `continue_on_errors=True` to run
 the rest anyway and read the failures out of the results.
 
 Keep the script in a `.kql` file and it doubles as the thing you check into the
-repository:
+repository — the CLI runs it, so setting a database up needs no Python at all:
 
-```python
-from pathlib import Path
-
-duckdb_kql.script(con, Path("schema.kql").read_text())
+```bash
+duckdb-kql script schema.kql -d logs.duckdb
+duckdb-kql script schema.kql --dry-run     # print the SQL, open no database
 ```
+
+From Python it is `duckdb_kql.script(con, Path("schema.kql").read_text())`.
 
 ## Query parameters and user input
 
