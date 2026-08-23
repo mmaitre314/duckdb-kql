@@ -411,3 +411,53 @@ def test_the_split_matches_the_command_before_looking_for_a_pipe() -> None:
         ".ingest inline into table t <| 1",
         "",
     )
+
+
+# ---------------------------------------------------------------------------
+# Comments around a command
+#
+# Every family is recognized by a *text prefix* rather than by the parser, so a
+# comment is invisible to ANTLR here in a way it is not for a query. Scripts are
+# written with comments (`duckdb_kql.script`), which is what makes this matter.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "// a note\n.show tables",
+        "  // indented\n\n.show tables",
+        "// one\n// two\n.show tables",
+        ".show tables // trailing",
+        "// both\n.show tables // ends",
+    ],
+)
+def test_a_comment_does_not_hide_a_control_command(text: str) -> None:
+    assert "TableName" in str(duckdb_kql.to_sql(text))
+
+
+def test_a_comment_does_not_hide_an_ingestion_command() -> None:
+    assert "CREATE TABLE" in str(duckdb_kql.to_sql("// seed\n.set T <| print x = 1"))
+
+
+def test_a_comment_does_not_hide_a_database_command() -> None:
+    assert "ATTACH" in str(
+        duckdb_kql.to_sql("// make it\n.create database D volatile")
+    )
+
+
+def test_a_trailing_comment_does_not_eat_a_pipeline() -> None:
+    """The trailing-comment cut is made *after* the command head is matched, so
+    a `//` inside a string literal in the pipeline survives. Cutting the text up
+    front would have truncated this to `.show tables | where TableName has `.
+    """
+    sql = str(duckdb_kql.to_sql('.show tables | where TableName has "//x"'))
+    assert "//x" in sql
+
+
+def test_a_query_keeps_its_own_line_numbers() -> None:
+    """Comments are only stripped where the *parser* is not the one looking. A
+    query keeps the text it was given, so a diagnostic points at the real line.
+    """
+    diagnostics = duckdb_kql.validate("// one\n// two\nprint x = ")
+    assert diagnostics and diagnostics[0].span.line == 3

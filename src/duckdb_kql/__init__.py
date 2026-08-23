@@ -28,6 +28,16 @@ Layer 1 — execute against a DuckDB connection::
     con = duckdb_kql.connect()               # or duckdb.connect(), TimeZone=UTC
     con.sql("CREATE TABLE Logs AS SELECT 'Error' AS Level")
     duckdb_kql.kql(con, "Logs | where Level == 'Error'").fetchall()
+    duckdb_kql.query(...)                    # the same function, Kusto's name
+
+Several statements at once, for getting a database into a known state — the
+shape Azure Data Explorer calls a *database script*, separated by blank lines::
+
+    duckdb_kql.script(con, '''
+        .set-or-replace Events <| datatable(level: string)["Error"]
+
+        .set Levels <| Events | summarize n = count() by level
+    ''')
 
 Layer 2 — the ``azure-kusto-data`` shape, for code already written against it::
 
@@ -49,6 +59,7 @@ from .errors import (
     Diagnostic,
     KqlError,
     KqlSchemaError,
+    KqlScriptError,
     KqlSyntaxError,
     KqlUnsupportedError,
     SourceSpan,
@@ -62,7 +73,18 @@ if TYPE_CHECKING:
     # and a caller would be told their code is fine when it is not. Importing
     # the real names here, for the checker only, keeps the laziness without
     # paying for it in the signatures.
-    from .engine import Parameters, arrow, connect, df, execute, kql
+    from .engine import (
+        Parameters,
+        ScriptResult,
+        arrow,
+        connect,
+        df,
+        execute,
+        kql,
+        query,
+        script,
+        split_script,
+    )
     from .schema import Schema
     from .translate import TranslationResult
 
@@ -103,12 +125,17 @@ __all__ = [
     "KqlSyntaxError",
     "KqlUnsupportedError",
     "KqlSchemaError",
+    "KqlScriptError",
     # Layer 1 — requires duckdb
     "connect",
     "kql",
+    "query",
     "execute",
+    "script",
+    "split_script",
     "df",
     "arrow",
+    "ScriptResult",
     # type aliases used in the public signatures above, so callers can annotate
     "TranslationResult",
     "Schema",
@@ -118,7 +145,10 @@ __all__ = [
 
 #: Layer 1 names, re-exported here for convenience but defined in ``engine``.
 #: Resolved on first access so that importing this package never imports duckdb.
-_LAYER1 = frozenset({"connect", "kql", "execute", "df", "arrow"})
+_LAYER1 = frozenset({
+    "connect", "kql", "query", "execute", "script", "split_script",
+    "df", "arrow", "ScriptResult",
+})
 
 
 #: Types named in the public signatures. Callers need them to annotate their own
@@ -209,6 +239,7 @@ def to_sql(
     from . import ir
     from .clusters import effective_clusters
     from .control import COLUMNS, is_control_command, split_command
+    from .control import strip_leading_comments as _uncomment
     from .control import translate_control_command as _command_sql
     from .databases import (
         is_database_command,
@@ -222,41 +253,50 @@ def to_sql(
     from .translate import TranslationResult as _Result
     from .translate import to_sql as _emit
 
-    if is_ingestion_command(kql):
+    # Every command family is recognized by a text prefix rather than by the
+    # parser, so a `//` comment above the command would hide it and send the
+    # text to the query path, where a leading dot is a syntax error. A comment
+    # above a command is how an initialization script is written, so the
+    # families look past one. The *query* path keeps the original text: ANTLR
+    # lexes comments itself, and cutting them would move every reported line
+    # and column off the text the caller wrote.
+    head = _uncomment(kql)
+
+    if is_ingestion_command(head):
         # Ingestion is a control command that *writes*. It is handled before the
         # read-only command table because its source is a whole KQL query, which
         # only this function knows how to translate.
         if not allow_write:
             raise KqlUnsupportedError(
-                f"ingestion command {kql.strip().split()[0]}",
+                f"ingestion command {head.split()[0]}",
                 hint="writes are disabled here; see allow_write",
             )
-        ingestion = parse_ingestion(kql)
+        ingestion = parse_ingestion(head)
         resolved = effective_clusters(clusters)
         rows_sql = _emit(
             qualify(lower(ingestion.source), database, resolved), schema
         )
         return _Result(render_ingestion(ingestion, str(rows_sql), database))
 
-    if is_database_command(kql):
+    if is_database_command(head):
         # A lifecycle command WRITES — it creates or opens a database — so it
         # sits behind the same gate ingestion does rather than with the
         # read-only `.show` family.
         if not allow_write:
             raise KqlUnsupportedError(
-                f"database command {kql.strip().split()[0]}",
+                f"database command {head.split()[0]}",
                 hint="writes are disabled here; see allow_write",
             )
-        return _Result(render_database_command(parse_database_command(kql)))
+        return _Result(render_database_command(parse_database_command(head)))
 
-    if is_control_command(kql):
+    if is_control_command(head):
         # A different dialect (see duckdb_kql.control), and one that composes
         # with this one: Kusto pipes a command's tabular result through ordinary
         # query operators, so `.show tables | limit 3` is a command followed by
         # a pipeline. The command half is a closed set of literals; the half
         # after the first `|` is plain KQL and goes through the normal path with
         # the command standing in as its source.
-        command, pipeline = split_command(kql)
+        command, pipeline = split_command(head)
         # raises, naming the ones that work
         head = _command_sql(command, effective_entity_groups(entity_groups))
         if not pipeline:

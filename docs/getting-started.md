@@ -99,6 +99,48 @@ duckdb_kql.kql(con, "Events | summarize n = count() by Level")
 Table and column names are **case-sensitive**, matching KQL. `Events` and
 `events` are different tables.
 
+### Setting a database up in KQL alone
+
+If you would rather not drop into SQL to build the tables, `script()` runs
+several KQL statements in order — the shape Azure Data Explorer calls a
+[database script](https://learn.microsoft.com/azure/data-explorer/database-script).
+**Blank lines separate the statements**, and they run top to bottom against the
+one connection, so each sees what the ones before it did:
+
+```python
+con.sql("CREATE VIEW Raw AS SELECT * FROM 'logs/*.parquet'")
+
+duckdb_kql.script(con, """
+    // the events we care about, materialized
+    .set-or-replace Events <|
+        Raw | where Level in ("Error", "Warning")
+
+    // a rollup the dashboards read
+    .set-or-replace ErrorsByHour <|
+        Events
+        | where Level == "Error"
+        | summarize n = count() by bin(Timestamp, 1h), Component
+
+    // and check it landed
+    ErrorsByHour | count
+""")
+```
+
+Every statement this package can run is allowed — `.set-or-replace` is the
+point, since seeding a database is ingestion — and a plain query is allowed too,
+so a script can check its own work. It stops at the first failure and tells you
+which statement broke and on which line; pass `continue_on_errors=True` to run
+the rest anyway and read the failures out of the results.
+
+Keep the script in a `.kql` file and it doubles as the thing you check into the
+repository:
+
+```python
+from pathlib import Path
+
+duckdb_kql.script(con, Path("schema.kql").read_text())
+```
+
 ## Query parameters and user input
 
 Do not build queries with f-strings. Declare parameters and pass values:

@@ -42,6 +42,18 @@ duckdb_kql.kql(con, """
 """)
 ```
 
+Several statements at once — the shape Azure Data Explorer calls a
+[database script](https://learn.microsoft.com/azure/data-explorer/database-script),
+for setting a database up in KQL alone. Blank lines separate the statements:
+
+```python
+duckdb_kql.script(con, """
+    .set-or-replace Errors <| Logs | where Level == "Error"
+
+    .set-or-replace ByComponent <| Errors | summarize n = count() by Component
+""")
+```
+
 See the [demo](https://github.com/mmaitre314/duckdb-kql/blob/main/demo/demo.ipynb) notebook.
 
 ## Install

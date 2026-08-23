@@ -201,6 +201,37 @@ def is_control_command(text: str) -> bool:
     return text.lstrip().startswith(".")
 
 
+def strip_leading_comments(text: str) -> str:
+    """Drop ``//`` comment lines from the front of *text*.
+
+    Every command family is recognized by a **text prefix** — a leading dot,
+    then a verb — rather than by the parser, so a comment above the command
+    hides it and the text falls through to the query path, where a leading dot
+    is a syntax error. Queries are unaffected: ANTLR lexes comments away, which
+    is why this is only applied where the parser is not the one looking.
+
+    A comment above a command is the ordinary way to write an initialization
+    script, so this is not an edge case for :func:`duckdb_kql.script`; it is
+    most of the file.
+
+    Only *leading* comments, and only from the front: the rest of the text may
+    be a whole KQL query (the right-hand side of a `.set … <|`), and that is the
+    parser's to read, comments included.
+    """
+    i, n = 0, len(text)
+    while i < n:
+        if text[i].isspace():
+            i += 1
+            continue
+        if not text.startswith("//", i):
+            break
+        newline = text.find("\n", i)
+        if newline == -1:
+            return ""
+        i = newline + 1
+    return text[i:]
+
+
 def _normalize(text: str) -> str:
     """`  .SHOW   Tables ` -> `.show tables`. Kusto is case-insensitive here."""
     return _WHITESPACE.sub(" ", text.strip().rstrip(";").strip()).lower()
@@ -239,6 +270,13 @@ def split_command(text: str) -> tuple[str, str]:
             rest = collapsed[len(command) :].lstrip()
             if rest.startswith("|"):
                 return command, rest
+            if rest.startswith("//"):
+                # A comment on the command's own line, not a pipeline. Handled
+                # here rather than by stripping the text up front, because a
+                # *pipeline* is arbitrary KQL and `| where T has "//x"` puts a
+                # `//` inside a string literal. Past the command head there is
+                # no literal to worry about, so this position is the safe one.
+                return command, ""
     return lowered, ""
 
 

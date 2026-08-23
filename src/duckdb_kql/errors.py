@@ -70,6 +70,29 @@ class KqlSchemaError(KqlError):
         super().__init__(f"schema error for {name!r}{because}")
 
 
+class KqlScriptError(KqlError):
+    """One statement of a script failed, named by its position in the script.
+
+    Wraps rather than propagates, because the thing a caller of
+    :func:`duckdb_kql.script` needs first is *which* of forty statements broke
+    — and the underlying error, raised against one statement, cannot say. The
+    original is chained on ``__cause__`` and still appears in the traceback, so
+    nothing is lost; a caller that wants to discriminate on it can, and
+    ``except KqlError`` catches this as it catches everything else here.
+    """
+
+    def __init__(self, message: str, index: int, line: int, statement: str):
+        #: 1-based position in the script — the *n*th statement, not the *n*th line.
+        self.index = index
+        #: 1-based line in the script text where the statement starts.
+        self.line = line
+        #: The statement as written.
+        self.statement = statement
+        super().__init__(
+            f"script statement {index} (line {line}) failed: {message}"
+        )
+
+
 @dataclass(frozen=True)
 class Diagnostic:
     """One parser diagnostic."""

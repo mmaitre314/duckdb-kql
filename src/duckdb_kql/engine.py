@@ -27,6 +27,8 @@ annotations are never evaluated — while giving callers real types rather than
 
 from __future__ import annotations
 
+import re
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -48,8 +50,9 @@ Parameters = dict[str, Any]
 Schema = dict[str, list[str]]
 
 __all__ = [
-    "connect", "kql", "execute", "df", "arrow", "schema", "databases",
-    "Parameters", "Schema",
+    "connect", "kql", "query", "execute", "script", "split_script",
+    "df", "arrow", "schema", "databases",
+    "Parameters", "Schema", "ScriptResult",
 ]
 
 
@@ -96,6 +99,8 @@ def kql(
     Named for what it takes. It was ``sql()``, which read as though the argument
     were SQL — in a package whose entire job is that the two are not the same.
     The argument is KQL; :func:`duckdb_kql.to_sql` is the one that deals in SQL.
+    :func:`duckdb_kql.query` is the same function under the name the Kusto APIs
+    use, for callers who reach for that one first.
 
     Sets ``TimeZone='UTC'`` on *con* first. This changes connection state
     deliberately: leaving it to the caller means a machine in a non-UTC zone
@@ -121,6 +126,18 @@ def kql(
     return con.sql(translated, params=bound) if bound else con.sql(translated)
 
 
+#: ``query`` is :func:`kql` under the name most callers reach for first — it is
+#: what `azure-kusto-data` and the Kusto REST API call this, and what a reader
+#: coming from `con.sql()` expects. `kql` stays the primary spelling because in
+#: *this* package the point of the name is that the argument is not SQL; the
+#: alias exists so nobody has to find that out.
+#:
+#: Deliberately the same object rather than a wrapper: `query is kql` holds, so
+#: the two cannot drift, and a patch or a stub applied to one is applied to
+#: both.
+query = kql
+
+
 def execute(
     con: DuckDBPyConnection,
     query: str,
@@ -139,6 +156,213 @@ def execute(
         con, query, parameters, database, allow_write, clusters, entity_groups
     )
     return con.execute(translated, bound) if bound else con.execute(translated)
+
+
+@dataclass(frozen=True)
+class ScriptResult:
+    """What one statement of a script did.
+
+    ``rows`` is materialized rather than left as a relation on purpose. A
+    DuckDB relation is lazy and bound to the connection, so a later statement
+    that replaces the table an earlier relation reads would change what that
+    relation answers — and in an *initialization* script that is the normal
+    case, not an edge one. Running each statement to completion before starting
+    the next is the whole point of a script.
+
+    A dataclass rather than a `NamedTuple` for one small reason worth recording:
+    `index` is the natural name for the field and `tuple.index` is a method, so
+    a `NamedTuple` cannot have it. Nothing here wants tuple unpacking anyway.
+    """
+
+    #: 1-based position in the script — the *n*th statement, not the *n*th line.
+    index: int
+    #: 1-based line in the script text where the statement starts, for pointing
+    #: at the failure in a file the caller wrote.
+    line: int
+    #: The statement as written, stripped.
+    text: str
+    columns: list[str]
+    rows: list[tuple[Any, ...]]
+    #: The failure, when ``continue_on_errors`` let the script carry on past it.
+    #: ``None`` otherwise — without that flag a failure raises instead.
+    error: Exception | None = None
+
+    @property
+    def ok(self) -> bool:
+        return self.error is None
+
+
+#: A blank line ends a statement. `\S` is deliberate rather than `''`: a line of
+#: spaces or a stray `\r` reads as blank to a person writing the file.
+_BLANK_LINE = re.compile(r"^[^\S\n]*$")
+
+
+def split_script(text: str) -> list[tuple[int, str]]:
+    """Split a script into ``(line, statement)`` pairs, one per statement.
+
+    **Blank lines separate statements**, which is how Azure Data Explorer's
+    database scripts are written — its own example puts one between each
+    command, and its ARM template parameter joins them with ``\\n\\n``. The docs
+    say "at least one line break", but a single newline cannot be the rule
+    here: a statement's text routinely spans lines, from a `datatable(...)`
+    literal to the query on the right of a `.set-or-replace <|`.
+
+    Splitting on blank lines is *sound* rather than merely conventional, and for
+    a reason worth stating: a KQL string literal cannot contain a raw newline —
+    measured, ``print x = 'a<newline>b'`` is a lexer error in all three
+    spellings, plain, double-quoted and verbatim. So a blank line in the script
+    text can never be inside a literal, and this needs no knowledge of KQL to
+    cut in the right places.
+
+    Blank statements are dropped, as are ones holding nothing but ``//``
+    comments — a comment between two commands is a comment on the script, not a
+    statement that should be sent anywhere.
+    """
+    statements: list[tuple[int, str]] = []
+    lines = text.splitlines()
+    start = 0
+    while start < len(lines):
+        if _BLANK_LINE.match(lines[start]):
+            start += 1
+            continue
+        end = start
+        while end < len(lines) and not _BLANK_LINE.match(lines[end]):
+            end += 1
+        chunk = "\n".join(lines[start:end])
+        if _has_code(chunk):
+            statements.append((start + 1, chunk.strip()))
+        start = end
+    return statements
+
+
+def _has_code(chunk: str) -> bool:
+    """Whether *chunk* is more than whitespace and ``//`` comments.
+
+    Needs no knowledge of string literals, which is worth saying because the
+    obvious worry is ``print x = "http://example"`` — a `//` a textual strip
+    would mistake for a comment. It cannot be reached: getting as far as the
+    quote means already having passed a character that is neither whitespace
+    nor a comment, and this answers ``True`` there. KQL has no block comment
+    form — measured, ``/* … */`` is a syntax error — so a line comment is the
+    only thing to skip.
+    """
+    i, n = 0, len(chunk)
+    while i < n:
+        if chunk.startswith("//", i):
+            newline = chunk.find("\n", i)
+            if newline == -1:
+                return False
+            i = newline + 1
+            continue
+        if not chunk[i].isspace():
+            return True
+        i += 1
+    return False
+
+
+def script(
+    con: DuckDBPyConnection,
+    text: str,
+    database: str | None = None,
+    allow_write: bool = True,
+    clusters: ClusterMap | None = None,
+    entity_groups: EntityGroupMap | None = None,
+    continue_on_errors: bool = False,
+) -> list[ScriptResult]:
+    """Run a KQL **script** — several statements, in order, against one connection.
+
+    The shape Azure Data Explorer calls a *database script*: a list of
+    statements separated by blank lines, run top to bottom, for getting a
+    database into a known state. ``continue_on_errors`` is ADX's flag of the
+    same name and the same default — stop at the first failure.
+
+    ::
+
+        duckdb_kql.script(con, '''
+            .create database Telemetry
+
+            .set-or-replace Events <|
+                datatable(ts: datetime, level: string)
+                [ datetime(2024-01-01), "Error" ]
+
+            .set Levels <| Events | distinct level
+        ''')
+
+    Two deliberate differences from ADX, both widening rather than narrowing:
+
+    * **Every statement this package can run is allowed.** ADX restricts a
+      script to database-level commands beginning `.create`, `.create-or-alter`,
+      `.create-merge`, `.alter`, `.alter-merge` or `.add`; here `.set-or-replace`
+      and a plain query are as welcome as a `.create`. A script is the natural
+      way to seed a database, and seeding it is ingestion.
+    * **A statement may be a query.** Its rows come back in the result, which
+      makes a script usable as a check ("…and now count what we loaded") rather
+      than only as a mutation.
+
+    There is no ``parameters`` argument, and its absence is the point: values
+    would have to apply to *every* statement, and a statement that declares none
+    would then fail for being handed one it never asked for. Parameterize with
+    :func:`kql` per statement.
+
+    Args:
+        con: the connection. Statements run against it in order and their
+            effects are visible to the ones that follow — a `.create database`
+            early in the script is what makes a later `.set` into it work.
+        database: the database unqualified table names belong to, as
+            :func:`kql` takes it. Applied to every statement.
+        allow_write: pass ``False`` to run a script through the translator
+            without letting it write. Ingestion and lifecycle commands then
+            refuse, which is a way to check a script before running it.
+        clusters: cluster mapping, as :func:`duckdb_kql.to_sql` takes it.
+        entity_groups: named entity groups, as :func:`duckdb_kql.to_sql` takes it.
+        continue_on_errors: run the remaining statements after one fails, and
+            report the failures in the results instead of raising.
+
+    Returns:
+        One :class:`ScriptResult` per statement, in script order.
+
+    Raises:
+        KqlScriptError: a statement failed and ``continue_on_errors`` is false.
+            It names which statement and which line; the underlying error is
+            chained on ``__cause__``.
+    """
+    from .errors import KqlScriptError
+
+    results: list[ScriptResult] = []
+    for index, (line, statement) in enumerate(split_script(text), start=1):
+        try:
+            columns, rows = _run_statement(
+                con, statement, database, allow_write, clusters, entity_groups
+            )
+        except Exception as exc:
+            if not continue_on_errors:
+                raise KqlScriptError(str(exc), index, line, statement) from exc
+            results.append(ScriptResult(index, line, statement, [], [], exc))
+            continue
+        results.append(ScriptResult(index, line, statement, columns, rows))
+    return results
+
+
+def _run_statement(
+    con: DuckDBPyConnection,
+    statement: str,
+    database: str | None,
+    allow_write: bool,
+    clusters: ClusterMap | None,
+    entity_groups: EntityGroupMap | None,
+) -> tuple[list[str], list[tuple[Any, ...]]]:
+    """Execute one statement eagerly and read back what it produced."""
+    translated, bound = _prepare(
+        con, statement, None, database, allow_write, clusters, entity_groups
+    )
+    cursor = con.execute(translated, bound) if bound else con.execute(translated)
+    # `description` is None for a statement that returns no result set. Every
+    # KQL statement here does return one — a query its rows, an ingestion or a
+    # lifecycle command its summary row — but reading it defensively costs
+    # nothing and keeps a future one from crashing this loop.
+    if cursor.description is None:
+        return [], []
+    return [c[0] for c in cursor.description], cursor.fetchall()
 
 
 def _prepare(

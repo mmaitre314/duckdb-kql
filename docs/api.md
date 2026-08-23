@@ -213,9 +213,86 @@ Also accepts the control commands `.show version`, `.show databases` and
 `.show tables | where TableName startswith "Storm"`.
 See [Control commands](kusto-client.md#control-commands).
 
+### `query(con, query, ...) -> DuckDBPyRelation`
+
+An alias for `kql` — the same function object, so `duckdb_kql.query is
+duckdb_kql.kql`. `query` is what the Kusto APIs call this and what most people
+reach for; `kql` stays the primary spelling because in *this* package the point
+of the name is that the argument is not SQL.
+
 ### `execute(con, kql, parameters=None, database=None) -> DuckDBPyConnection`
 
 Mirrors `con.execute` — for the cursor, or the side effect.
+
+### `script(con, text, database=None, allow_write=True, clusters=None, entity_groups=None, continue_on_errors=False) -> list[ScriptResult]`
+
+Run several statements in order against one connection — the shape Azure Data
+Explorer calls a [database
+script](https://learn.microsoft.com/azure/data-explorer/database-script), for
+getting a database into a known state:
+
+```python
+duckdb_kql.script(con, """
+    .create database Telemetry
+
+    // seed the events
+    .set-or-replace Events <|
+        datatable(ts: datetime, level: string)
+        [ datetime(2024-01-01), "Error" ]
+
+    .set Levels <| Events | summarize n = count() by level
+
+    Levels | order by n desc
+""")
+```
+
+**Blank lines separate statements.** That is how ADX's own example and its ARM
+template parameter (`\n\n`) are written, and it is the only rule that lets a
+statement span lines — which a `datatable(...)` literal or the query after a
+`<|` routinely does. It is also sound rather than merely conventional: a KQL
+string literal cannot contain a raw newline, so a blank line in the script is
+never inside one. Chunks holding nothing but `//` comments are skipped.
+
+Statements run **eagerly and in order**, and each one's effects are visible to
+the next — that is what makes `.create database` followed by `.set` into it
+work. Rows come back materialized rather than as relations for the same reason:
+a lazy relation over a table a later statement replaces would answer differently
+after the fact.
+
+Two deliberate differences from ADX, both widening rather than narrowing:
+
+- **No command is off-limits.** ADX restricts a script to database-level
+  commands starting `.create`, `.create-or-alter`, `.create-merge`, `.alter`,
+  `.alter-merge` or `.add`. Here `.set-or-replace` is the point — seeding a
+  database *is* ingestion — and everything else this package runs is allowed too.
+- **A statement may be a query**, and its rows come back in the result, so a
+  script can check its own work.
+
+There is no `parameters` argument, deliberately: values would have to apply to
+every statement, and a statement declaring none would fail for being handed one.
+Parameterize with `kql` per statement.
+
+`allow_write=False` runs the whole script through the translator without letting
+it write, which is a way to check one before running it.
+
+`continue_on_errors` is ADX's flag of the same name and default: `False` stops
+at the first failure, raising `KqlScriptError`.
+
+### `ScriptResult`
+
+| Attribute | Meaning |
+|---|---|
+| `index` | 1-based position in the script — the *n*th statement |
+| `line` | 1-based line where the statement starts, for pointing at a file |
+| `text` | the statement as written |
+| `columns` · `rows` | what it returned |
+| `error` | the failure, under `continue_on_errors`; `None` otherwise |
+| `ok` | `error is None` |
+
+### `split_script(text) -> list[tuple[int, str]]`
+
+The splitter on its own, as `(line, statement)` pairs. Useful for showing a
+script back to someone, or for running the statements yourself.
 
 ### `df(con, kql, parameters=None, database=None)` · `arrow(con, kql, parameters=None, database=None)`
 
@@ -351,7 +428,9 @@ here; wrapping a local list in either would be ceremony rather than capability.
 KqlError                      duckdb_kql.errors — Layer 0 and 1
 ├── KqlSyntaxError            does not parse; .diagnostics has all of them
 ├── KqlUnsupportedError       parses, but outside the supported surface
-└── KqlSchemaError            unknown table/column, name collision, parameter problem
+├── KqlSchemaError            unknown table/column, name collision, parameter problem
+└── KqlScriptError            a `script()` statement failed; .index/.line say which,
+                              and the original is chained on .__cause__
 
 KustoError                    duckdb_kql.kusto.exceptions — Layer 2
 ├── KustoServiceError         the query failed; .is_semantic_error() distinguishes
