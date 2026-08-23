@@ -140,8 +140,9 @@ cheaper.
 
 ## 7. Proposed subagent configuration
 
-To be created under `.claude/agents/` if approved. Deliberately minimal — each
-gets only the tools it needs.
+Under `.claude/agents/`. Deliberately minimal — each gets only the tools it
+needs. The last two came later, with the maintenance framework
+([`maintenance/README.md`](maintenance/README.md)).
 
 | Agent | Model | Tools | Purpose |
 |---|---|---|---|
@@ -149,6 +150,8 @@ gets only the tools it needs.
 | `mapping-author` | Sonnet 5 | Read, Edit, Bash | Implement one registry row + its test; run the gate; report pass/fail. |
 | `adversarial-reviewer` | Sonnet 5 | Read, Bash | **Diff only, no implementation.** Try to break a mapping against the trap catalog. Never edits. |
 | `spec-architect` | Opus 5 | all | R-rules, IR design, semantic judgment calls. Rare, high-value. |
+| `debt-scout` | Sonnet 5 | Read, Grep, Glob, Bash | **Survey only.** Rank maintenance work by interest rate from `tools/maintenance_metrics.py`. Never edits. |
+| `refactorer` | Sonnet 5 | Read, Edit, Write, Glob, Grep, Bash | One named behaviour-preserving refactoring, gated on a byte-identical SQL snapshot. Never changes behaviour. |
 
 Two rules borrowed from Bun: the **implementer never reviews and the reviewer
 never implements**, and the reviewer sees only the diff.

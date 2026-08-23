@@ -174,6 +174,8 @@ limitations and Kusto discrepancies for each.
 | [`docs/create-database.md`](https://github.com/mmaitre314/duckdb-kql/blob/main/docs/create-database.md) | Reference notes for `.create database`, reconstructed from the KQL parser |
 | [`docs/implementation-plan.md`](https://github.com/mmaitre314/duckdb-kql/blob/main/docs/implementation-plan.md) | Architecture and milestones |
 | [`docs/test-plan.md`](https://github.com/mmaitre314/duckdb-kql/blob/main/docs/test-plan.md) | Corpus harvesting, oracle, divergence catalog |
+| [`docs/code-review/`](https://github.com/mmaitre314/duckdb-kql/blob/main/docs/code-review/README.md) | Review framework: severity scale, reporting format, one checklist per area |
+| [`docs/maintenance/`](https://github.com/mmaitre314/duckdb-kql/blob/main/docs/maintenance/README.md) | Maintenance framework: refactoring gate, technical debt, upgrades, and the metrics that measure them |
 | [`docs/kql-on-duckdb-landscape.md`](https://github.com/mmaitre314/duckdb-kql/blob/main/docs/kql-on-duckdb-landscape.md) | Survey of existing KQL-on-DuckDB work |
 | [`docs/implementation-options.md`](https://github.com/mmaitre314/duckdb-kql/blob/main/docs/implementation-options.md) | Six approaches considered, with the chosen one |
 | [`docs/m0-grammar-spike.md`](https://github.com/mmaitre314/duckdb-kql/blob/main/docs/m0-grammar-spike.md) | Grammar viability result |

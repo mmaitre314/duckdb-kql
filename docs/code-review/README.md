@@ -2,7 +2,8 @@
 
 > **Status: normative process doc.** This is *how* we review `duckdb-kql`, and
 > *what* every review must cover. It sits beside [`../TRANSLATION.md`](../TRANSLATION.md)
-> (what the code must *do*) and [`../../CONTRIBUTING.md`](../../CONTRIBUTING.md)
+> (what the code must *do*), [`../maintenance/README.md`](../maintenance/README.md)
+> (how it is kept changeable) and [`../../CONTRIBUTING.md`](../../CONTRIBUTING.md)
 > (how a change gets in). Where a review needs a semantic ruling, TRANSLATION.md
 > wins and this doc defers to it.
 

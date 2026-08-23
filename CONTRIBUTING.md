@@ -140,6 +140,30 @@ a change means picking the area(s) it touches and working its list; the
 [`adversarial-reviewer`](.claude/agents/adversarial-reviewer.md) agent automates
 the translation-correctness pass over a mapping diff.
 
+## Maintaining the code
+
+Refactoring here has an unusual failure mode: it does not break the build, it
+changes an answer. [`docs/maintenance/`](docs/maintenance/README.md) is the
+framework — a charter (the M-rules, the risk ladder, the workflow) plus playbooks
+for refactoring, technical debt, and dependency upgrades, and a
+[metrics catalogue](docs/maintenance/metrics.md) for measuring whether the work
+helped.
+
+Two commands carry it:
+
+```bash
+python tools/sql_snapshot.py --out /tmp/before.txt   # before any refactor
+python tools/sql_snapshot.py --compare /tmp/before.txt
+python tools/maintenance_metrics.py                  # what to work on, and did it move
+```
+
+The snapshot translates all ~1,285 corpus queries and records the SQL — or the
+refusal — for each. A refactor that preserves behaviour produces a byte-identical
+snapshot; any diff line is either a bug it just introduced or a behaviour change
+that belongs in its own commit. The
+[`refactorer`](.claude/agents/refactorer.md) agent runs to that gate, and
+[`debt-scout`](.claude/agents/debt-scout.md) picks its targets from the metrics.
+
 ## Style
 
 Match the surrounding code. Two habits worth copying:
