@@ -254,66 +254,14 @@ def render_expr(node: ir.Expr) -> str:
         return render_has_list(node)
 
     if isinstance(node, ir.FunctionCall):
-        if node.name.lower() in ("bin", "floor"):
-            # `floor` IS `bin` in KQL, two arguments and all — the emulator
-            # refuses `floor(7.9)` with "bin(): function expects 2 argument(s)"
-            # and answers -10 for `floor(-7, 5)`. Mapping it to SQL's `floor`
-            # answered a query Kusto rejects, and would have answered -7.
-            return render_bin(node, name=node.name.lower())
-        if node.name.lower() == "tostring" and len(node.args) == 1:
-            return render_kql_tostring(node.args[0])
-        if node.name.lower() == "reverse" and len(node.args) == 1:
-            # KQL's `reverse` reverses the value's **string form** whatever its
-            # type — `reverse(12345)` is `'54321'`, `reverse(3h)` is
-            # `'00:00:30'`. DuckDB's `reverse` takes VARCHAR only, so a bare
-            # mapping produced SQL that would not bind for anything else.
-            # (Do not start a comment line with `type:` — mypy reads it as a
-            # PEP 484 type comment and reports a syntax error here.)
-            #
-            # A plain CAST is not enough either — it agrees with KQL for
-            # numbers and disagrees for datetimes, where KQL prints seven
-            # fractional digits and a `Z`. Reversing the wrong rendering is a
-            # wrong answer that still looks like a reversed string, so this goes
-            # through the same KQL-spelling helper the hash functions use.
-            return f"reverse({render_kql_tostring(node.args[0])})"
         special = _SPECIAL_FORMS.get(node.name.lower())
         if special is not None:
-            return special(node)
-        if node.name.lower() == "pack_array":
-            # json_array() takes mixed types, which to_json([...]) cannot —
-            # and it renders an INTERVAL as KQL spells it ("00:00:02").
-            return f"json_array({', '.join(render_expr(a) for a in node.args)})"
-        if node.name.lower() in ("hash_md5", "hash_sha1", "hash_sha256"):
-            fn = {"hash_md5": "md5", "hash_sha1": "sha1", "hash_sha256": "sha256"}[
-                node.name.lower()
-            ]
-            if len(node.args) == 1:
-                # Hashing goes through KQL's *string* form, so a datetime must
-                # be spelled the way KQL spells it or the digest is wrong —
-                # silently, and in security-relevant code.
-                return f"{fn}({render_kql_tostring(node.args[0])})"
-        if node.name.lower() == "array_concat":
-            # DuckDB's list_concat is binary; KQL's array_concat is variadic.
-            args = [f"CAST({render_expr(a)} AS JSON[])" for a in node.args]
-            if not args:
-                return "CAST('[]' AS JSON)"
-            folded = args[0]
-            for nxt in args[1:]:
-                folded = f"list_concat({folded}, {nxt})"
-            return f"CAST({folded} AS JSON)"
-        if node.name.lower() == "todatetime" and len(node.args) == 1:
-            # `todatetime(T)` where T is already a datetime is a no-op in KQL,
-            # but the string-parsing template does not bind against a TIMESTAMP
-            # — it reached DuckDB as `try_strptime(TIMESTAMP, VARCHAR[])` and
-            # came back as a raw BinderException rather than any KQL error.
-            if _is_datetime_expr(node.args[0]):
-                return render_expr(node.args[0])
-        if node.name.lower() in ("totimespan", "timespan") and len(node.args) == 1:
-            # `totimespan(4d)` hands us an INTERVAL, not a string — the string
-            # parser would fail to bind. Converting an already-converted value
-            # is a no-op in KQL too.
-            if _is_timespan_expr(node.args[0]):
-                return render_expr(node.args[0])
+            rendered = special(node)
+            if rendered is not None:
+                return rendered
+            # A special form that answers None has **declined** this call and the
+            # generic path below takes it. Five of them do — see the comment
+            # on `_SPECIAL_FORMS`. Not an unconditional `return`, on purpose.
         fn_spec = lookup(node.name)
         if fn_spec is None:
             raise KqlUnsupportedError(
@@ -3214,7 +3162,139 @@ def _render_round(node: ir.FunctionCall) -> str:
     return f"round({value}, CAST({render_expr(node.args[1])} AS INTEGER))"
 
 
-_SPECIAL_FORMS = {
+def _render_bin_or_floor(node: ir.FunctionCall) -> str:
+    """`floor` **is** `bin` in KQL, two arguments and all.
+
+    The emulator refuses `floor(7.9)` with *"bin(): function expects 2
+    argument(s)"* and answers -10 for `floor(-7, 5)`. Mapping it to SQL's
+    `floor` answered a query Kusto rejects, and would have answered -7.
+    """
+    return render_bin(node, name=node.name.lower())
+
+
+def _render_tostring(node: ir.FunctionCall) -> str | None:
+    """`tostring(x)` — R17's dynamic-in-string-context helper.
+
+    Declines any other arity so `lookup()` reports the arity error naming the
+    function, which is what it did before this was a special form.
+    """
+    if len(node.args) != 1:
+        return None
+    return render_kql_tostring(node.args[0])
+
+
+def _render_reverse(node: ir.FunctionCall) -> str | None:
+    """`reverse(x)` reverses the value's **string form**, whatever its type.
+
+    `reverse(12345)` is `'54321'` and `reverse(3h)` is `'00:00:30'`. DuckDB's
+    `reverse` takes VARCHAR only, so a bare mapping produced SQL that would not
+    bind for anything else. (Do not start a comment line with `type:` — mypy
+    reads it as a PEP 484 type comment and reports a syntax error here.)
+
+    A plain CAST is not enough either: it agrees with KQL for numbers and
+    disagrees for datetimes, where KQL prints seven fractional digits and a `Z`.
+    Reversing the wrong rendering is a wrong answer that still looks like a
+    reversed string, so this goes through the same KQL-spelling helper the hash
+    functions use.
+    """
+    if len(node.args) != 1:
+        return None
+    return f"reverse({render_kql_tostring(node.args[0])})"
+
+
+def _render_pack_array(node: ir.FunctionCall) -> str:
+    """`pack_array(...)` — `json_array`, not `to_json([...])`.
+
+    `json_array()` takes mixed types, which `to_json([...])` cannot, and it
+    renders an INTERVAL the way KQL spells it (`"00:00:02"`).
+    """
+    return f"json_array({', '.join(render_expr(a) for a in node.args)})"
+
+
+#: KQL hash function -> DuckDB's. Kept beside the renderer that reads it so the
+#: pair cannot drift.
+_HASHES = {"hash_md5": "md5", "hash_sha1": "sha1", "hash_sha256": "sha256"}
+
+
+def _render_hash(node: ir.FunctionCall) -> str | None:
+    """`hash_md5` / `hash_sha1` / `hash_sha256`, over KQL's **string** form.
+
+    A datetime must be spelled the way KQL spells it or the digest is wrong —
+    silently, and in security-relevant code. Any other arity declines, so the
+    arity error still comes from `lookup()` naming the function.
+    """
+    if len(node.args) != 1:
+        return None
+    return f"{_HASHES[node.name.lower()]}({render_kql_tostring(node.args[0])})"
+
+
+def _render_array_concat(node: ir.FunctionCall) -> str:
+    """`array_concat(...)` — variadic in KQL, binary in DuckDB, so folded."""
+    args = [f"CAST({render_expr(a)} AS JSON[])" for a in node.args]
+    if not args:
+        return "CAST('[]' AS JSON)"
+    folded = args[0]
+    for nxt in args[1:]:
+        folded = f"list_concat({folded}, {nxt})"
+    return f"CAST({folded} AS JSON)"
+
+
+def _render_todatetime(node: ir.FunctionCall) -> str | None:
+    """`todatetime(T)` where T is **already** a datetime is a no-op in KQL.
+
+    The string-parsing template does not bind against a TIMESTAMP — it reached
+    DuckDB as `try_strptime(TIMESTAMP, VARCHAR[])` and came back as a raw
+    BinderException rather than any KQL error. Every other shape declines and
+    the registry's template takes it, which is the common case.
+    """
+    if len(node.args) == 1 and _is_datetime_expr(node.args[0]):
+        return render_expr(node.args[0])
+    return None
+
+
+def _render_totimespan(node: ir.FunctionCall) -> str | None:
+    """`totimespan(4d)` hands us an INTERVAL, not a string.
+
+    The string parser would fail to bind, and converting an already-converted
+    value is a no-op in KQL too. As with `todatetime`, anything else declines to
+    the registry's template.
+    """
+    if len(node.args) == 1 and _is_timespan_expr(node.args[0]):
+        return render_expr(node.args[0])
+    return None
+
+
+#: A function whose SQL needs Python rather than a `{0}`-style template, and
+#: which `render_expr` consults **before** the registry.
+#:
+#: A form may answer ``None`` to **decline**, in which case the generic
+#: `lookup()`/`.render()` path takes the call. That is not decoration: five of
+#: these are conditional. `tostring`, `reverse` and the `hash_*` family handle
+#: exactly one argument and let every other arity fall through so the arity
+#: error still names the function; `todatetime` and `totimespan` short-circuit
+#: only when the argument is *already* of that type and otherwise want the
+#: registry's string-parsing template, which is the common case.
+#:
+#: Before this was one mechanism it was two — eight of these were `if
+#: node.name.lower() == …` arms written around the dict lookup, half of them
+#: before it and half after. Merging them is safe only because no name appears
+#: twice; if one ever does, the order between the two groups stops being
+#: irrelevant and this comment is wrong.
+#: (`Callable` is a TYPE_CHECKING-only import; the annotation is never
+#: evaluated, because this module has `from __future__ import annotations`.)
+_SPECIAL_FORMS: dict[str, Callable[[ir.FunctionCall], str | None]] = {
+    "bin": _render_bin_or_floor,
+    "floor": _render_bin_or_floor,
+    "tostring": _render_tostring,
+    "reverse": _render_reverse,
+    "pack_array": _render_pack_array,
+    "hash_md5": _render_hash,
+    "hash_sha1": _render_hash,
+    "hash_sha256": _render_hash,
+    "array_concat": _render_array_concat,
+    "todatetime": _render_todatetime,
+    "totimespan": _render_totimespan,
+    "timespan": _render_totimespan,
     "case": _render_case,
     "strcat": _render_strcat,
     "strcat_delim": _render_strcat_delim,
