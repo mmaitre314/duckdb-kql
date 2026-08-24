@@ -323,7 +323,9 @@ def family_of(name: str) -> str:
 SPECIAL_NOTES: dict[str, str] = {
     "bin": "Floors to a multiple of the bin size **from the epoch origin**, and works on numbers as well as datetimes. Weeks and months are pinned against the emulator rather than mapped to `date_trunc`.",
     "case": "Variadic `case(pred, val, …, else)`.",
-    "countof": "Both the substring and regex kinds. The substring kind counts **overlapping** occurrences, which `regexp_count` does not.",
+    "countof": "Both kinds, and they differ on **overlap**: the default `normal` (substring) kind counts overlapping occurrences — `countof('aaaa', 'aa')` is **3** — while `regex` does not, answering 2. Counted over start positions, since no DuckDB function overlaps and RE2 has no lookahead. An empty needle is 0 and a null haystack is 0, not null. **Residue:** a non-literal search term is accepted here and rejected by a cluster.",
+    "tobool": "Text is `true`/`false` (case-insensitive, trimmed) **or an integer** — `'2'` is true and `'1.5'` is null. A *number* is its nonzero-ness, so `tobool(1.5)` is true and `tobool('1.5')` is not: the same value spelled two ways converts differently, and the two are told apart at run time. DuckDB's own boolean cast is wrong in both directions — it accepts `yes`/`no`/`y`/`n`/`t`/`f` and rejects `'2'` (R1).",
+    "toboolean": "Alias for `tobool`.",
     "datetime_add": "",
     "datetime_diff": "Returns a whole number of periods, truncated toward zero.",
     "datetime_part": "`nanosecond` is **refused**: KQL keeps 100 ns ticks and DuckDB stores microseconds, so the digit asked for does not exist.",

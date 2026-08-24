@@ -2568,6 +2568,40 @@ def _parse_column(segment: ir.ParseSegment, ok: str | None) -> str:
     return f"CASE WHEN {ok} THEN {value} ELSE {blank} END AS {name}"
 
 
+def _kql_bool_from_text(text: str) -> str:
+    """KQL's `bool` conversion **from text**, which DuckDB's cast is not.
+
+    Measured, and wrong in both directions if taken from `TRY_CAST(… AS
+    BOOLEAN)`:
+
+    * DuckDB is too **generous** — it accepts `yes`, `no`, `y`, `n`, `t`, `f`,
+      all of which Kusto answers null for;
+    * DuckDB is too **strict** — Kusto reads an integer, so `'2'`, `'-1'`,
+      `'+1'` and `'0002'` are all true and `'0'` is false, where the cast
+      refuses anything but `0`/`1`.
+
+    Only *integer* text converts: `'1.5'` and `'0.0'` are **null**, not true.
+    That is why the integer branch is a shape test and not `TRY_CAST(… AS
+    BIGINT)`, which rounds `'1.5'` to 2 and would answer true.
+
+    Whitespace is trimmed, tabs included — `'\\ttrue'` is true on a cluster.
+    Hence `regexp_replace` rather than `trim`, whose default character set is
+    spaces only; `trim('\\ttrue')` is unchanged and casts to null.
+
+    Takes rendered SQL of unknown type, so it casts to VARCHAR itself: every
+    branch of a `CASE` has to **bind** even when it never runs, and
+    `regexp_matches` has no non-VARCHAR overload.
+    """
+    as_text = f"CAST({text} AS VARCHAR)"
+    trimmed = f"regexp_replace({as_text}, '^\\s+|\\s+$', '', 'g')"
+    return (
+        f"CASE WHEN regexp_matches({as_text}, '^\\s*[-+]?\\d+\\s*$') "
+        f"THEN TRY_CAST({trimmed} AS BIGINT) <> 0 "
+        f"WHEN regexp_matches({as_text}, '(?i)^\\s*(true|false)\\s*$') "
+        f"THEN TRY_CAST({trimmed} AS BOOLEAN) END"
+    )
+
+
 def _parse_convert(segment: ir.ParseSegment) -> str:
     """The captured text under `name: T`, or the text itself for a bare name."""
     captured = f"{quote_ident(_PARSE_CAPTURES)}.{quote_ident(str(segment.name))}"
@@ -2589,24 +2623,7 @@ def _parse_convert(segment: ir.ParseSegment) -> str:
     if duck == "INTERVAL":
         return f"({_TOTIMESPAN.format(captured)})"
     if duck == "BOOLEAN":
-        # Measured: `true`/`false` case-insensitively, or an **integer** whose
-        # nonzero-ness decides — `'2'` and `'-1'` are true, `'0'` is false, and
-        # `'1.5'` and `'0.0'` are **null**, not true. The integer test is what
-        # keeps those two null, so a bare `TRY_CAST ... AS BIGINT` (which
-        # rounds `'1.5'` to 2) will not do.
-        #
-        # This is exact here and cannot be in `tobool`, which also has to serve
-        # a numeric argument — `tobool(1.5)` is true where `tobool('1.5')` is
-        # null, and telling those apart needs the column type
-        # (docs/column-types-proposal.md). `tobool`'s residue stays recorded.
-        # `TRY_CAST(… AS BOOLEAN)` is too generous on the textual side as well:
-        # DuckDB accepts `yes`, `no`, `t`, `f`; Kusto accepts only true/false.
-        return (
-            f"CASE WHEN regexp_matches({captured}, '^\\s*[-+]?\\d+\\s*$') "
-            f"THEN TRY_CAST({captured} AS BIGINT) <> 0 "
-            f"WHEN regexp_matches({captured}, '(?i)^\\s*(true|false)\\s*$') "
-            f"THEN TRY_CAST(trim({captured}) AS BOOLEAN) END"
-        )
+        return _kql_bool_from_text(captured)
     if duck in ("BIGINT", "INTEGER"):
         # Measured: `tolong('1.5')` is **null** in Kusto, and `'.5'` and `'1e3'`
         # are too — only integer text converts. DuckDB's `TRY_CAST(… AS BIGINT)`
@@ -3051,8 +3068,26 @@ def _render_substring(node: ir.FunctionCall) -> str:
     if len(node.args) == 2:
         taken = f"substring({source}, {offset} + 1)"
     else:
-        # A negative length clamps to zero rather than counting backwards.
-        taken = f"substring({source}, {offset} + 1, greatest({render_expr(node.args[2])}, 0))"
+        # A negative length clamps to zero rather than counting backwards, and
+        # a **null** one propagates. Not `greatest(len, 0)`, whose DuckDB answer
+        # for null is 0 — that turned a null length into `''`.
+        #
+        # Both indices propagate, and pinning that took measuring the right
+        # path. Kusto's constant folder and its row engine **disagree** here:
+        #
+        #   print x = substring('abcdefg', long(null))              -> 'abcdefg'
+        #   datatable(s:string)['abcdefg'] | project substring(s, long(null))
+        #                                                           -> null
+        #
+        # ...and the same split for a null length. `print` reads a null index as
+        # 0; the row engine propagates, `isnull` true and `strlen` null. The row
+        # engine is the one that runs over data, and it agrees with R4, so it is
+        # the one reproduced. A review that measured only `print` concluded the
+        # opposite and asked for `coalesce(start, 0)`; that would have matched
+        # the folded shape and broken every tabular query.
+        length = render_expr(node.args[2])
+        clamped = f"(CASE WHEN {length} < 0 THEN 0 ELSE {length} END)"
+        taken = f"substring({source}, {offset} + 1, {clamped})"
     return f"(CASE WHEN {offset} < 0 THEN '' ELSE {taken} END)"
 
 
@@ -3060,7 +3095,26 @@ def _render_countof(node: ir.FunctionCall) -> str:
     """``countof(text, search [, kind])`` — occurrences, not characters.
 
     The default kind is ``normal`` (a plain substring); ``regex`` switches to a
-    pattern. Overlapping matches are not counted in either mode.
+    pattern. **The two modes differ on overlap**, which is the trap: measured,
+
+        countof("aaaa", "aa")            -> 3     normal, OVERLAPPING
+        countof("aaaa", "aa", "regex")   -> 2     regex, non-overlapping
+        countof("aaa", "aa")             -> 2
+        countof("ααα", "αα")             -> 2     characters, not bytes (R11)
+
+    Overlap makes the obvious subtraction wrong. This used to compute
+    ``(length(s) - length(replace(s, n, ''))) / length(n)``, and `replace` is
+    non-overlapping left-to-right, so it answered 2 for the first line — quietly,
+    and against this repo's own published support matrix, which said
+    "overlapping" while the code's docstring said the opposite. Kusto's
+    canonical example is the overlapping one; three-way contradiction settled by
+    measurement.
+
+    There is no DuckDB counting function that overlaps, and RE2 has no
+    lookahead to build one with, so the count is over **positions**: every start
+    index at which the needle sits. Two edges measured with it — an empty needle
+    is 0 rather than a division by zero, and a *null haystack* is 0 rather than
+    null, which is the one place this function does not propagate.
     """
     args = [render_expr(a) for a in node.args]
     kind = "normal"
@@ -3073,9 +3127,41 @@ def _render_countof(node: ir.FunctionCall) -> str:
         return f"length(regexp_extract_all({args[0]}, {args[1]}))"
     if kind != "normal":
         raise KqlUnsupportedError(f"countof:{kind}")
+    text, needle = args[0], args[1]
+    starts = f"generate_series(1, length(coalesce({text}, '')) - length({needle}) + 1)"
+    matches = f"list_filter({starts}, i -> substr({text}, i, length({needle})) = {needle})"
     return (
-        f"CAST((length({args[0]}) - length(replace({args[0]}, {args[1]}, ''))) "
-        f"/ nullif(length({args[1]}), 0) AS BIGINT)"
+        f"CASE WHEN {needle} IS NULL THEN NULL "
+        f"WHEN length({needle}) = 0 THEN 0 "
+        f"ELSE CAST(len({matches}) AS BIGINT) END"
+    )
+
+
+def _render_tobool(node: ir.FunctionCall) -> str | None:
+    """`tobool(x)` / `toboolean(x)` — text and numbers follow different rules.
+
+    A **number** is its nonzero-ness, fractions included: `tobool(1.5)` is true.
+    **Text** is `true`/`false` or an integer, so `tobool('1.5')` is **null** —
+    the same value, spelled two ways, converts differently. `TRY_CAST(… AS
+    BOOLEAN)` got the text side wrong in both directions (see
+    :func:`_kql_bool_from_text`) and the numeric side right.
+
+    Telling the two apart was the blocker: an operand is usually a bare column
+    and the IR carries no type for one. `docs/column-types-proposal.md` is
+    still the way to know this at *translation* time, but the answer is not
+    needed until execution, and DuckDB knows it then — the same `typeof`
+    dispatch `tostring` uses (R20). So the recorded residue is now drained
+    rather than waiting on that work.
+
+    Declines any other arity so `lookup()` reports it naming the function.
+    """
+    if len(node.args) != 1:
+        return None
+    value = render_expr(node.args[0])
+    return (
+        f"CASE WHEN typeof({value}) = 'VARCHAR' "
+        f"THEN ({_kql_bool_from_text(value)}) "
+        f"ELSE TRY_CAST({value} AS BOOLEAN) END"
     )
 
 
@@ -3361,6 +3447,8 @@ _SPECIAL_FORMS: dict[str, Callable[[ir.FunctionCall], str | None]] = {
     "substring": _render_substring,
     "round": _render_round,
     "countof": _render_countof,
+    "tobool": _render_tobool,
+    "toboolean": _render_tobool,
     "zip": _render_zip,
     "make_datetime": _render_make_datetime,
     "make_timespan": _render_make_timespan,

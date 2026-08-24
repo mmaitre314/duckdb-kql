@@ -225,61 +225,6 @@ rather than a surprise.
 
 ## S3 — correctness-adjacent
 
-### S3-1 · `countof` counts non-overlapping; the generated docs assert overlapping
-
-`translate/__init__.py:3006` (`_render_countof`), vs
-`tools/gen_support_matrix.py:325` → `docs/kql-support.md:321`.
-
-The substring mode computes
-`(length(s) - length(replace(s, needle, ''))) / length(needle)`, and `replace()`
-is non-overlapping left-to-right, so `countof("aaaa", "aa")` → `2`. The
-committed doc says, in as many words, *"The substring kind counts **overlapping**
-occurrences, which `regexp_count` does not."* The function's own docstring says
-the opposite of the doc. Three-way contradiction between code, comment and
-published doc. Kusto's canonical `countof` example is overlap-counting, so the
-code is the likely-wrong party — **settle against the emulator**, then fix
-whichever two of the three are wrong.
-
-### S3-2 · `tobool("yes")` returns `true`; Kusto returns null *(unverified)*
-
-`translate/functions.py:208-209` — the row is `TRY_CAST({0} AS BOOLEAN)`.
-DuckDB's boolean cast accepts `yes/no/y/n/t/f` on top of `true/false/1/0`
-(verified: `TRY_CAST('yes' AS BOOLEAN)` → `TRUE`). Kusto's `tobool()` recognises
-only `"true"`/`"false"` (case-insensitive) and numerics, so this should be null.
-A silently *wrong value*, which is the failure R1 exists to prevent — but the
-Kusto side is unverified here and no trap or `source_url` covers this row's
-string vocabulary. **Escalates to S1 if the oracle confirms.**
-
-### S3-3 · `substring`'s null `length` silently becomes `''`
-
-`translate/__init__.py:2968` (`_render_substring`). The negative-length clamp is
-`greatest(<length>, 0)`, and DuckDB's `greatest(NULL, 0)` is `0`, not NULL
-(verified). So the same function treats its two null arguments differently:
-
-```
-print x = substring("abcdefg", 1, int(null))  -> ''      (length silently -> 0)
-print x = substring("abcdefg", long(null))    -> NULL    (start propagates)
-```
-
-> ### ⚠ Settled against the emulator 2026-08-24 — **the halves are the other way round**
->
-> R4's null-propagation default made `''` look like the suspicious one. It is
-> the correct one:
->
-> | Call | Kusto | Ours | |
-> |---|---|---|---|
-> | `substring("abcdefg", 1, int(null))` | `''` | `''` | ✔ agree |
-> | `substring("abcdefg", long(null))` | `'abcdefg'` | `NULL` | ✘ **diverges** |
-> | `substring("abcdefg", int(null), 3)` | `'abc'` | `NULL` | ✘ **diverges** |
->
-> A null **length** clamps to 0 and yields `''`; a null **start** is treated as
-> 0 and the substring runs from the beginning. Neither propagates. The entry
-> marked the diverging half ✔ and the agreeing half suspicious.
->
-> **Fix:** `coalesce(<start>, 0)`, same shape as the existing length clamp. The
-> internal inconsistency the entry spotted is real — it is just that both
-> arguments should stop propagating, not that both should.
-
 ### S3-4 · `hasprefix`/`hassuffix` are documented and in the corpus, but unmapped
 
 R3 documents them; the lexer supports all four spellings plus negations; the
@@ -376,9 +321,22 @@ part of the repro.**
 
 ## Suggested order of work
 
-1. **Settle the two open semantics questions against the emulator** — S1-2's
-   intra-clause evaluation order, S3-1's `countof` overlap, S3-2's `tobool`
-   vocabulary. Cheap, and two of them gate fixes below.
+1. ~~**Settle the two open semantics questions against the emulator**~~ —
+   **done**, and settling them turned three entries over. `countof`'s substring
+   kind *is* overlapping (S3-1: the code was wrong, the generated doc right);
+   `tobool`'s vocabulary is `true`/`false` **or an integer**, so we were wrong
+   in both directions at once (S3-2, escalated as the entry predicted); and
+   `substring` propagates null on **both** indices (S3-3).
+
+   S3-3 is the one worth reading twice, because settling it *twice* gave two
+   different answers. Kusto's constant folder and its row engine disagree:
+   under `print` a null start reads as 0, over a table it propagates. The
+   entry, its own correction block, and the first fix here were all measured
+   against `print`, and all three landed on `coalesce(start, 0)` — which would
+   have matched the folded shape and broken every tabular query. **When an
+   oracle can answer the same question two ways, which one you asked is part
+   of the measurement.** The row engine wins: it is what runs over data, and it
+   agrees with R4.
 2. **The name-collision cluster as one change** — S1-1, S1-2, S1-4, S2-1, S2-2.
    Largest blast radius; do it while the analysis above is fresh.
    **S1-1 is done**: `_no_case_collision` on both column-list choke points, with
@@ -402,6 +360,9 @@ part of the repro.**
 4. **Error-taxonomy sweep** — S2-3, S2-4, S2-5 together, plus the
    `__init__.py:200` docstring correction from S1-4.
 5. **S3-4, S3-5, S4** as maintenance.
+
+**Fixed so far, with trap tests, entries deleted:** S1-1, S1-3, S1-4, S1-5,
+S3-1, S3-2, S3-3. Still open: S2-1 … S2-6, S3-4, S3-5, S4 and the Nit.
 
 Every fix lands with a trap test, per §4's own standard — and per S3-5, name it
 so the spec can cite it.

@@ -318,7 +318,7 @@ Not supported: `arg_max`, `arg_min`, `binary_all_*`, `buildschema`,
 | `base64_decodestring` | Azure Monitor's spelling of `base64_decode_tostring`, and shares its UTF-8 divergence. |
 | `base64_encode_tostring` | — |
 | `base64_encodestring` | Azure Monitor's spelling of `base64_encode_tostring`. |
-| `countof` | Both the substring and regex kinds. The substring kind counts **overlapping** occurrences, which `regexp_count` does not. |
+| `countof` | Both kinds, and they differ on **overlap**: the default `normal` (substring) kind counts overlapping occurrences — `countof('aaaa', 'aa')` is **3** — while `regex` does not, answering 2. Counted over start positions, since no DuckDB function overlaps and RE2 has no lookahead. An empty needle is 0 and a null haystack is 0, not null. **Residue:** a non-literal search term is accepted here and rejected by a cluster. |
 | `extract_all` | Capture-group count changes the result shape, so it is resolved at translation time from the pattern. |
 | `extract` | Argument order is **(regex, group, text)** — the reverse of DuckDB's `regexp_extract`. Returns null, not an error, when nothing matches. |
 | `indexof` | **0-based**, and returns `-1` when not found, where SQL's `position` is 1-based and returns `0`. |
@@ -368,8 +368,8 @@ Not supported: `arg_max`, `arg_min`, `binary_all_*`, `buildschema`,
 
 | Function | Limitations and gotchas |
 |---|---|
-| `tobool` | Unparseable input yields **null**, never an error. |
-| `toboolean` | Unparseable input yields **null**, never an error. |
+| `tobool` | Text is `true`/`false` (case-insensitive, trimmed) **or an integer** — `'2'` is true and `'1.5'` is null. A *number* is its nonzero-ness, so `tobool(1.5)` is true and `tobool('1.5')` is not: the same value spelled two ways converts differently, and the two are told apart at run time. DuckDB's own boolean cast is wrong in both directions — it accepts `yes`/`no`/`y`/`n`/`t`/`f` and rejects `'2'` (R1). |
+| `toboolean` | Alias for `tobool`. |
 | `todouble` | Unparseable input yields **null**, never an error. |
 | `toguid` | Returns null on a malformed GUID rather than raising (R1). |
 | `toint` | Unparseable input yields **null**, never an error. |

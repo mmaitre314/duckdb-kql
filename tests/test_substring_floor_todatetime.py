@@ -94,6 +94,49 @@ def test_substring_of_a_column_with_a_negative_start(con) -> None:
     assert sorted(rows) == [("fg",), ("xy",)]
 
 
+@pytest.mark.parametrize(
+    "expr",
+    [
+        "substring(s, long(null))",
+        "substring(s, long(null), 3)",
+        "substring(s, 1, int(null))",
+        "substring(s, -3, int(null))",
+        "substring(s, long(null), int(null))",
+    ],
+)
+def test_a_null_index_propagates(con, expr: str) -> None:
+    """Both indices propagate — and pinning it took measuring the right path.
+
+    Kusto's constant folder and its row engine **disagree** here. Under `print`
+    a null start reads as 0 (`substring('abcdefg', long(null))` is
+    `'abcdefg'`) and a null length clamps to 0; over a table both answer null,
+    `isnull` true and `strlen` null. The row engine is the one that runs over
+    data and the one that agrees with R4, so it is the one reproduced — hence
+    a `datatable` here and not a `print`.
+
+    A review that measured only the folded path reported the opposite and asked
+    for `coalesce(start, 0)`. That would have matched `print` and broken every
+    tabular query, so this test is deliberately written the way that catches it.
+
+    `greatest(length, 0)` was the other half: DuckDB's answer for null is **0**,
+    not null, which silently turned a null length into `''`.
+    """
+    q = (
+        "datatable(s:string)['abcdefg'] "
+        f"| project n = isnull({expr}), l = strlen({expr})"
+    )
+    assert duckdb_kql.kql(con, q).fetchall() == [(True, None)]
+
+
+def test_a_null_source_is_still_the_empty_string(con) -> None:
+    """R20's totality, not R4 — the *source* does not propagate. Measured."""
+    q = (
+        "datatable(s:string)[dynamic(null)] "
+        "| project n = isnull(substring(s, 1, 3)), l = strlen(substring(s, 1, 3))"
+    )
+    assert duckdb_kql.kql(con, q).fetchall() == [(False, 0)]
+
+
 def test_substring_rejects_a_fourth_argument(con) -> None:
     with pytest.raises(duckdb_kql.KqlUnsupportedError):
         duckdb_kql.kql(con, "print x = substring('abc', 0, 1, 2)")

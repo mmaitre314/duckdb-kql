@@ -373,7 +373,20 @@ we must never claim a specific row order absent a terminal `sort`.
 
 - `strlen` counts **characters**, not bytes → `length()` (not `octet_length`).
   `substring` uses **0-based** indices and must tolerate negative/out-of-range
-  input without erroring (KQL clamps; SQL's `substring` is 1-based).
+  input without erroring (KQL clamps; SQL's `substring` is 1-based). A **null**
+  index propagates on both start and length, so `greatest(length, 0)` is the
+  wrong clamp — DuckDB's `greatest(NULL, 0)` is 0, which turned a null length
+  into `''`. The *source* does not propagate: a null string is `''` (R20).
+
+  Measuring this needs care, because Kusto answers it two ways. Its constant
+  folder reads a null index as 0 — `print x = substring('abcdefg', long(null))`
+  is `'abcdefg'` — while the row engine propagates. The row engine is what runs
+  over data, so it is what the mapping reproduces; a `print`-only measurement
+  gets the opposite answer and looks just as authoritative.
+- `countof`'s default `normal` kind counts **overlapping** occurrences —
+  `countof('aaaa', 'aa')` is 3 — while its `regex` kind does not (2). No DuckDB
+  function overlaps and RE2 has no lookahead, so the substring kind counts start
+  positions instead.
 - `dcount`/`dcountif` are **approximate** (HLL) in KQL, and the honest-looking
   mapping to `approx_count_distinct` is nevertheless the wrong one. Measured
   against the emulator, at corpus cardinalities KQL's estimate returns the
@@ -856,11 +869,16 @@ too generous, each one a silent wrong answer if taken:
 
 So an integer column tests the text is integer-shaped first, a bool accepts
 only `true`/`false` or a whole number, and a datetime reuses `todatetime`'s
-format list. `parse` can be exact here where `tolong`/`tobool` cannot, because
-what it converts is always *text* — those two must also serve a numeric
-argument (`tolong(1.5)` really is 2), and telling the cases apart needs column
-types. **Their divergence is unfixed and recorded**: `tolong('1.5')` answers 1
-here and null on a cluster.
+format list.
+
+`parse` knows its argument is *text*; `tolong`/`tobool` must also serve a
+**numeric** one, where the answer genuinely differs — `tolong(1.5)` is 2 while
+`tolong('1.5')` is null, and `tobool(1.5)` is true while `tobool('1.5')` is
+null. That looked like it had to wait for column types, and for `tobool` it did
+not: the answer is not needed until *execution*, and R20's run-time `typeof`
+dispatch supplies it there. `tobool` now shares `parse`'s exact text rule and
+is measured clean. **`tolong`/`toint` are the same fix and are not yet done**:
+`tolong('1.5')` still answers 1 here and null on a cluster.
 
 `todynamic` has a recorded residue of its own, found by the `parse` sweep and
 not yet fixed: KQL wraps text that is not JSON as a dynamic **string**, so
