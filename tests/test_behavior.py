@@ -37,8 +37,10 @@ pytestmark = pytest.mark.skipif(not CORPUS.is_file(), reason=f"no corpus at {COR
 #: Went 277 -> 280 with the `has_any`/`has_all` rewrite: a null needle matches
 #: anything and `has_all` over an empty needle set is true, neither of which the
 #: old `list_filter` / `bool_and` shapes could express. Then 280 -> 285 with
-#: `parse` / `parse-where` in `kind=simple` and `kind=relaxed`.
-BASELINE_PASSING = 291
+#: `parse` / `parse-where` in `kind=simple` and `kind=relaxed`. 291 -> 292 with
+#: `tostring` dispatching on run-time `typeof`, which drained the last known
+#: divergence (`reverse` of a datetime *column*).
+BASELINE_PASSING = 292
 
 #: Cases whose *data* makes them nondeterministic, which the query text cannot
 #: show. Not a divergence and not a waiver — there is no single right answer to
@@ -75,17 +77,6 @@ KNOWN_DIVERGENCES: dict[str, str] = {
         "\\x escapes. DuckDB has no UTF-8 validity predicate to switch on, and "
         "sniffing for '\\x' in the output would misfire on a legitimate "
         "backslash. Valid UTF-8 — the case that matters — is correct."
-    ),
-    "reverse-function-01": (
-        "reverse() of a datetime *column*. KQL reverses the value's .NET string "
-        "form, so the rendering has to be KQL's — and this picks it from what "
-        "can be inferred statically. A datetime literal or a datetime-returning "
-        "call is rendered right; a bare column reaching reverse() through an "
-        "earlier `print` is not, because column types are not carried across "
-        "pipeline stages. Every other type in the case matches, and so does a "
-        "datetime whose type is visible. Drained by type inference, not by a "
-        "wider cast: casting unconditionally would agree for numbers and "
-        "disagree for datetimes, which is this same bug wearing a bigger hat."
     ),
 }
 

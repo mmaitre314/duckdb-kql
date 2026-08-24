@@ -208,41 +208,6 @@ carries its columns in the IR — so `cols` is **never** `None` in those tests.
 The only tests of this rule are structurally incapable of reaching the branch
 that is wrong.
 
-### S1-5 · Booleans render lowercase inside `tostring`/`strcat`/`hash_*`/`reverse`
-
-`translate/__init__.py:2906` (`_is_bool_expr`), consumed by
-`render_kql_tostring` (`:2802-2865`).
-
-`_is_bool_expr` is an allow-list recognising literals, `not()`, and a hardcoded
-set of `BinaryOp` ops (`==,!=,<>,<,<=,>,>=,and,or,=~,!~`). It is missing:
-
-- the entire `has`/`contains`/`startswith`/`endswith` family (all real
-  `BinaryOp` ops in `BINARY_OPERATORS`, `functions.py:511`),
-- `ir.InList` / `ir.HasList`,
-- every boolean-returning `FunctionCall` (`isnull`, `isnotnull`, `isempty`,
-  `isnotempty`, `isnan`, `isfinite`, `isinf`).
-
-Anything unrecognised falls to the generic `CAST(... AS VARCHAR)` branch, which
-DuckDB spells lowercase — contradicting `render_kql_tostring`'s own docstring
-("a bool is `True`/`False` (.NET capitalisation), not `true`") and R17.
-
-```
-print x = tostring("abc" has "a")          -> 'false'        (want 'False')
-print x = tostring(isnull("abc"))          -> 'false'        (want 'False')
-print x = tostring(1 in (1,2,3))           -> 'true'         (want 'True')
-print x = strcat("has-a=", "abc" has "a")  -> 'has-a=false'
-print x = strcat("eq=", 1 == 1)            -> 'eq=True'      ✔ (== is on the list)
-```
-
-The `==` case proves this is an incomplete allow-list, not a limitation.
-
-It reaches the hashing family, which the surrounding comments already flag as
-security-relevant: `hash_md5("abc" has "a")` digests `md5("false")` rather than
-`md5("False")` — a silently wrong digest.
-
-**Fix the class:** derive boolean-ness from the registry (every row's declared
-return type) instead of maintaining a hand-written op list that drifts.
-
 ---
 
 ## S2 — safety / contract
@@ -465,10 +430,16 @@ be represented faithfully. Fix the cluster as one piece of work; four separate
 patches will leave the fifth site to be discovered later.
 
 **Secondary pattern — incomplete allow-lists where the right pattern already
-exists in-tree.** `_escape_like` (S1-3) omits the escape character while the
+exists in-tree.** `_escape_like` (S1-3) omitted the escape character while the
 `has` family escapes correctly via `regexp_escape()`; `_is_bool_expr` (S1-5)
-omits the whole `has`/`contains` family while `==` is handled. Both should be
-derived from the registry rather than hand-maintained.
+omitted the whole `has`/`contains` family while `==` was handled. Both fixed.
+Worth recording how, because the review's own prescription — "derive it from
+the registry" — was only half right. It fits S1-3, where the question is about
+a *literal* the emitter can see. It does not fit S1-5: the operand is often a
+bare column, and no registry can type one. There the allow-list had to be
+replaced by a run-time `typeof` guard, not completed. The general lesson is
+narrower than "derive from the registry": **a static predicate over the IR is
+only sound where the IR carries the answer**, and a `ColumnRef` never does.
 
 **Third pattern — tests that cannot reach the branch they claim to cover.**
 Twice, the *only* test of a rule was structurally blind to the bug: every
@@ -484,8 +455,14 @@ no-schema path explicitly.
    vocabulary. Cheap, and two of them gate fixes below.
 2. **The name-collision cluster as one change** — S1-1, S1-2, S1-4, S2-1, S2-2.
    Largest blast radius; do it while the analysis above is fresh.
-3. **The two allow-lists** — S1-3, S1-5. Small, self-contained, high value;
-   S1-3 in particular is a live wrong answer on ordinary log data.
+3. ~~**The two allow-lists** — S1-3, S1-5.~~ **Done.** Both shipped with trap
+   tests (`test_has_list.py`, `test_tostring.py`) and their entries deleted.
+   S1-5's fix went further than the entry asked: deriving boolean-ness from the
+   registry, as suggested, would still have missed a bool **column**, which
+   carries no static type at all — so `render_kql_tostring` now dispatches on
+   DuckDB's run-time `typeof` and the allow-list is gone rather than widened.
+   That also drained `reverse-function-01`, the datetime-column divergence,
+   which was the same hole wearing a different type.
 4. **Error-taxonomy sweep** — S2-3, S2-4, S2-5 together, plus the
    `__init__.py:200` docstring correction from S1-4.
 5. **S3-4, S3-5, S4** as maintenance.

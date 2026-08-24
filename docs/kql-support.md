@@ -240,7 +240,7 @@ Not supported: `arg_max`, `arg_min`, `binary_all_*`, `buildschema`,
 
 | Function | Limitations and gotchas |
 |---|---|
-| `hash_md5` | Hashes KQL's **string** form of the value, so a datetime must be spelled the way KQL spells it or the digest silently differs. |
+| `hash_md5` | Hashes KQL's **string** form of the value, so a datetime or a bool must be spelled the way KQL spells it or the digest silently differs (R20). The empty string hashes to the **empty string**, not to `d41d8cd9…`. |
 | `hash_sha1` | Hashes KQL's string form of the value — see `hash_md5`. |
 | `hash_sha256` | Hashes KQL's string form of the value — see `hash_md5`. |
 
@@ -325,15 +325,15 @@ Not supported: `arg_max`, `arg_min`, `binary_all_*`, `buildschema`,
 | `replace_regex` | Replaces **all** matches. Capture references use `\\1`; KQL and DuckDB agree, but `$1` does not work in either. |
 | `replace_string` | Plain substring replacement — no regex. `replace_regex` is the pattern form. |
 | `replace` | Azure Monitor's spelling of `replace_string`. Kusto proper spells the regex form `replace_regex`. |
-| `reverse` | Reverses a string by **character**. Applying it to a dynamic array is not supported. |
+| `reverse` | Reverses the value's KQL **string** form by character, whatever its type — `reverse(3h)` is `00:00:30` (R20). Applying it to a dynamic array is not supported. |
 | `split` | Returns a dynamic array. An empty separator and an out-of-range index both yield null rather than an error. |
-| `strcat_delim` | Variadic after the delimiter. |
-| `strcat` | Variadic. A null argument makes the whole result null, as in KQL. |
+| `strcat_delim` | Variadic after the delimiter. A null keeps its slot: `strcat_delim('-', 'a', int(null), 'b')` is `a--b`, not `a-b` (R20). |
+| `strcat` | Variadic. A null argument contributes the **empty string**, as in KQL — `strcat('a', int(null), 'b')` is `ab` — because `tostring` is total (R20). |
 | `strlen` | Counts **characters**, not bytes — a multi-byte string is shorter than its `octet_length`. |
 | `strrep` | — |
 | `substring` | **0-based**, and clamps out-of-range or negative input instead of erroring. SQL's `substring` is 1-based. |
 | `tolower` | A `dynamic` in a string context is its **unwrapped** text — `dynamic('x')` is `x`, not `"x"`, and `dynamic(null)` is the empty string. |
-| `tostring` | Uses .NET's spelling, which differs from DuckDB's for datetimes, timespans and dynamics. Getting it wrong changes every hash computed over it. |
+| `tostring` | Uses .NET's spelling, which differs from DuckDB's for **bools** (`True`, not `true`), datetimes and dynamics, and it is **total** — a null of any type is the empty string, not null (R20). Getting it wrong changes every hash computed over it. |
 | `toupper` | A `dynamic` in a string context is its **unwrapped** text — `dynamic('x')` is `x`, not `"x"`, and `dynamic(null)` is the empty string. |
 | `trim_start` | The first argument is a **regular expression**, not a set of characters to strip. `trim_start(' ', s)` strips one leading space, not all whitespace. |
 
@@ -418,10 +418,9 @@ starts passing fails the build and has to leave the list.
 | Case | What differs |
 |---|---|
 | `base64_decode_tostring()` of bytes that are not valid UTF-8 | KQL returns an empty string; DuckDB's `BLOB`→`VARCHAR` cast returns the bytes with `\x` escapes. DuckDB has no UTF-8 validity predicate to switch on, and sniffing for `\x` in the output would misfire on a legitimate backslash. Valid UTF-8 — the case that matters — is correct. |
-| `reverse()` of a datetime or timespan **column** | KQL reverses the value's .NET string form, so the rendering has to be KQL's — `2017-10-15T12:00:00.0000000Z`, not DuckDB's `2017-10-15 12:00:00`. The spelling is picked from what can be inferred statically, so a literal or a datetime-returning call is right and a bare column arriving from an earlier `print` is not. Every other type is correct. Casting unconditionally instead would agree for numbers and disagree for datetimes, which is the same bug with a wider blast radius; the fix is column types carried across pipeline stages. |
 
 ---
 
 Coverage against a published external subset:
 [Azure Monitor profile](azure-monitor-profile.md). The normative mapping spec,
-including the full text of R1–R15: [`TRANSLATION.md`](TRANSLATION.md).
+including the full text of R1–R20: [`TRANSLATION.md`](TRANSLATION.md).

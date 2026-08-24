@@ -864,6 +864,49 @@ with trailing junk (Kusto parses a prefix; we take the whole capture and fail),
 and `: dynamic`, which is the `todynamic` gap noted above rather than a `parse`
 one.
 
+### R20 — A value's **string form** is .NET's, and `tostring` is total
+*Trap: `tests/test_tostring.py`*
+
+R17 is about one type reaching a string context. This is the rule underneath
+it: every type has a KQL string form, and three of them are not SQL's.
+
+| expression | Kusto | `CAST(… AS VARCHAR)` |
+|---|---|---|
+| `tostring(true)` | `True` | **`true`** |
+| `tostring(datetime(2020-01-02 03:04:05.6))` | `2020-01-02T03:04:05.6000000Z` | **`2020-01-02 03:04:05.6`** |
+| `tostring(dynamic('x'))` | `x` | **`"x"`** (R17) |
+| `tostring(int(null))` | `''`, `strlen` 0, `isnull` **false** | **null** |
+
+The last row is the one that is easy to miss. `tostring` is **total**: it
+returns the empty string for a null of *every* type — bool, int, long, real,
+datetime, timespan, guid, dynamic all measured — which is why `strcat` needs no
+null handling and why `strcat_delim('-', 'a', int(null), 'b')` is `a--b` and
+not `a-b`. The hash family inherits it, and adds a rule of its own: Kusto
+hashes the empty string to the **empty string**, not to `d41d8cd9…`.
+
+**The dispatch is DuckDB's run-time `typeof`, not static inspection of the
+IR.** This is the load-bearing part, and it was learned the hard way. A static
+predicate can only answer for expressions whose type the IR carries, and the
+commonest operand — a bare `ColumnRef` — carries none. So a static version is
+not merely incomplete at the edges: it is wrong for `tostring(bool_column)` and
+`tostring(datetime_column)`, which is most real usage. Every branch of the
+`CASE` must also *bind* for every operand type, because DuckDB binds all of
+them: hence the CAST inside the `strftime`, and a bool branch that compares the
+VARCHAR form rather than testing the operand as a condition.
+
+**Where it applies:** `tostring` and everything that renders through it —
+`strcat`, `strcat_delim`, `hash_md5`/`hash_sha1`/`hash_sha256`, `reverse`, and
+R17's string-only function list. A wrong string form is not cosmetic there: the
+hash functions digest it, so the query returns a plausible digest that no
+cluster would ever produce.
+
+**Residue.** Sub-microsecond input truncates rather than rounds — KQL prints
+100ns ticks and DuckDB stores microseconds, so the seventh digit is always `0`.
+And the two static shortcuts in `render_kql_tostring` (a statically known
+`dynamic` or `datetime` skips the dispatch) are a *size* optimisation only:
+`datetime('…')` renders as a multi-line `try_strptime` list, and the dispatch
+would substitute it five times into one expression.
+
 ---
 
 ## 5. Tabular operator conventions

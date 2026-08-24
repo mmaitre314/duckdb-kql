@@ -131,10 +131,10 @@ SCALAR_FUNCTIONS: dict[str, FunctionSpec] = {
         _f("strlen", "native", "length({0})", (1,), ("R11", "R17")),
         _f("toupper", "native", "upper({0})", (1,), ("R17",)),
         _f("tolower", "native", "lower({0})", (1,), ("R17",)),
-        _f("strcat", "template", "concat({})", (), ("R17",), "variadic"),
+        _f("strcat", "template", "concat({})", (), ("R17", "R20"), "variadic"),
         _f("trim_start", "native", "regexp_replace({1}, '^' || {0}, '')", (2,)),
         _f("strrep", "native", "repeat({0}, {1})", (2,)),
-        _f("reverse", "native", "reverse({0})", (1,)),
+        _f("reverse", "native", "reverse({0})", (1,), ("R20",)),
         # KQL substring is 0-based, clamps out of range, and counts a NEGATIVE
         # start from the end — all measured (R11):
         #   ('abcdefg', 1, 3)  -> 'bcd'      ('abcdefg', 10, 3) -> ''
@@ -150,7 +150,7 @@ SCALAR_FUNCTIONS: dict[str, FunctionSpec] = {
         _f("split", "native", "str_split({0}, {1})", (2,), ("R17",)),
         _f("replace_string", "native", "replace({0}, {1}, {2})", (3,)),
         _f("indexof", "template", "(position({1} IN {0}) - 1)", (2,), ("R11", "R17")),
-        _f("strcat_delim", "template", "concat_ws({})", (), ("R17",), "variadic"),
+        _f("strcat_delim", "template", "concat_ws({})", (), ("R17", "R20"), "variadic"),
         _f("replace_regex", "template", "regexp_replace({0}, {1}, {2}, 'g')", (3,)),
         _f("replace", "native", "replace({0}, {1}, {2})", (3,),
            note="Azure Monitor spells replace_string as replace"),
@@ -204,7 +204,7 @@ SCALAR_FUNCTIONS: dict[str, FunctionSpec] = {
            "TRY_CAST({0} AS BIGINT))", (1,), ("R1",)),
         _f("todouble", "template", "TRY_CAST({0} AS DOUBLE)", (1,), ("R1",)),
         _f("toreal", "template", "TRY_CAST({0} AS DOUBLE)", (1,), ("R1",)),
-        _f("tostring", "template", "CAST({0} AS VARCHAR)", (1,), ("R1", "R17")),
+        _f("tostring", "template", "CAST({0} AS VARCHAR)", (1,), ("R1", "R17", "R20")),
         _f("tobool", "template", "TRY_CAST({0} AS BOOLEAN)", (1,), ("R1",)),
         _f("toboolean", "template", "TRY_CAST({0} AS BOOLEAN)", (1,), ("R1",)),
         _f("todatetime", "template", _TODATETIME, (1,), ("R1", "R8"),
@@ -263,9 +263,9 @@ SCALAR_FUNCTIONS: dict[str, FunctionSpec] = {
         # The CAST matters: KQL hashes any type by its string form
         # (hash_md5(123) is md5("123")), while DuckDB's md5 only takes VARCHAR
         # and would fail to bind.
-        _f("hash_md5", "native", "md5(CAST({0} AS VARCHAR))", (1,)),
-        _f("hash_sha1", "native", "sha1(CAST({0} AS VARCHAR))", (1,)),
-        _f("hash_sha256", "native", "sha256(CAST({0} AS VARCHAR))", (1,)),
+        _f("hash_md5", "native", "md5(CAST({0} AS VARCHAR))", (1,), ("R20",)),
+        _f("hash_sha1", "native", "sha1(CAST({0} AS VARCHAR))", (1,), ("R20",)),
+        _f("hash_sha256", "native", "sha256(CAST({0} AS VARCHAR))", (1,), ("R20",)),
         # --- math -----------------------------------------------------------
         _f("abs", "native", "abs({0})", (1,)),
         _f("ceiling", "native", "ceil({0})", (1,)),

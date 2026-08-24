@@ -2802,41 +2802,70 @@ def _mv_expand_convert(value: str, to_type: str) -> str:
 def render_kql_tostring(node: ir.Expr) -> str:
     """``tostring(x)`` using **KQL's** spelling, not SQL's.
 
-    Three cases differ from a plain CAST, all measured on the emulator:
+    Four cases differ from a plain CAST, all measured on the emulator:
 
     * a **datetime** is ``2020-01-01T00:00:00.0000000Z`` — ISO 8601 with seven
       fractional digits and a ``Z``, not ``2020-01-01 00:00:00``;
     * a **bool** is ``True``/``False`` (.NET capitalisation), not ``true``;
     * a **dynamic string** is the string itself, not its quoted JSON form, and
-      a **dynamic null** is the empty string — measured,
-      ``isempty(tostring(dynamic(null)))`` is true and ``isnull`` is false.
+      a **dynamic null** is the empty string;
+    * **null is the empty string, for every type**. `tostring` is total in KQL:
+      ``isnull(tostring(int(null)))`` is false and ``strlen`` of it is 0,
+      measured for bool/int/long/real/datetime/timespan/guid/dynamic alike.
+      That is what the outer ``coalesce`` is for, and it is why `strcat` needs
+      no null handling of its own.
 
     This matters beyond formatting: ``hash_md5()`` hashes the string form, so
     the wrong spelling produces a wrong digest with no error at all. And it is
     where `mv-expand` lands: every expanded element is a dynamic, so
     ``strlen(tostring(s))`` answered **3** for ``'x'`` where Kusto says 1.
 
-    The dynamic case is decided at **runtime**, by `typeof`, not statically. A
-    bare column carries no type here — which is why the static check missed
-    exactly the case that matters, an mv-expanded column — and DuckDB does know
-    the type at execution. The guard also keeps a genuine VARCHAR holding the
-    text ``"q"`` intact rather than unwrapping it to ``q``.
+    **The dispatch is by run-time `typeof`, not by static inspection of the
+    IR.** It used to be static — an allow-list of bool-valued operators and one
+    of datetime-valued functions — and the allow-list was wrong twice over. It
+    missed most of the ways to spell a bool (``tostring(x has 'a')`` gave
+    ``'false'``), and, worse, a bare **column** carries no static type here at
+    all, so a `bool` column stringified as ``'true'`` and a `datetime` column
+    as ``'2020-01-02 03:04:05.6'``. Both are wrong answers on ordinary log
+    data, and both are invisible: the result is still a plausible string. A
+    `typeof` guard cannot have that hole — DuckDB knows the type at execution
+    — and it keeps a genuine VARCHAR holding the text ``"q"`` intact rather
+    than unwrapping it to ``q``.
+
+    The branches must **bind** for every operand type, not just the one they
+    fire on, because DuckDB binds all of them: hence the CAST inside the
+    `strftime`, and the bool branch comparing the VARCHAR form rather than
+    testing the operand as a condition.
+
+    The two static shortcuts that remain are size, not semantics. A statically
+    known dynamic or datetime skips the dispatch because the operand is
+    substituted once instead of five times, and ``datetime('...')`` renders as
+    a multi-line `try_strptime` list that is unreadable repeated.
     """
     if _is_dynamic_expr(node):
         return _unwrap_json_scalar(render_expr(node))
 
     rendered = render_expr(node)
     if _is_datetime_expr(node):
-        # %f is microseconds (6 digits); KQL prints 100ns ticks (7), and the
-        # last is always 0 because DuckDB stores microseconds.
-        return f"(strftime({rendered}, '%Y-%m-%dT%H:%M:%S.%f') || '0Z')"
-    if _is_bool_expr(node):
-        return f"CASE WHEN {rendered} THEN 'True' ELSE 'False' END"
+        return f"coalesce({_kql_datetime_text(rendered)}, '')"
     return (
-        f"CASE WHEN typeof({rendered}) = 'JSON' "
-        f"THEN {_unwrap_json_scalar(rendered)} "
-        f"ELSE CAST({rendered} AS VARCHAR) END"
+        f"coalesce(CASE typeof({rendered})"
+        f" WHEN 'JSON' THEN {rendered} ->> '$'"
+        f" WHEN 'BOOLEAN' THEN CASE CAST({rendered} AS VARCHAR)"
+        f" WHEN 'true' THEN 'True' WHEN 'false' THEN 'False' END"
+        f" WHEN 'TIMESTAMP' THEN {_kql_datetime_text(f'CAST({rendered} AS TIMESTAMP)')}"
+        f" ELSE CAST({rendered} AS VARCHAR) END, '')"
     )
+
+
+def _kql_datetime_text(rendered: str) -> str:
+    """A TIMESTAMP as KQL prints it: ``2020-01-02T03:04:05.6000000Z``.
+
+    ``%f`` is microseconds (6 digits); KQL prints 100ns ticks (7), and the
+    seventh is always 0 because DuckDB stores microseconds. Sub-microsecond
+    input is therefore truncated, not rounded — see docs/TRANSLATION.md §2.
+    """
+    return f"(strftime({rendered}, '%Y-%m-%dT%H:%M:%S.%f') || '0Z')"
 
 
 def _unwrap_json_scalar(rendered: str) -> str:
@@ -2903,18 +2932,6 @@ def _is_datetime_expr(node: ir.Expr) -> bool:
     return False
 
 
-def _is_bool_expr(node: ir.Expr) -> bool:
-    if isinstance(node, (ir.Literal, ir.Parameter)):
-        return node.kind == "bool"
-    if isinstance(node, ir.BinaryOp):
-        return node.op in (
-            "==", "!=", "<>", "<", "<=", ">", ">=", "and", "or", "=~", "!~",
-        )
-    if isinstance(node, ir.UnaryOp):
-        return node.op == "not"
-    return False
-
-
 # ---------------------------------------------------------------------------
 # Functions whose shape a template cannot express
 # ---------------------------------------------------------------------------
@@ -2941,28 +2958,25 @@ def _render_strcat(node: ir.FunctionCall) -> str:
     since the answer is still a plausible string.
 
     A **null** argument contributes the empty string, measured: `strcat('a',
-    dynamic(null), 'b')` is `ab` with length 2.
+    dynamic(null), 'b')` is `ab` with length 2. No handling needed here —
+    `render_kql_tostring` is total and never yields SQL NULL.
     """
-    return f"concat({', '.join(_stringified(a) for a in node.args)})"
+    return f"concat({', '.join(render_kql_tostring(a) for a in node.args)})"
 
 
 def _render_strcat_delim(node: ir.FunctionCall) -> str:
     """``strcat_delim(delim, a, b, …)`` — as `strcat`, joined by *delim*.
 
-    The `coalesce` is load-bearing: DuckDB's `concat_ws` **skips** a NULL
-    argument, so `strcat_delim('-', 'a', dynamic(null), 'b')` would come back
-    as `a-b` where Kusto measures `a--b` — the empty value keeps its slot.
+    `render_kql_tostring`'s totality is load-bearing here, not just tidy:
+    DuckDB's `concat_ws` **skips** a NULL argument, so
+    `strcat_delim('-', 'a', dynamic(null), 'b')` would come back as `a-b` where
+    Kusto measures `a--b` — the empty value keeps its slot.
     """
     if not node.args:
         raise KqlUnsupportedError("strcat_delim", hint="expects a delimiter")
     delim, *rest = node.args
-    joined = ", ".join(_stringified(a) for a in rest)
-    return f"concat_ws({_stringified(delim)}, {joined})"
-
-
-def _stringified(node: ir.Expr) -> str:
-    """One argument as KQL spells it, with null as the empty string."""
-    return f"coalesce({render_kql_tostring(node)}, '')"
+    joined = ", ".join(render_kql_tostring(a) for a in rest)
+    return f"concat_ws({render_kql_tostring(delim)}, {joined})"
 
 
 def _render_substring(node: ir.FunctionCall) -> str:
@@ -3222,10 +3236,17 @@ def _render_hash(node: ir.FunctionCall) -> str | None:
     A datetime must be spelled the way KQL spells it or the digest is wrong —
     silently, and in security-relevant code. Any other arity declines, so the
     arity error still comes from `lookup()` naming the function.
+
+    The `nullif` is the other half of that: measured, Kusto hashes the empty
+    string to the **empty string**, not to `d41d8cd9…`, and since
+    `render_kql_tostring` maps every null to `''` that covers `hash_md5(x)` for
+    a null `x` too. `md5(NULL)` is NULL, so one `coalesce` restores KQL's
+    spelling without naming the operand twice.
     """
     if len(node.args) != 1:
         return None
-    return f"{_HASHES[node.name.lower()]}({render_kql_tostring(node.args[0])})"
+    text = render_kql_tostring(node.args[0])
+    return f"coalesce({_HASHES[node.name.lower()]}(nullif({text}, '')), '')"
 
 
 def _render_array_concat(node: ir.FunctionCall) -> str:

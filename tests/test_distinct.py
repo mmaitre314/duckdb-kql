@@ -99,10 +99,13 @@ def test_an_expression_with_a_spaced_operator_inside(con) -> None:
 
     Rebuilding it from `getText()` would concatenate token text and turn
     `B has 'x y'` into `Bhas'x y'` — a different expression that still parses.
+
+    ``True``/``False`` is KQL's capitalisation for a bool run through
+    `tostring`, measured; this used to assert SQL's lowercase spelling.
     """
     assert _cols(con, "DT | distinct B2 = tostring(N has 'x')") == ["B2"]
     assert _rows(con, "DT | distinct B2 = tostring(N has 'x')") == [
-        ("false",), ("true",)
+        ("False",), ("True",)
     ]
 
 

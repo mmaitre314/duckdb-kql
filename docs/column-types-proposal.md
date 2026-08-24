@@ -400,11 +400,23 @@ a one-word change; the interesting ones are `iff`/`coalesce` (`common`),
 
 Then `infer_type(expr, columns) -> KqlType` walks the IR the way `render_expr`
 already does, and the emitter asks it instead of asking `_is_datetime_expr`,
-`_is_timespan_expr`, `_is_real_expr`, `_is_bool_expr`, `_is_dynamic_expr`,
-`_is_string_expr`, `_may_be_dynamic`. **Those seven ad-hoc predicates are the
-thing being replaced** — each is a partial, hand-rolled answer to "what type is
-this", each was written for one caller, and their disagreements are several of
-the residues in §0.
+`_is_timespan_expr`, `_is_real_expr`, `_is_dynamic_expr`, `_is_string_expr`,
+`_may_be_dynamic`. **Those six ad-hoc predicates are the thing being replaced**
+— each is a partial, hand-rolled answer to "what type is this", each was
+written for one caller, and their disagreements are several of the residues
+in §0.
+
+A seventh, `_is_bool_expr`, has already gone — deleted rather than migrated,
+which is the case worth noting here. It answered "is this a bool" for
+`tostring`, and its every wrong answer was a silently wrong string. It could
+not be completed, because its operand is usually a bare column and the IR
+carries no type for one; `render_kql_tostring` now branches on DuckDB's
+run-time `typeof` instead. That is the standing alternative to this proposal
+for any single caller, and its limits are the argument *for* the proposal:
+`typeof` answers only about the value in hand, at execution, in SQL. It cannot
+refuse a query, cannot name a KQL rule in the error, and cannot be consulted
+while choosing which SQL to emit — which is what §2.4's refusals and the
+`iff`/`coalesce` common-type rules need.
 
 ### 2.4 Refusals
 

@@ -9,7 +9,7 @@
 > The sqlglot‑as‑emitter question is intentionally **deferred** (see §11).
 
 > **Normative mapping spec: [`TRANSLATION.md`](./TRANSLATION.md)** — the binding
-> KQL→DuckDB conventions and semantic invariants (R1–R15) the translator must
+> KQL→DuckDB conventions and semantic invariants (R1–R20) the translator must
 > follow. Read it before implementing §5 below.
 >
 > Background: [`lessons-from-bun-rewrite.md`](./lessons-from-bun-rewrite.md).

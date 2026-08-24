@@ -65,6 +65,7 @@ RULES = {
     "R17": "A `dynamic` in a string context is its **unwrapped** text — `dynamic('x')` is `x`, not `\"x\"`, and `dynamic(null)` is the empty string.",
     "R18": "`mv-expand` zips several columns rather than crossing them, replaces a column in place, and `to typeof(T)` **converts** rather than declares.",
     "R19": "`parse` is **all-or-nothing**: one failed conversion blanks the whole row. A non-match keeps the row with `''`, not null. `kind=simple` anchors at end-of-text and captures lazily; `kind=regex` does neither.",
+    "R20": "A value's string form is .NET's: a bool is `True`/`False`, a datetime is `2020-01-02T03:04:05.6000000Z`. `tostring` is **total** — a null of any type is the empty string, not null.",
 }
 
 #: R11 covers two unrelated hazards. Aggregates get the one that applies to them.
@@ -134,8 +135,8 @@ SPECIFIC_GOTCHAS: dict[str, str] = {
     "todatetime": "Accepts a wider set of formats than a plain `TIMESTAMP` cast, and **resolves UTC offsets** rather than keeping the local wall time. Unparseable input yields null (R1).",
     "toguid": "Returns null on a malformed GUID rather than raising (R1).",
     "coalesce": "Variadic. Returns the first non-null argument.",
-    "strcat": "Variadic. A null argument makes the whole result null, as in KQL.",
-    "strcat_delim": "Variadic after the delimiter.",
+    "strcat": "Variadic. A null argument contributes the **empty string**, as in KQL — `strcat('a', int(null), 'b')` is `ab` — because `tostring` is total (R20).",
+    "strcat_delim": "Variadic after the delimiter. A null keeps its slot: `strcat_delim('-', 'a', int(null), 'b')` is `a--b`, not `a-b` (R20).",
     "replace": "Azure Monitor's spelling of `replace_string`. Kusto proper spells the regex form `replace_regex`.",
     "base64_decode_tostring": "Bytes that are **not valid UTF-8** diverge from Kusto — see [Known divergences](#known-divergences).",
     "base64_decodestring": "Azure Monitor's spelling of `base64_decode_tostring`, and shares its UTF-8 divergence.",
@@ -150,7 +151,7 @@ SPECIFIC_GOTCHAS: dict[str, str] = {
     "trim_start": "The first argument is a **regular expression**, not a set of characters to strip. `trim_start(' ', s)` strips one leading space, not all whitespace.",
     "replace_regex": "Replaces **all** matches. Capture references use `\\\\1`; KQL and DuckDB agree, but `$1` does not work in either.",
     "replace_string": "Plain substring replacement — no regex. `replace_regex` is the pattern form.",
-    "reverse": "Reverses a string by **character**. Applying it to a dynamic array is not supported.",
+    "reverse": "Reverses the value's KQL **string** form by character, whatever its type — `reverse(3h)` is `00:00:30` (R20). Applying it to a dynamic array is not supported.",
     "iff": "Both branches must have the same type, as in KQL. `iif` is the same function.",
     "iif": "Alias for `iff`.",
     "binary_shift_left": "The shift count is taken as given; KQL masks it to 6 bits, so a count above 63 differs.",
@@ -338,10 +339,10 @@ SPECIAL_NOTES: dict[str, str] = {
     "startofweek": "KQL weeks start on **Sunday**; DuckDB's `date_trunc('week')` starts Monday. Takes an optional offset.",
     "startofyear": "Takes an optional offset in whole periods.",
     "zip": "Built by positional indexing: DuckDB's `list_zip` produces structs (`[{\"\":1}]`), not the arrays KQL returns.",
-    "tostring": "Uses .NET's spelling, which differs from DuckDB's for datetimes, timespans and dynamics. Getting it wrong changes every hash computed over it.",
+    "tostring": "Uses .NET's spelling, which differs from DuckDB's for **bools** (`True`, not `true`), datetimes and dynamics, and it is **total** — a null of any type is the empty string, not null (R20). Getting it wrong changes every hash computed over it.",
     "pack_array": "Renders as `json_array`, which takes mixed types — `to_json([...])` cannot.",
     "array_concat": "Variadic in KQL; folded over DuckDB's binary `list_concat`.",
-    "hash_md5": "Hashes KQL's **string** form of the value, so a datetime must be spelled the way KQL spells it or the digest silently differs.",
+    "hash_md5": "Hashes KQL's **string** form of the value, so a datetime or a bool must be spelled the way KQL spells it or the digest silently differs (R20). The empty string hashes to the **empty string**, not to `d41d8cd9…`.",
     "hash_sha1": "Hashes KQL's string form of the value — see `hash_md5`.",
     "hash_sha256": "Hashes KQL's string form of the value — see `hash_md5`.",
     "totimespan": "Handles the `[d.]hh:mm:ss` form, whose leading day part DuckDB's `INTERVAL` cast silently returns null for.",
@@ -411,17 +412,6 @@ DIVERGENCES: list[tuple[str, str]] = [
         "bytes with `\\x` escapes. DuckDB has no UTF-8 validity predicate to "
         "switch on, and sniffing for `\\x` in the output would misfire on a "
         "legitimate backslash. Valid UTF-8 — the case that matters — is correct.",
-    ),
-    (
-        "`reverse()` of a datetime or timespan **column**",
-        "KQL reverses the value's .NET string form, so the rendering has to be "
-        "KQL's — `2017-10-15T12:00:00.0000000Z`, not DuckDB's "
-        "`2017-10-15 12:00:00`. The spelling is picked from what can be inferred "
-        "statically, so a literal or a datetime-returning call is right and a "
-        "bare column arriving from an earlier `print` is not. Every other type "
-        "is correct. Casting unconditionally instead would agree for numbers and "
-        "disagree for datetimes, which is the same bug with a wider blast "
-        "radius; the fix is column types carried across pipeline stages.",
     ),
 ]
 
@@ -667,7 +657,7 @@ def build() -> str:
     a("")
     a("Coverage against a published external subset:")
     a("[Azure Monitor profile](azure-monitor-profile.md). The normative mapping spec,")
-    a("including the full text of R1–R15: [`TRANSLATION.md`](TRANSLATION.md).")
+    a("including the full text of R1–R20: [`TRANSLATION.md`](TRANSLATION.md).")
 
     return "\n".join(lines) + "\n"
 
