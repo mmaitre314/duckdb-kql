@@ -262,7 +262,7 @@ def _has_code(chunk: str) -> bool:
 
 def script(
     con: DuckDBPyConnection,
-    text: str,
+    script: str,
     database: str | None = None,
     allow_write: bool = True,
     clusters: ClusterMap | None = None,
@@ -308,6 +308,7 @@ def script(
         con: the connection. Statements run against it in order and their
             effects are visible to the ones that follow — a `.create database`
             early in the script is what makes a later `.set` into it work.
+        script: the script text — several statements separated by blank lines.
         database: the database unqualified table names belong to, as
             :func:`kql` takes it. Applied to every statement.
         allow_write: pass ``False`` to run a script through the translator
@@ -329,7 +330,7 @@ def script(
     from .errors import KqlScriptError
 
     results: list[ScriptResult] = []
-    for index, (line, statement) in enumerate(split_script(text), start=1):
+    for index, (line, statement) in enumerate(split_script(script), start=1):
         try:
             columns, rows = _run_statement(
                 con, statement, database, allow_write, clusters, entity_groups
