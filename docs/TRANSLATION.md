@@ -291,7 +291,7 @@ explicitly rather than relying on DuckDB's default.
 ---
 
 ### R7 — Identifiers are **case-sensitive**
-*Trap: `trap-r7-identifiers`*
+*Traps: `trap-r7-identifiers`, `tests/test_case_collisions.py`*
 
 KQL identifiers are case-sensitive; DuckDB's are case-insensitive by default.
 `Foo` and `foo` are distinct KQL columns.
@@ -299,6 +299,34 @@ KQL identifiers are case-sensitive; DuckDB's are case-insensitive by default.
 > **Always emit double-quoted identifiers.** Never emit a bare identifier, even
 > when it looks safe. Detect collisions that survive DuckDB's folding and raise
 > `KqlSchemaError` rather than resolving them arbitrarily.
+
+**Quoting is not enough**, which is the half that is easy to skip. Measured
+against DuckDB itself, not assumed:
+
+* a quoted `"FOO"` **falls back** to a `foo` column when no exact match exists
+  — `SELECT "FOO" FROM (SELECT 1 AS "foo")` returns 1, with no error;
+* a SELECT list producing both spellings **renames the second** to `Foo_1`.
+
+Together those turn a legal KQL query into wrong numbers under a plausible
+schema:
+
+| query | Kusto | quoted-only rendering |
+|---|---|---|
+| `datatable(foo:long)[1,2,3] \| extend Foo = foo+100 \| project foo, Foo` | `1, 101` | `foo=1, Foo_1=1` |
+| `datatable(Foo:long, foo:long)[1,2] \| project Foo, foo` | `1, 2` | `1, 1` |
+| `datatable(Foo:long, foo:long)[1,2] \| project foo` | `2` | `1` |
+| `datatable(a:string, A:string)['x','y'] \| summarize count() by a, A` | `x, y` | `x, x` |
+
+So the collision check is not defensive polish; it is the rule. It runs
+wherever a column list is *computed* — `_source_columns` and
+`_operator_columns` in `schema.py` — so the error names the stage that
+introduced the pair. **These queries are legal KQL and we refuse them**,
+deliberately: no rendering can keep two names that are one name to the engine
+underneath, and a caller who never meant to collide is far commoner than one
+who did. `project-rename` is the way out.
+
+Not checked when no schema is available, because then there is no column list
+to check — one more reason `duckdb_kql.kql()` is the better entry point.
 
 ---
 

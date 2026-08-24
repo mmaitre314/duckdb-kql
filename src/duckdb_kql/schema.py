@@ -91,7 +91,94 @@ def match_wildcard(source: ir.WildcardTableRef, schema: Schema | None) -> list[s
     return names
 
 
+def _no_case_collision(cols: list[str], where: str) -> list[str]:
+    """R7's second clause: refuse a column set DuckDB cannot represent.
+
+    KQL identifiers are case-**sensitive**, so `Foo` and `foo` are two columns.
+    SQL's are not, and DuckDB resolves the difference in two ways that both lose
+    data silently:
+
+    * a quoted ``"FOO"`` **falls back** to a `foo` column when no exact match
+      exists — ``SELECT "FOO" FROM (SELECT 1 AS "foo")`` returns 1, no error;
+    * a SELECT list producing both **renames the second** — `Foo` becomes
+      `Foo_1`, so a caller reading the result by name finds nothing under the
+      name it asked for.
+
+    Measured, the two combine into wrong *values*, not just wrong names:
+
+        datatable(foo:long)[1,2,3] | extend Foo = foo + 100 | project foo, Foo
+            Kusto  foo=1,  Foo=101
+            naive  foo=1,  Foo_1=1     both reads folded to the same column
+
+        datatable(Foo:long, foo:long)[1,2] | project foo   ->  1, not 2
+
+    There is no rendering that fixes this — the two names are one name to the
+    engine underneath — so R7 says to raise rather than resolve arbitrarily.
+    Refusing loses the small set of queries that genuinely want both spellings;
+    answering loses the ones that do not know they collided.
+
+    Checked wherever a column list is *computed*, which is here and
+    :func:`_operator_columns`, so a collision is caught at the stage that
+    introduces it and the error can name that stage. Not checked when no schema
+    is available — there is no column list to check — which is one more reason
+    `duckdb_kql.kql()` is the better entry point.
+    """
+    seen: dict[str, str] = {}
+    for col in cols:
+        first = seen.setdefault(col.casefold(), col)
+        if first != col:
+            raise KqlSchemaError(
+                where,
+                hint=f"columns {first!r} and {col!r} differ only in case. KQL "
+                "keeps them apart and DuckDB cannot: it folds one read onto the "
+                "other and renames the second output column, so the result "
+                "would be wrong rather than merely oddly named (R7). Rename one "
+                "with project-rename.",
+            )
+    return cols
+
+
 def _source_columns(source: ir.Source, schema: Schema | None) -> list[str]:
+    return _no_case_collision(
+        _source_columns_unchecked(source, schema), _source_name(source)
+    )
+
+
+def source_columns_or_none(
+    source: ir.Source, schema: Schema | None
+) -> list[str] | None:
+    """The source's columns, or None when *no schema* says what they are.
+
+    Not the same as swallowing every `KqlSchemaError`, which is what this
+    replaced. Not knowing the columns is a soft failure — most of the pipeline
+    renders fine without them. A **case collision among columns we do know** is
+    not: returning None there would hand the query to the fallback renderer and
+    turn R7's refusal into the silently wrong answer it exists to prevent. So
+    the lookup is guarded and the check is not.
+    """
+    try:
+        cols = _source_columns_unchecked(source, schema)
+    except KqlSchemaError:
+        return None
+    return _no_case_collision(cols, _source_name(source))
+
+
+#: Source node -> its KQL spelling, so an error names what the user wrote.
+_SOURCE_NAMES = {
+    ir.DataTable: "datatable", ir.PrintSource: "print",
+    ir.RangeSource: "range", ir.CommandSource: "command",
+}
+
+
+def _source_name(source: ir.Source) -> str:
+    if isinstance(source, ir.TableRef):
+        return source.qualified
+    if isinstance(source, ir.WildcardTableRef):
+        return source.pattern
+    return _SOURCE_NAMES.get(type(source), type(source).__name__)
+
+
+def _source_columns_unchecked(source: ir.Source, schema: Schema | None) -> list[str]:
     if isinstance(source, ir.WildcardTableRef):
         matched = match_wildcard(source, schema)
         columns: list[str] = []
@@ -118,6 +205,25 @@ def _source_columns(source: ir.Source, schema: Schema | None) -> list[str]:
 
 
 def _operator_columns(
+    op: ir.Operator, cols: list[str], schema: Schema | None
+) -> list[str]:
+    return _no_case_collision(
+        _operator_columns_unchecked(op, cols, schema), _operator_name(op)
+    )
+
+
+def _operator_name(op: ir.Operator) -> str:
+    """The operator's KQL spelling, for an error that says where to look."""
+    return {
+        ir.Project: "project", ir.Extend: "extend", ir.Distinct: "distinct",
+        ir.Summarize: "summarize", ir.ProjectAway: "project-away",
+        ir.ProjectRename: "project-rename", ir.MvExpand: "mv-expand",
+        ir.Parse: "parse", ir.Join: "join", ir.Lookup: "lookup",
+        ir.Union: "union",
+    }.get(type(op), type(op).__name__)
+
+
+def _operator_columns_unchecked(
     op: ir.Operator, cols: list[str], schema: Schema | None
 ) -> list[str]:
     from .translate import aggregate_name, output_name, target_names

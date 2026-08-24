@@ -40,52 +40,6 @@ What held up held up well, and is listed at the end so nobody re-reviews it.
 
 ## S1 — wrong answer
 
-### S1-1 · R7's collision detection was never built
-
-`translate/__init__.py:113-120` (`quote_ident`), `schema.py:119-163`
-(`_operator_columns`), `schema.py:323-329` (`disambiguate`).
-
-R7 has **two** clauses. The first — always emit double-quoted identifiers — is
-honoured everywhere. The second is not implemented anywhere in the repo:
-
-> **Detect collisions that survive DuckDB's folding and raise `KqlSchemaError`
-> rather than resolving them arbitrarily.**
-
-The reviewer established the mechanism by testing DuckDB itself rather than
-assuming its behaviour:
-
-- a quoted `"FOO"` **silently resolves** to a `"foo"` column when no exact match
-  exists — `SELECT "FOO" FROM (SELECT 1 AS "foo")` returns `1`, no error;
-- a SELECT list producing two case-variant names **silently renames** the second
-  (`"Foo"` → `"Foo_1"`).
-
-Meanwhile duckdb-kql's own column bookkeeping compares names with exact-match
-Python equality (`c not in cols`) — correct for KQL, where `Foo` and `foo` are
-genuinely distinct, but not a faithful model of what DuckDB does with the SQL we
-hand it. Where the two models disagree, data is silently wrong.
-
-```python
-duckdb_kql.to_sql("datatable(foo:long) [1,2,3] | extend Foo = foo + 100 | project foo, Foo")
-# executes to [(1, 1), (2, 2), (3, 3)]   —  Foo should be 101, 102, 103
-duckdb_kql.to_sql("datatable(Foo:long, foo:long) [1,2] | project Foo, foo")
-# executes to [(1, 1)]                   —  should be [(1, 2)]
-```
-
-No exception, plausible-looking output, wrong numbers. Any log schema carrying
-both `Type` and `type` is affected, as is any `extend`/`project` that happens to
-produce a case-variant of an existing name.
-
-**Fix the class:** wherever a stage's output column *list* is computed
-(`_operator_columns`, and `ir.DataTable`'s column declarations in
-`lower.py:492-504`), add a case-insensitive collision check that raises
-`KqlSchemaError`. Case-sensitive Python bookkeeping cannot be made correct here
-— the check has to exist.
-
-**Test gap:** the only case-sensitivity test in the suite,
-`test_join.py::test_a_table_name_is_matched_exactly_not_case_folded`, tests a
-*table name* lookup against a caller-supplied Python dict. It never reaches
-DuckDB, and no test anywhere exercises a *column*-level collision.
-
 ### S1-2 · Intra-clause references resolve to the stale column when the name shadows an input
 
 `translate/__init__.py:509-514` (`Project`), `516-540` (`Extend`), `552-559`
@@ -385,6 +339,16 @@ and shadowing rules and raises `KqlSchemaError` when a KQL-legal name set cannot
 be represented faithfully. Fix the cluster as one piece of work; four separate
 patches will leave the fifth site to be discovered later.
 
+> **Partly built, 2026-08-24.** The *column* half of that layer now exists:
+> `schema.py`'s `_no_case_collision` runs on every computed column list — both
+> choke points, `_source_columns` and `_operator_columns` — so a case collision
+> is caught at the stage that introduced it and the error names that stage.
+> That settles S1-1 outright and gives the remaining sites a place to hook
+> into. It is deliberately *not* the general layer the paragraph asks for: it
+> refuses rather than resolves, because for a case collision there is nothing
+> to resolve. S2-1's `_sN`-vs-`let` collision is a different question — one
+> about the CTE namespace, not the column namespace — and still open.
+
 **Secondary pattern — incomplete allow-lists where the right pattern already
 exists in-tree.** `_escape_like` (S1-3) omitted the escape character while the
 `has` family escapes correctly via `regexp_escape()`; `_is_bool_expr` (S1-5)
@@ -417,6 +381,10 @@ part of the repro.**
    vocabulary. Cheap, and two of them gate fixes below.
 2. **The name-collision cluster as one change** — S1-1, S1-2, S1-4, S2-1, S2-2.
    Largest blast radius; do it while the analysis above is fresh.
+   **S1-1 is done**: `_no_case_collision` on both column-list choke points, with
+   trap tests in `tests/test_case_collisions.py`. Ten of twelve probed shapes
+   answered wrongly before it — more than the entry claimed — and none of the
+   1036 corpus queries trips it, so the refusal costs nothing measured.
    **S1-4 is done** and did *not* need the shared layer: the two forms that can
    corrupt (an alias, a `with_itemindex=` name) now force column resolution and
    raise `KqlSchemaError`, the way `join`/`lookup` already do. Refusing settles

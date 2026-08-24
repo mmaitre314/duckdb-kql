@@ -793,16 +793,14 @@ def _schema_with_lets(query: ir.Query, schema: Schema | None) -> Schema | None:
 def _known_source_cols(source: ir.Source, schema: Schema | None) -> list[str] | None:
     """The source's columns, or None when they cannot be known here.
 
-    Unlike :func:`_source_cols` this never raises: not knowing the columns is
-    only fatal for `join`, which asks separately and reports it properly.
+    Not knowing the columns is only fatal for `join`, `lookup` and an aliased
+    `mv-expand`, which ask separately and report it properly. Knowing them and
+    finding an R7 case collision *is* fatal, and `source_columns_or_none` keeps
+    the two apart — see its docstring.
     """
-    from ..errors import KqlSchemaError
-    from ..schema import _source_columns
+    from ..schema import source_columns_or_none
 
-    try:
-        return _source_columns(source, schema)
-    except KqlSchemaError:
-        return None
+    return source_columns_or_none(source, schema)
 
 
 def _mv_expand_needs_columns(op: ir.Operator) -> bool:
