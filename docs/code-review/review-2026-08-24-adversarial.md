@@ -59,46 +59,23 @@ S1 — but each violates §8's taxonomy and principle 5's "refusing is always
 better", and each exposes generated SQL to the caller. Code that catches
 `KqlUnsupportedError` will be surprised by them.
 
-**S2-1, S2-2, S2-3 and S2-6 are fixed** — trap tests in `tests/test_let.py` and
-`tests/test_clause_scope.py`, and S2-6 is written up as R21. Two of the four
-were quietly wrong rather than merely loud, and both corrections came from
-measuring rather than from the entry: a scalar `let` redeclaration *shadowed*
-where a cluster refuses (SEM0079), and a same-clause forward reference
-*answered* where a cluster refuses (SEM0100). S2-1 turned out not to need a
-refusal at all — the internal `_sN` prefix simply lengthens out of the way, so
-`let _s0 = …` works instead of being rejected.
+**All closed.** Trap tests in `tests/test_let.py`, `tests/test_clause_scope.py`
+and `tests/test_type_domains.py`; S2-6 is written up as **R21**.
 
-### S2-4 · `datetime_add("dayofyear", ...)` leaks a `CatalogException`
+Three of the six were quietly wrong as well as loud, and every one of those
+corrections came from measuring rather than from the entry: a scalar `let`
+redeclaration *shadowed* where a cluster refuses (SEM0079); a same-clause
+forward reference *answered* where a cluster refuses (SEM0100); and
+`datetime_add("week_of_year", …)` *answered* — the same shared-table root cause
+as the `dayofyear` crash the entry reported, but the half nobody would notice.
+The pattern is worth naming: **an entry that reports a crash is often reporting
+the loud half of a bug whose other half is silent.**
 
-`translate/__init__.py:3082` (`_DATE_PARTS`), `:3090-3107` (`_date_part`).
-
-One part-table is shared verbatim by `datetime_part` (extraction),
-`datetime_add` and `datetime_diff` (arithmetic periods) — three functions with
-different valid domains. `dayofyear` is extraction-only and has no
-`to_dayofyears()` in DuckDB:
-
-```
-print x = datetime_add("dayofyear", 1, datetime(2024-01-01))
--> duckdb.CatalogException: Scalar Function with name to_dayofyears does not exist!
-```
-
-`week_of_year`/`quarter` also "succeed" for `datetime_add`/`datetime_diff` with
-periods Microsoft's documented list does not include — the quieter half of the
-same root cause. **Fix:** split the table per function domain.
-
-### S2-5 · `case`/`iff`/`coalesce` with mismatched branch types leak `ConversionException`
-
-`_render_case` (`:2923`), the `iff`/`iif` and `coalesce` registry rows.
-
-```
-print x = case(1>0, "positive", 5)  -> duckdb.ConversionException: Could not convert string 'positive' to INT64
-print x = iff(1>0, "a", 5)          -> same
-print x = coalesce("a", 5)          -> same
-```
-
-Systemic rather than a slip — the translator has no column types anywhere, as
-R14/R17's residue sections acknowledge. Recorded so it is a known, ranked gap
-rather than a surprise.
+S2-1 turned out to need no refusal at all: the internal `_sN` prefix lengthens
+out of the way, so `let _s0 = …` works rather than being rejected. S2-5 is
+fixed for literal branches, which is every example the entry gives; a mismatch
+between two *columns* still reaches DuckDB, and that residue stays with
+`column-types-proposal.md`.
 
 ---
 
@@ -236,13 +213,12 @@ part of the repro.**
    DuckDB's run-time `typeof` and the allow-list is gone rather than widened.
    That also drained `reverse-function-01`, the datetime-column divergence,
    which was the same hole wearing a different type.
-4. **Error-taxonomy sweep** — S2-3, S2-4, S2-5 together, plus the
+4. ~~**Error-taxonomy sweep** — S2-3, S2-4, S2-5~~ — **done**, along with the
    `__init__.py:200` docstring correction from S1-4.
 5. **S3-4, S3-5, S4** as maintenance.
 
-**Fixed so far, with trap tests, entries deleted:** S1-1, S1-3, S1-4, S1-5,
-S2-1, S2-2, S2-3, S2-6, S3-1, S3-2, S3-3. Still open: S2-4, S2-5, S3-4, S3-5,
-S4 and the Nit.
+**Fixed, with trap tests, entries deleted:** all of S1 and all of S2, plus
+S3-1, S3-2, S3-3. **Still open:** S3-4, S3-5, S4 and the Nit.
 
 Every fix lands with a trap test, per §4's own standard — and per S3-5, name it
 so the spec can cite it.

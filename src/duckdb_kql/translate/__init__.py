@@ -3123,6 +3123,50 @@ def _is_datetime_expr(node: ir.Expr) -> bool:
 # ---------------------------------------------------------------------------
 
 
+#: Literal kind -> the family a conditional's branches must agree on. Absent
+#: means "no static claim": `dynamic` is KQL's universal branch type, a `null`
+#: literal carries no type here (`long(null)` lowers to kind `null`), and a
+#: column or a call is simply unknown.
+#:
+#: `int` and `long` share a family — measured, `iff(1>0, int(3), 5)` answers 3.
+#: `real` does **not** join them: `coalesce(5, 1.5)` is SEM0525 on a cluster,
+#: which is stricter than SQL and stricter than it looks.
+_BRANCH_FAMILIES = {
+    "int": "int", "long": "int", "real": "real", "string": "string",
+    "bool": "bool", "datetime": "datetime", "timespan": "timespan",
+}
+
+
+def _refuse_mixed_branch_types(fn: str, branches: list[ir.Expr]) -> None:
+    """Kusto requires a conditional's branches to be **one** type.
+
+    `case(1>0, "positive", 5)` is SEM0525 there; here it reached DuckDB, which
+    tried to make the branches agree and raised
+    ``Could not convert string 'positive' to INT64`` — a message about SQL
+    types, naming a value the caller can see but not a rule they broke.
+
+    Only *literal* branches are judged, so this stops the leak without
+    inventing a type system: two literals of different families cannot be what
+    Kusto accepts, and everything else stays unclaimed. A column-typed branch
+    still leaks, which is the residue `docs/column-types-proposal.md` covers —
+    but it is now the uncommon case rather than the first one anybody hits.
+    """
+    families: dict[str, str] = {}
+    for branch in branches:
+        if isinstance(branch, ir.Literal):
+            family = _BRANCH_FAMILIES.get(branch.kind)
+            if family is not None:
+                families.setdefault(family, branch.kind)
+    if len(families) > 1:
+        spelled = ", ".join(sorted(families.values()))
+        raise KqlUnsupportedError(
+            f"{fn}:mixed-types",
+            hint=f"every branch must be the same type; got {spelled}. Kusto "
+            "refuses this (SEM0525) — convert one branch with tostring(), "
+            "tolong() or similar to say which type is meant",
+        )
+
+
 def _render_case(node: ir.FunctionCall) -> str:
     """``case(pred, value, pred, value, ..., else)`` — variadic CASE WHEN."""
     args = [render_expr(a) for a in node.args]
@@ -3130,6 +3174,7 @@ def _render_case(node: ir.FunctionCall) -> str:
         raise KqlUnsupportedError(
             "case", hint="expects alternating predicate/value pairs plus an else"
         )
+    _refuse_mixed_branch_types("case", [*node.args[1::2], node.args[-1]])
     parts = [f"WHEN {args[i]} THEN {args[i + 1]}" for i in range(0, len(args) - 1, 2)]
     return f"CASE {' '.join(parts)} ELSE {args[-1]} END"
 
@@ -3295,6 +3340,18 @@ def _render_tobool(node: ir.FunctionCall) -> str | None:
     )
 
 
+def _render_conditional(node: ir.FunctionCall) -> str | None:
+    """`iff`/`iif`/`coalesce` — check the branch types, then **decline**.
+
+    Always returns None, so the registry template renders the call exactly as
+    before. A special form purely for the guard: the shape these need is a
+    template, and only the refusal is not expressible in one.
+    """
+    branches = node.args[1:] if node.name.lower() in ("iff", "iif") else list(node.args)
+    _refuse_mixed_branch_types(node.name.lower(), list(branches))
+    return None
+
+
 def _render_zip(node: ir.FunctionCall) -> str:
     """``zip(a, b, ...)`` — element-wise grouping into arrays.
 
@@ -3348,20 +3405,41 @@ def _render_make_timespan(node: ir.FunctionCall) -> str:
 
 
 #: KQL datetime part names -> DuckDB's.
-_DATE_PARTS = {
-    "year": "year", "quarter": "quarter", "month": "month", "week": "week",
-    "week_of_year": "week", "day": "day", "dayofyear": "dayofyear",
+#: The units common to both domains below — every period that is both a
+#: quantity you can add and a field you can read.
+_SHARED_PARTS = {
+    "year": "year", "quarter": "quarter", "month": "month", "day": "day",
     "hour": "hour", "minute": "minute", "second": "second",
     "millisecond": "millisecond", "microsecond": "microsecond",
 }
 
+#: `datetime_add` / `datetime_diff` — *periods*, things with a length. Measured
+#: on the emulator, and the two domains are **not** the same list: these take
+#: `week` and refuse `week_of_year` and `dayofyear`, which are ordinals rather
+#: than durations — "add one week-of-year" is not a question.
+_ARITHMETIC_PARTS = {**_SHARED_PARTS, "week": "week"}
 
-def _date_part(node: ir.Expr, fn: str) -> str:
+#: `datetime_part` — *fields*, things a datetime has. The mirror image: it takes
+#: `week_of_year` and `dayofyear` and refuses bare `week`.
+#:
+#: One table used to serve all three, which broke both ways at once.
+#: `datetime_add("dayofyear", …)` reached DuckDB and asked for a function called
+#: `to_dayofyears`, and `datetime_add("week_of_year", …)` quietly *answered* —
+#: the same root cause, and the quiet half is the worse one.
+_EXTRACTION_PARTS = {**_SHARED_PARTS, "week_of_year": "week", "dayofyear": "dayofyear"}
+
+
+def _date_part(node: ir.Expr, fn: str, parts: dict[str, str]) -> str:
     if not isinstance(node, ir.Literal) or node.kind != "string":
         raise KqlUnsupportedError(fn, hint="the part must be a string literal")
-    part = _DATE_PARTS.get(str(node.value).lower())
+    part = parts.get(str(node.value).lower())
     if part is None:
-        raise KqlUnsupportedError(f"{fn}:{node.value}")
+        raise KqlUnsupportedError(
+            f"{fn}:{node.value}",
+            hint=f"{fn} takes {sorted(parts)}; Kusto refuses anything else here "
+            "(SEM0235), and the period lists differ between datetime_part and "
+            "datetime_add/datetime_diff",
+        )
     return part
 
 
@@ -3369,7 +3447,7 @@ def _render_datetime_add(node: ir.FunctionCall) -> str:
     """``datetime_add(part, amount, datetime)``."""
     if len(node.args) != 3:
         raise KqlUnsupportedError("datetime_add", hint="expects (part, amount, date)")
-    part = _date_part(node.args[0], "datetime_add")
+    part = _date_part(node.args[0], "datetime_add", _ARITHMETIC_PARTS)
     return (
         f"({render_expr(node.args[2])} + "
         f"to_{part}s(CAST({render_expr(node.args[1])} AS BIGINT)))"
@@ -3384,7 +3462,7 @@ def _render_datetime_diff(node: ir.FunctionCall) -> str:
     """
     if len(node.args) != 3:
         raise KqlUnsupportedError("datetime_diff", hint="expects (part, first, second)")
-    part = _date_part(node.args[0], "datetime_diff")
+    part = _date_part(node.args[0], "datetime_diff", _ARITHMETIC_PARTS)
     return (
         f"date_diff('{part}', {render_expr(node.args[2])}, {render_expr(node.args[1])})"
     )
@@ -3404,7 +3482,7 @@ def _render_datetime_part(node: ir.FunctionCall) -> str:
             "datetime_part:nanosecond",
             hint="DuckDB stores microseconds; the 100ns tick cannot be recovered",
         )
-    part = _date_part(node.args[0], "datetime_part")
+    part = _date_part(node.args[0], "datetime_part", _EXTRACTION_PARTS)
     return f"CAST(date_part('{part}', {render_expr(node.args[1])}) AS BIGINT)"
 
 
@@ -3579,6 +3657,9 @@ _SPECIAL_FORMS: dict[str, Callable[[ir.FunctionCall], str | None]] = {
     "countof": _render_countof,
     "tobool": _render_tobool,
     "toboolean": _render_tobool,
+    "iff": _render_conditional,
+    "iif": _render_conditional,
+    "coalesce": _render_conditional,
     "zip": _render_zip,
     "make_datetime": _render_make_datetime,
     "make_timespan": _render_make_timespan,

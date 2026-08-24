@@ -230,8 +230,8 @@ Not supported: `arg_max`, `arg_min`, `binary_all_*`, `buildschema`,
 | Function | Limitations and gotchas |
 |---|---|
 | `case` | Variadic `case(pred, val, …, else)`. |
-| `coalesce` | Variadic. Returns the first non-null argument. |
-| `iff` | Both branches must have the same type, as in KQL. `iif` is the same function. |
+| `coalesce` | Variadic. Returns the first non-null argument. Every argument must be the **same type** — stricter than SQL, and stricter than it looks: `coalesce(5, 1.5)` is refused, as Kusto refuses it (SEM0525). `dynamic` pairs with anything. |
+| `iff` | Both branches must be the **same type**, as in KQL — even `long` and `real` do not mix. Checked for literal branches, which refuse cleanly; a mismatch between two *columns* still reaches DuckDB, since column types are not carried. `iif` is the same function. |
 | `iif` | Alias for `iff`. |
 | `max_of` | Variadic. |
 | `min_of` | Variadic. |
@@ -283,9 +283,9 @@ Not supported: `arg_max`, `arg_min`, `binary_all_*`, `buildschema`,
 |---|---|
 | `ago` | `ago(x)` is `now() - x`, with `now()` evaluated once per query. |
 | `bin` | Floors to a multiple of the bin size **from the epoch origin**, and works on numbers as well as datetimes. Weeks and months are pinned against the emulator rather than mapped to `date_trunc`. |
-| `datetime_add` | — |
-| `datetime_diff` | Returns a whole number of periods, truncated toward zero. |
-| `datetime_part` | `nanosecond` is **refused**: KQL keeps 100 ns ticks and DuckDB stores microseconds, so the digit asked for does not exist. |
+| `datetime_add` | Takes a **period**: year, quarter, month, week, day, hour, minute, second, millisecond, microsecond. Not `week_of_year` or `dayofyear`, which are ordinals rather than durations — a different list from `datetime_part`'s, and Kusto refuses the wrong one (SEM0235). |
+| `datetime_diff` | Returns a whole number of periods, truncated toward zero. Same period list as `datetime_add`, which is **not** `datetime_part`'s. |
+| `datetime_part` | Reads a **field**: year, quarter, month, week_of_year, day, dayofyear, hour, minute, second, millisecond, microsecond. Note `week_of_year` and `dayofyear` are here and bare `week` is not — the mirror image of `datetime_add`'s list. `nanosecond` is **refused**: KQL keeps 100 ns ticks and DuckDB stores microseconds, so the digit asked for does not exist. |
 | `dayofmonth` | Datetimes are UTC. Needs `SET TimeZone='UTC'` — see the note at the top. |
 | `dayofweek` | Returns a **timespan** (days since Sunday), not an integer. |
 | `dayofyear` | Datetimes are UTC. Needs `SET TimeZone='UTC'` — see the note at the top. |
