@@ -1,17 +1,3 @@
-<!--
-  The wordmark stands in for the `# duckdb-kql` heading this file used to open
-  with. Two things about the markup are load-bearing, both verified rather than
-  assumed — see tests/test_readme_logo.py:
-
-  * **Absolute raw.githubusercontent URLs, not relative paths.** PyPI renders
-    this file on its own domain and does not resolve repository-relative paths,
-    so `docs/assets/...` would be a broken image there. GitHub resolves absolute
-    raw URLs perfectly well, so one form serves both.
-  * **`<picture>` for dark mode.** GitHub honours `prefers-color-scheme` inside
-    it; PyPI's sanitizer (readme_renderer + bleach) drops `<source>` and keeps
-    the `<img>`, so PyPI simply gets the light wordmark. The `alt` text is the
-    project name so the heading survives even if the image does not.
--->
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/mmaitre314/duckdb-kql/main/docs/assets/logo-horizontal-dark.svg">
@@ -26,7 +12,7 @@
 </p>
 
 Run [Kusto Query Language](https://learn.microsoft.com/kusto/query/) (KQL) queries on
-[DuckDB](https://duckdb.org) in Python. Develop KQL queries locally, run them in unit tests, as part of CI builds, etc. without the need for network.
+[DuckDB](https://duckdb.org) in Python. Develop KQL queries locally, run them in unit tests, as part of CI builds, have AI agents verify their work, etc. without the need for network.
 
 ```python
 import duckdb_kql
@@ -34,7 +20,7 @@ import duckdb_kql
 con = duckdb_kql.connect()
 con.sql("CREATE TABLE Logs AS SELECT * FROM 'logs.parquet'")
 
-duckdb_kql.kql(con, """
+duckdb_kql.query(con, """
     Logs
     | where Timestamp > ago(1d) and Level == "Error"
     | summarize Count = count() by bin(Timestamp, 1h), Component
@@ -42,30 +28,11 @@ duckdb_kql.kql(con, """
 """)
 ```
 
-Several statements at once — the shape Azure Data Explorer calls a
-[database script](https://learn.microsoft.com/azure/data-explorer/database-script),
-for setting a database up in KQL alone. Blank lines separate the statements:
-
-```python
-duckdb_kql.script(con, """
-    .set-or-replace Errors <| Logs | where Level == "Error"
-
-    .set-or-replace ByComponent <| Errors | summarize n = count() by Component
-""")
-```
-
-Keep that in a `.kql` file and the CLI runs it, so the file that sets a database
-up lives in the repository:
-
-```bash
-duckdb-kql script schema.kql -d logs.duckdb
-```
-
 See the [demo](https://github.com/mmaitre314/duckdb-kql/blob/main/demo/demo.ipynb) notebook.
 
 ## Install
 
-APIs are split into 3 layers to control features and dependencies. Install based on needs.
+APIs are split into 3 layers to control features and dependencies. Select based on needs.
 
 Layer | Install | Scenario | Dependencies
 --|--|--|--
@@ -107,11 +74,14 @@ See [Kusto client](https://github.com/mmaitre314/duckdb-kql/blob/main/docs/kusto
 
 ## Local HTTP server
 
-Start a local KQL HTTP server using the CLI, then open <https://dataexplorer.azure.com>, choose 'Add connection', and enter `http://127.0.0.1:31415`.
+Start a local KQL HTTP server using the CLI.
 
 ```bash
 duckdb-kql serve
 ```
+
+Then open <https://dataexplorer.azure.com>, choose 'Add connection', and enter `http://127.0.0.1:31415`.
+
 See [Kusto server](https://github.com/mmaitre314/duckdb-kql/blob/main/docs/kusto-server.md).
 
 ## Query validation and translation
@@ -131,10 +101,59 @@ Use `validate()` and `to_sql()` to respectively validate the KQL query and trans
 Declare parameters and pass values to defend against query injections.
 
 ```python
-duckdb_kql.kql(con, """
+duckdb_kql.query(con, """
     declare query_parameters(state:string);
     StormEvents | where State == state
 """, {"state": user_input})
+```
+
+## Scripts
+
+Run several commands at once using scripts. Blank lines separate the statements.
+
+```python
+duckdb_kql.script(con, """
+    .set-or-replace Errors <| Logs | where Level == "Error"
+
+    .set-or-replace ByComponent <| Errors | summarize n = count() by Component
+""")
+```
+
+Also available through the CLI.
+
+```bash
+duckdb-kql script schema.kql -d logs.duckdb
+```
+
+## Cross-cluster queries
+
+Map remote databases to local ones to run queries referencing cross-cluster tables.
+
+```python
+duckdb_kql.set_clusters({
+    ('cluster1.eastus.kusto.windows.net', 'Customers'): 'Customers',
+    ('cluster2.westus.kusto.windows.net', 'Sales'): 'Sales',
+})
+
+duckdb_kql.query(con, '''
+    cluster('cluster1.eastus.kusto.windows.net').database('Customers').Customers
+    | join kind=leftouter (cluster('cluster2.westus.kusto.windows.net').database('Sales').Orders) on CustomerId
+    | project-away CustomerId1
+''')
+```
+
+## Macro expansion and entity groups
+
+Register entity groups to run queries calling `macro-expand`.
+
+```python
+duckdb_kql.set_entity_groups({
+    'MyDatabases': ["database('Customers')"]
+})
+
+duckdb_kql.query(con, '''
+    macro-expand MyDatabases as db ( db.Customers | where Tier == 'Free' ) | count
+''')
 ```
 
 ## Coverage
