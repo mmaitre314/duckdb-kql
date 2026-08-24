@@ -1758,6 +1758,36 @@ def _substitute_operator(op: ir.Operator, scalars: Scalars) -> ir.Operator:
     return op
 
 
+def _refuse_redeclared_let(name: str, declared: set[str]) -> None:
+    """Kusto refuses a second ``let`` of the same name — SEM0079, both kinds.
+
+    Not shadowing, which is what both halves here used to do in their own way
+    and neither did on purpose. Scalars are a `dict`, so a redeclaration
+    silently overwrote and `let v = 1; let v = 2; print x = v` answered **2**
+    where a cluster refuses the query. Tabulars are a list, so two same-named
+    bindings both became CTEs and DuckDB raised `Duplicate CTE name` — loud, but
+    naming nothing the user wrote.
+
+    Measured before choosing: *"Let with the same name was already used in
+    current context"*, for `let v = 1; let v = 2` and for the tabular pair
+    alike. So refusing closes both, and the scalar half is the one that was
+    quietly wrong. A fix that made the tabular path shadow "like the scalar path
+    already does" would have spread the defect rather than closed it.
+
+    Deliberately scoped to `let`-vs-`let`. A `let` naming a declared **query
+    parameter** goes through *seed*, and is left alone: the emulator refuses any
+    query that declares a parameter without a client-side value, so it cannot
+    say what that shadow does, and a refusal with no measurement behind it is
+    the kind of guess this project does not make.
+    """
+    if name in declared:
+        raise KqlUnsupportedError(
+            f"let:{name}",
+            hint=f"'{name}' is already bound by an earlier let in this query; "
+            "Kusto refuses a redeclaration (SEM0079) rather than shadowing it",
+        )
+
+
 def _lower_lets(
     tree: Any, seed: Scalars | None = None, nested: bool = False
 ) -> tuple[Scalars, list[tuple[str, ir.Query]]]:
@@ -1769,6 +1799,9 @@ def _lower_lets(
     """
     scalars: Scalars = dict(seed or {})
     tabulars: list[tuple[str, ir.Query]] = []
+    #: Names bound by a `let` in this context, for the SEM0079 check. Not
+    #: `scalars`, which is seeded with query parameters.
+    declared: set[str] = set()
 
     for statement in _find_all(tree, "LetStatement"):
         # A `let` written *inside* a macro-expand body belongs to that body and
@@ -1795,6 +1828,8 @@ def _lower_lets(
             raise _unsupported(decl, "let")
         let_names = _find_names(kids[0])
         name = let_names[0] if let_names else kids[0].getText()
+        _refuse_redeclared_let(name, declared)
+        declared.add(name)
         value = _collapse(kids[-1])
 
         if kind == "LetMaterializeDeclaration":

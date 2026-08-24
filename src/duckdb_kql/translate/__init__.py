@@ -656,6 +656,7 @@ def to_sql(query: ir.Query, schema: Schema | None = None) -> TranslationResult:
         if isinstance(bound, ir.Query)
     ]
 
+    stage = _stage_prefix([name for name, _ in query.lets])
     stages = [render_source(query.source, schema)]
     # Resolved up front rather than on first join: `extend` needs it too, to
     # keep a replaced column in its original position. A `datatable`/`print`/
@@ -665,7 +666,9 @@ def to_sql(query: ir.Query, schema: Schema | None = None) -> TranslationResult:
     cols = _known_source_cols(query.source, schema)
 
     for index, op in enumerate(query.operators):
-        prev = f"_s{len(stages) - 1}"
+        prev = f"{stage}{len(stages) - 1}"
+        if cols is not None:
+            _refuse_forward_reference(op, cols)
         if cols is None and _mv_expand_needs_columns(op):
             # Raises KqlSchemaError naming the table, exactly as `join` does —
             # see :func:`_mv_expand_needs_columns` for why this one cannot
@@ -707,9 +710,125 @@ def to_sql(query: ir.Query, schema: Schema | None = None) -> TranslationResult:
     if len(stages) == 1 and not let_ctes:
         return TranslationResult(stages[0])
 
-    ctes = let_ctes + [f"_s{i} AS ({sql})" for i, sql in enumerate(stages)]
-    body = f"SELECT * FROM _s{len(stages) - 1}"
+    ctes = let_ctes + [f"{stage}{i} AS ({sql})" for i, sql in enumerate(stages)]
+    body = f"SELECT * FROM {stage}{len(stages) - 1}"
     return TranslationResult("WITH " + ",\n     ".join(ctes) + f"\n{body}")
+
+
+def _referenced_columns(node: object) -> set[str]:
+    """Every column name *node* reads, however deeply nested.
+
+    Walks by dataclass field rather than by an isinstance ladder, so a new
+    `ir.Expr` shape is covered the day it is added instead of the day someone
+    notices it was missed. That matters here: a name this misses is a refusal
+    that silently does not happen.
+    """
+    if isinstance(node, ir.ColumnRef):
+        return {node.name}
+    if isinstance(node, ir.Query):
+        # A subquery (`x in (T | project c)`) has its own column scope.
+        return set()
+    if dataclasses.is_dataclass(node) and not isinstance(node, type):
+        found: set[str] = set()
+        for field in dataclasses.fields(node):
+            found |= _referenced_columns(getattr(node, field.name))
+        return found
+    if isinstance(node, (list, tuple)):
+        return set().union(*(_referenced_columns(x) for x in node)) if node else set()
+    return set()
+
+
+def _refuse_forward_reference(op: ir.Operator, cols: list[str]) -> None:
+    """An assignment sees the operator's **input** columns, and nothing else.
+
+    Kusto evaluates a clause's assignments against the operator's input, not
+    left-to-right against each other, so a name bound by the same clause is not
+    in scope for it — SEM0100, *"Failed to resolve scalar expression named
+    'a'"*::
+
+        datatable(x:long)[10] | extend a = x + 1, b = a + 1     refused
+        datatable(x:long)[10] | extend a = x + 1 | extend b = a + 1    fine
+
+    We answered 12 for the first, which is a query that runs here and fails in
+    production. **Only the forward reference is wrong.** Where the name is also
+    an input column the reference resolves to the input, both engines agree, and
+    that must keep working — `extend x = x + 1, b = x + 1` gives `b = 11`, from
+    the *pre*-extend `x`. A "fix" that made assignments sequential would break
+    that agreement, which is why the check is `introduced - input` rather than
+    `introduced`.
+
+    Order-insensitive on purpose: measured, `summarize s = sum(a) by a = x` is
+    refused too, and there `a` is introduced *after* the reference in the query
+    text. One clause, one scope.
+
+    Needs the input column list to tell the two cases apart, so it is skipped
+    when there is no schema — the same limitation R7's collision check has.
+    """
+    named = _clause_named_exprs(op)
+    if named is None:
+        return
+    # Only an explicit `name = expr` **binds**. An unnamed entry either copies a
+    # column through (`project ['my col'], id`) or takes an auto-generated name
+    # (R12's `Column1`), and neither is something the clause could then shadow.
+    # Counting them turned `project c` over a table whose schema does not list
+    # `c` into a forward reference — an unknown column reported as the wrong
+    # error, and the support-matrix probe caught it.
+    introduced = {e.name for e in named if e.name} - set(cols)
+    if not introduced:
+        return
+    for expr in named:
+        clash = sorted(_referenced_columns(expr.expr) & introduced)
+        if clash:
+            raise KqlUnsupportedError(
+                f"{_operator_keyword(op)}:{clash[0]}",
+                hint=f"{clash[0]!r} is assigned by this same clause and is not "
+                "an input column, so Kusto cannot resolve it here (SEM0100); "
+                "split the clause in two, or read the input column instead",
+            )
+
+
+def _clause_named_exprs(op: ir.Operator) -> tuple[ir.NamedExpr, ...] | None:
+    """The named expressions that share one scope, or None if this operator has none."""
+    if isinstance(op, (ir.Project, ir.Extend, ir.Distinct)):
+        return op.expressions
+    if isinstance(op, ir.Summarize):
+        # Keys and aggregates are one scope: an aggregate may not read a key's
+        # name either, measured.
+        return op.by + op.aggregates
+    return None
+
+
+def _operator_keyword(op: ir.Operator) -> str:
+    from ..schema import _operator_name
+
+    return _operator_name(op)
+
+
+#: A generated stage name: the prefix plus the stage's index.
+_STAGE_NAME = re.compile(r"_+s\d+\Z")
+
+
+def _stage_prefix(let_names: list[str]) -> str:
+    """A prefix for the generated per-stage CTEs that no ``let`` can collide with.
+
+    A tabular `let` becomes a CTE of its own name in the same ``WITH``, so a
+    query that names one `_s0` used to emit two CTEs called `_s0` and die with
+    DuckDB's ``Duplicate CTE name`` — legal KQL, and an error naming nothing the
+    user wrote. Underscore-prefixed names are unusual but not reserved, and a
+    KQL query has no way to know what this translator calls its internals.
+
+    Lengthening the prefix rather than refusing keeps the query working, and
+    keeps the *usual* answer `_s` — so the emitted SQL is unchanged for every
+    query that does not do this, which is all of them in the corpus. Repeats
+    until it finds a free prefix, which terminates because each round is longer
+    than the last and the name set is finite.
+    """
+    prefix = "_s"
+    while any(
+        name.startswith(prefix) and _STAGE_NAME.fullmatch(name) for name in let_names
+    ):
+        prefix = "_" + prefix
+    return prefix
 
 
 def _promote_fuzzy_source(query: ir.Query, schema: Schema | None) -> ir.Query:
@@ -1138,6 +1257,17 @@ def render_summarize(op: ir.Summarize, prev: str) -> str:
     group: list[str] = []
     key_names = target_names(op.by)
     for i, key in enumerate(op.by):
+        # The aggregate *list* has been guarded since `sum(sum(x))`; the `by`
+        # keys went through a bare `render_expr` and reached DuckDB's binder,
+        # which answers "GROUP BY clause cannot contain aggregates" — a message
+        # about SQL for a query written in KQL. Kusto refuses it as SEM0237.
+        inner = _nested_aggregate(key.expr)
+        if inner is not None:
+            raise KqlUnsupportedError(
+                f"summarize by:{inner}",
+                hint=f"a group key cannot contain the aggregate {inner}(); "
+                "Kusto refuses this (SEM0237)",
+            )
         sql = render_expr(key.expr)
         select.append(f"{sql} AS {quote_ident(key_names[i])}")
         # Group by the expression itself rather than by output position: an

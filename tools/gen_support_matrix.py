@@ -66,6 +66,7 @@ RULES = {
     "R18": "`mv-expand` zips several columns rather than crossing them, replaces a column in place, and `to typeof(T)` **converts** rather than declares.",
     "R19": "`parse` is **all-or-nothing**: one failed conversion blanks the whole row. A non-match keeps the row with `''`, not null. `kind=simple` anchors at end-of-text and captures lazily; `kind=regex` does neither.",
     "R20": "A value's string form is .NET's: a bool is `True`/`False`, a datetime is `2020-01-02T03:04:05.6000000Z`. `tostring` is **total** — a null of any type is the empty string, not null.",
+    "R21": "An assignment sees the operator's **input** columns only — `extend a = x+1, b = a+1` is refused; split it into two clauses. Replacing a column under its own name is fine and reads the *input* value.",
 }
 
 #: R11 covers two unrelated hazards. Aggregates get the one that applies to them.
@@ -659,7 +660,7 @@ def build() -> str:
     a("")
     a("Coverage against a published external subset:")
     a("[Azure Monitor profile](azure-monitor-profile.md). The normative mapping spec,")
-    a("including the full text of R1–R20: [`TRANSLATION.md`](TRANSLATION.md).")
+    a("including the full text of R1–R21: [`TRANSLATION.md`](TRANSLATION.md).")
 
     return "\n".join(lines) + "\n"
 

@@ -204,3 +204,68 @@ def test_in_a_tabular_let_inside_a_union_branch(con) -> None:
         "let v = T | project a | where a == 1;"
         " let n = union (R | where a in (v)), (R | where a in (v)); n",
     ) == [(1, "p"), (1, "p")]
+
+
+# ---------------------------------------------------------------------------
+# The `let` namespace — redeclaration, and collision with generated CTE names
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        # Tabular twice: two CTEs of one name, `Duplicate CTE name` from DuckDB.
+        "let X = datatable(x:long)[1,2]; let X = datatable(x:long)[3,4]; X | count",
+        # Scalar twice: this one was the quiet half. A dict overwrote, and the
+        # query answered 2 where a cluster refuses it.
+        "let v = 1; let v = 2; print x = v",
+        # ...and across the two kinds.
+        "let v = 1; let v = datatable(x:long)[1]; v | count",
+        "let v = datatable(x:long)[1]; let v = 1; print x = v",
+    ],
+)
+def test_a_redeclared_let_is_refused(query: str) -> None:
+    """Kusto refuses a second `let` of the same name — SEM0079, both kinds.
+
+    Measured before choosing between refusing and shadowing: *"Let with the
+    same name was already used in current context"*. So the scalar path's
+    silent overwrite was the defect, and "make the tabular path shadow like the
+    scalar one" would have spread it rather than fixed it.
+    """
+    with pytest.raises(duckdb_kql.KqlUnsupportedError) as exc:
+        duckdb_kql.to_sql(query)
+    assert "SEM0079" in str(exc.value)
+
+
+def test_a_let_may_still_shadow_a_query_parameter(con) -> None:
+    """Not a redeclaration: the parameter scope seeds the `let` scope."""
+    sql = duckdb_kql.to_sql(
+        "declare query_parameters(p:long); let p = 7; print x = p"
+    )
+    assert "7" in str(sql)
+
+
+@pytest.mark.parametrize("name", ["_s0", "_s1", "_s99"])
+def test_a_let_named_like_a_generated_cte_still_works(con, name: str) -> None:
+    """The internal stage names are `_s0`, `_s1`, … and `let _s0 = …` is legal KQL.
+
+    It used to emit two CTEs called `_s0` and die with DuckDB's `Duplicate CTE
+    name` — an error naming nothing the user wrote. The prefix now lengthens
+    out of the way instead of the query being refused.
+    """
+    assert duckdb_kql.kql(
+        con, f"let {name} = datatable(x:long)[1,2,3]; {name} | where x > 1 | count"
+    ).fetchall() == [(2,)]
+
+
+def test_the_usual_stage_prefix_is_unchanged(con) -> None:
+    """Lengthening applies only when it must — every other query keeps `_s0`.
+
+    Pinned because a prefix that moved unconditionally would rewrite every
+    line of generated SQL in the docs and the snapshot for no reason.
+    """
+    assert "_s0 AS" in str(duckdb_kql.to_sql("T | where a > 1"))
+    collided = str(
+        duckdb_kql.to_sql("let _s0 = datatable(x:long)[1]; _s0 | count")
+    )
+    assert "__s0 AS" in collided

@@ -423,4 +423,4 @@ starts passing fails the build and has to leave the list.
 
 Coverage against a published external subset:
 [Azure Monitor profile](azure-monitor-profile.md). The normative mapping spec,
-including the full text of R1–R20: [`TRANSLATION.md`](TRANSLATION.md).
+including the full text of R1–R21: [`TRANSLATION.md`](TRANSLATION.md).

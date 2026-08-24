@@ -963,6 +963,46 @@ And the two static shortcuts in `render_kql_tostring` (a statically known
 `datetime('…')` renders as a multi-line `try_strptime` list, and the dispatch
 would substitute it five times into one expression.
 
+### R21 — An assignment sees the operator's **input** columns, and nothing else
+*Trap: `tests/test_clause_scope.py`*
+
+A clause's assignments are evaluated against what flows *into* the operator,
+not left-to-right against each other. So a name the same clause binds is not in
+scope for it, and Kusto answers SEM0100 — *"Failed to resolve scalar expression
+named 'a'"*:
+
+```
+datatable(x:long)[10] | extend a = x + 1, b = a + 1        refused
+datatable(x:long)[10] | extend a = x + 1 | extend b = a + 1   12
+```
+
+The trap is that **the two halves of this rule pull opposite ways**, and SQL
+gets one of them right by accident. DuckDB has a lateral-column-alias fallback
+that fires only when no upstream column of that name exists — so the first line
+above quietly answered 12, while the shape that looks identical:
+
+```
+datatable(x:long)[10] | extend x = x + 1, b = x + 1    ->   x=11, b=11
+```
+
+is *correct*, and correct precisely because `b` reads the **pre-extend** `x`.
+Anyone reading the first case as "assignments should be sequential" would fix
+it by making them sequential and silently break the second, which is the
+commonest shape in real queries: transforming a column under its own name.
+
+So the check is `introduced − input`, not `introduced`. Only an explicit
+`name = expr` introduces a binding; an unnamed entry copies a column through
+(`project ['my col']`) or takes R12's auto-generated name, and neither can
+shadow anything.
+
+Applies to `project`, `extend`, `distinct`, and `summarize` — whose keys and
+aggregates are **one** scope, measured: `summarize s = sum(a) by a = x` is
+refused even though `a` is introduced after the reference in the query text.
+The rule is therefore order-insensitive.
+
+Needs the input column list, so it does not fire without a schema — the same
+limit R7's collision check has.
+
 ---
 
 ## 5. Tabular operator conventions

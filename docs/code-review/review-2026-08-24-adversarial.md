@@ -40,154 +40,33 @@ What held up held up well, and is listed at the end so nobody re-reviews it.
 
 ## S1 — wrong answer
 
-### S1-2 · Intra-clause references resolve to the stale column when the name shadows an input
+**All closed.** S1-1, S1-3, S1-4 and S1-5 were fixed and their entries deleted;
+each shipped with a trap test named in §"Suggested order of work". S1-2 was not
+a wrong answer at all — measuring it reversed the finding, and the real defect
+(we *accept* an intra-clause forward reference a cluster refuses) was
+reclassified as S2-6, since fixed and written up as **R21**.
 
-`translate/__init__.py:509-514` (`Project`), `516-540` (`Extend`), `552-559`
-(`Distinct`), `1095-1129` (`render_summarize`'s `by` keys).
-
-Each of these renders its named expressions into **one flat SQL SELECT list**.
-DuckDB's lateral-column-alias fallback only fires when no upstream column of
-that name exists; when the computed name collides with a real input column, a
-later reference in the *same clause* binds to the **upstream** column, not to
-the alias just computed.
-
-```python
-# Sales(Total=100)
-duckdb_kql.kql(con, "Sales | extend Total = Total * 2, Ratio = Total / 100")
-# Total=200, Ratio=1      —  Ratio computed from the PRE-extend Total (100/100)
-#                            Kusto evaluates left-to-right: expected Ratio=2
-```
-
-Emitted SQL makes the mechanism plain:
-
-```sql
-SELECT COLUMNS(x -> x NOT IN ('Total','Ratio')),
-       ("Total" * 2) AS "Total", ("Total" / 100) AS "Ratio"
-FROM _s0
-```
-
-Reproduced in all four operators, on both the `COLUMNS(...)` fallback and the
-explicit-column-list path:
-
-| Query | Got | Expected |
-|---|---|---|
-| `T5(a=100,x=10) \| project a = x + 1, b = a + 1` | `a=11, b=101` | `b=12` |
-| `Dt(a=100,x=10) \| distinct a = x + 1, b = a + 1` | `(11, 101)` | `(11, 12)` |
-| `K(k=100,x=10) \| summarize count() by k = x, m = k + 1` | `m=101` | `m=11` |
-
-Control case pinning the mechanism — with no colliding name, DuckDB's lateral
-alias activates and the answer is right: `T(x=10) | project a = x + 1, b = a + 1`
-→ `a=11, b=12`. ✔
-
-This is the most common real-world shape there is: transforming a column under
-its own name.
-
-> ### ⚠ Settled against the emulator 2026-08-24 — **this finding is inverted**
->
-> The ruling this asked for was taken, and it reverses the entry. Kusto's rule
-> is that an assignment sees **only the operator's input columns**, never a name
-> assigned earlier in the same clause. So:
->
-> | Query | Kusto | Ours | |
-> |---|---|---|---|
-> | `T(Total=100) \| extend Total = Total*2, Ratio = Total/100` | `(200, 1)` | `(200, 1)` | ✔ agree |
-> | `T(a=100,x=10) \| project a = x+1, b = a+1` | `(11, 101)` | `(11, 101)` | ✔ agree |
-> | `T(a=100,x=10) \| distinct a = x+1, b = a+1` | `(11, 101)` | `(11, 101)` | ✔ agree |
-> | `T(k=100,x=10) \| summarize count() by k = x, m = k+1` | `(10, 101)` | `(10, 101)` | ✔ agree |
-> | `T(x=10) \| extend a = x+1, b = a+1` | **SEM0100, refused** | `(11, 12)` | ✘ **diverges** |
-> | `T(x=10) \| project a = x+1, b = a+1` | **SEM0100, refused** | `(11, 12)` | ✘ **diverges** |
->
-> Every expected value in the table above — `Ratio=2`, `b=12`, `(11,12)`,
-> `m=11` — is wrong; the entry's "control case pinning the mechanism" is in fact
-> the **only** case that diverges, and it diverges the other way. Kusto refuses
-> it (*"Failed to resolve scalar expression named 'a'"*) because `a` is not an
-> input column; DuckDB's lateral alias answers it.
->
-> **So there is no wrong answer here — this is not S1.** The real defect is
-> **S2-class and inverted**: we *accept* a query a cluster refuses, the same
-> class as `floor(7.9)`. Reclassified below.
->
-> The mechanism the entry describes is real and correctly explained; only the
-> ground truth it was measured against was assumed rather than taken.
-
-**Reclassified: S2-6 — an intra-clause forward reference is accepted, and Kusto
-refuses it.** `datatable(x:long)[10] | extend a = x + 1, b = a + 1` answers 12
-here and is SEM0100 on a cluster. Not a wrong answer — a query that will not run
-in production. Needs an R-rule (assignments see the operator's *input* columns
-only) and a refusal when a name is referenced in the same clause that binds it.
-The colliding case needs no change and must keep working; a fix that "repairs"
-it by making assignments sequential would break agreement with Kusto.
+Worth keeping in view: of the five S1 entries, one was inverted and one
+under-stated. Neither could have been sorted out from the code alone.
 
 ---
 
 ## S2 — safety / contract
 
-Five sites where a query that should raise the project's own error instead
-reaches DuckDB and leaks a raw engine exception. None returns a wrong answer, so
-none is S1 — but each violates §8's taxonomy and principle 5's "refusing is
-always better", and each exposes generated SQL to the caller. Code that catches
-`KqlUnsupportedError` will be surprised by all five.
+Sites where a query that should raise the project's own error instead reaches
+DuckDB and leaks a raw engine exception. None returns a wrong answer, so none is
+S1 — but each violates §8's taxonomy and principle 5's "refusing is always
+better", and each exposes generated SQL to the caller. Code that catches
+`KqlUnsupportedError` will be surprised by them.
 
-### S2-1 · Generated `_sN` CTE names are not reserved against user `let` names
-
-`translate/__init__.py:640-707` (`to_sql`), `:653` (`let_ctes`), `:668/705`
-(`_s{i}` naming).
-
-```
-let _s0 = datatable(x:long) [1,2,3];
-_s0 | where x > 1
-```
-emits `WITH "_s0" AS (...), _s0 AS (...), _s1 AS (...)` →
-`duckdb.ParserException: Duplicate CTE name "_s0"`. Legal KQL; the error names
-nothing the user could act on. **Fix:** check `let` names against `_s\d+` and
-either raise `KqlSchemaError` or pick a non-colliding internal prefix.
-
-### S2-2 · Tabular `let` redeclaration crashes instead of shadowing
-
-`lower.py:1761-1811` (`_lower_lets`).
-
-`scalars` is a `dict`, so scalar `let` shadowing works by overwrite. `tabulars`
-is a plain `list`, so two same-named tabular `let`s both become CTEs:
-
-```
-let T = datatable(x:long)[1,2];
-let T = datatable(x:long)[3,4];
-T | count
-```
-→ `Parser Error: Duplicate CTE name "T"`.
-
-> ### ⚠ Corrected against the emulator 2026-08-24 — **do not implement the fix as written**
->
-> Kusto does **not** shadow. It refuses, both forms:
->
-> ```
-> let T = datatable(x:long)[1,2]; let T = datatable(x:long)[3,4]; T | count
->   -> SEM0079: Let with the same name was already used in current context: 'T'
-> let v = 1; let v = 2; print x = v
->   -> SEM0079: ... 'v'
-> ```
->
-> So the scalar path is the one that is wrong: it silently shadows and answers
-> `2` where a cluster refuses the query. "Implement shadowing the way the scalar
-> path already does" would spread that defect to the tabular path rather than
-> fix it — and the crash it replaced is at least loud.
->
-> **Fix:** raise on *any* `let` redeclaration, scalar or tabular, naming SEM0079.
-> Two divergences close at once: the tabular crash and the silent scalar shadow.
-
-`tests/test_let.py` has no let-vs-let redeclaration case.
-
-### S2-3 · An aggregate in a `summarize ... by` key reaches the binder
-
-`translate/__init__.py:1104-1113`.
-
-The aggregate *list* is guarded (`_lift_aggregates`/`_render_aggregate_call`,
-`:963-1055`, raising cleanly for `sum(sum(x))`). The `by` keys go through a bare
-`render_expr` with no check, so `summarize count() by bin(count(), 1)`
-translates happily and dies at execution with
-`Binder Error: GROUP BY clause cannot contain aggregates!`. Same for
-`by count()`, `by min(C)`, `by sum(C)+1`. **Fix:** extend the existing aggregate
-detection to the `by`-key side.
+**S2-1, S2-2, S2-3 and S2-6 are fixed** — trap tests in `tests/test_let.py` and
+`tests/test_clause_scope.py`, and S2-6 is written up as R21. Two of the four
+were quietly wrong rather than merely loud, and both corrections came from
+measuring rather than from the entry: a scalar `let` redeclaration *shadowed*
+where a cluster refuses (SEM0079), and a same-clause forward reference
+*answered* where a cluster refuses (SEM0100). S2-1 turned out not to need a
+refusal at all — the internal `_sN` prefix simply lengthens out of the way, so
+`let _s0 = …` works instead of being rejected.
 
 ### S2-4 · `datetime_add("dayofyear", ...)` leaks a `CatalogException`
 
@@ -362,7 +241,8 @@ part of the repro.**
 5. **S3-4, S3-5, S4** as maintenance.
 
 **Fixed so far, with trap tests, entries deleted:** S1-1, S1-3, S1-4, S1-5,
-S3-1, S3-2, S3-3. Still open: S2-1 … S2-6, S3-4, S3-5, S4 and the Nit.
+S2-1, S2-2, S2-3, S2-6, S3-1, S3-2, S3-3. Still open: S2-4, S2-5, S3-4, S3-5,
+S4 and the Nit.
 
 Every fix lands with a trap test, per §4's own standard — and per S3-5, name it
 so the spec can cite it.
