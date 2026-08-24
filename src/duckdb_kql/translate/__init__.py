@@ -666,6 +666,11 @@ def to_sql(query: ir.Query, schema: Schema | None = None) -> TranslationResult:
 
     for index, op in enumerate(query.operators):
         prev = f"_s{len(stages) - 1}"
+        if cols is None and _mv_expand_needs_columns(op):
+            # Raises KqlSchemaError naming the table, exactly as `join` does —
+            # see :func:`_mv_expand_needs_columns` for why this one cannot
+            # degrade quietly the way the rest of the pipeline does.
+            cols = _source_cols(query, schema)
         if isinstance(op, ir.Union):
             from ..schema import union_output_columns
 
@@ -798,6 +803,36 @@ def _known_source_cols(source: ir.Source, schema: Schema | None) -> list[str] | 
         return _source_columns(source, schema)
     except KqlSchemaError:
         return None
+
+
+def _mv_expand_needs_columns(op: ir.Operator) -> bool:
+    """Whether this `mv-expand` cannot be rendered without the input columns.
+
+    Most of the pipeline degrades gracefully without a schema: `extend` and a
+    plain `mv-expand` put a replaced column at the end instead of in place,
+    which is a visible ordering difference and nothing worse. **An alias or a
+    `with_itemindex=` name does not degrade — it corrupts**, because whether the
+    name collides with an existing column is exactly what cannot be known here:
+
+        T3(id, b, a)  |  mv-expand b = a  |  project b
+
+    R18 says the expansion *replaces* `b`. Without the column list the star
+    keeps the old `b` and appends a second one, so DuckDB has two, `project b`
+    binds to the stale one, and the query answers ``'orig'`` twice where a
+    cluster answers 10 and 20 — right row count, no error, wrong values. The
+    same gap renames a colliding `with_itemindex` to DuckDB's `b_1` instead of
+    Kusto's measured `b1`.
+
+    So these two forms join `join`/`lookup` in forcing column resolution, and
+    fail with `KqlSchemaError` when there is no schema to resolve against.
+    Refusing is the point: principle 5, and the alternative here is a wrong
+    answer rather than a loud one. `duckdb_kql.kql()` derives the schema from
+    the connection, so this only reaches a caller using `to_sql()` on a bare
+    table without passing one.
+    """
+    return isinstance(op, ir.MvExpand) and bool(
+        op.item_index or any(t.name for t in op.targets)
+    )
 
 
 def _source_cols(query: ir.Query, schema: Schema | None) -> list[str]:
@@ -2625,9 +2660,15 @@ def render_mv_expand(op: ir.MvExpand, prev: str, cols: list[str] | None = None) 
     is appended otherwise — the source column only disappears when it happens to
     be the target. Rendering as ``* EXCLUDE (a), UNNEST(...) AS a`` got both
     halves wrong: it moved the expanded column to the end (column order is
-    user-visible, R1) and it dropped `a` under an alias. Writing the list out
-    needs the incoming columns; without them the ``EXCLUDE`` form is kept and
-    the position is the residual divergence, exactly as for `extend`.
+    user-visible, R1) and it dropped `a` under an alias.
+
+    Writing the list out needs the incoming columns, and the two branches below
+    differ in what they risk without them. The ``EXCLUDE`` fallback is only
+    reached for a **same-name** expansion, where the worst case is position —
+    `extend`'s documented residue. Anything with an alias or a
+    ``with_itemindex=`` name never reaches it: :func:`_mv_expand_needs_columns`
+    raises first, because there the fallback would emit two columns of the same
+    name and answer with the stale one.
     """
     from ..schema import disambiguate, mv_expand_output_columns
 

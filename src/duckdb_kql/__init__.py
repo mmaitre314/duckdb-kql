@@ -197,7 +197,13 @@ def to_sql(
 
     Args:
         kql: the query text.
-        schema: table name -> column names. Only ``join`` consults it.
+        schema: table name -> column names. Consulted by ``join``, ``lookup``,
+            ``union`` and by ``mv-expand`` with an alias or ``with_itemindex=``
+            — the operators whose output columns cannot be written down without
+            the input's. Those forms **raise** `KqlSchemaError` without it
+            rather than guess. Everything else translates fine with no schema,
+            with one residue: a column an ``extend`` or a plain ``mv-expand``
+            replaces moves to the end instead of staying in place.
         parameters: values for the query's declared parameters, by KQL name.
             They are bound as values, never spliced into the SQL, so a value may
             contain any text at all without changing what the query does.

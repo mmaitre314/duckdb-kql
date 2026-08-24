@@ -183,6 +183,68 @@ def test_an_alias_leaves_the_source_column_holding_the_whole_array(con) -> None:
     assert rows == [("[10,20]", "10"), ("[10,20]", "20")]
 
 
+# ---------------------------------------------------------------------------
+# The same rules with NO schema — the branch every test above is blind to
+# ---------------------------------------------------------------------------
+#
+# `_SHAPE` is a `datatable`, which carries its columns in the IR, so `cols` is
+# never None in any test above and the star-fallback branch never runs. It is
+# reachable: `to_sql()` over a bare table with no schema takes it, and there
+# `mv-expand b = a` emitted `SELECT *, UNNEST(...) AS "b"` — two columns named
+# `b`, with `project b` binding to the stale one and answering 'orig' twice.
+
+
+@pytest.mark.parametrize(
+    "operator",
+    [
+        "mv-expand b = a",              # the alias may collide; cannot tell
+        "mv-expand x = a",              # ...and neither can this one, here
+        "mv-expand with_itemindex=b a",
+        "mv-expand with_itemindex=i a",
+        "mv-expand with_itemindex=i x = a",
+    ],
+)
+def test_an_alias_without_a_schema_is_refused_not_guessed(operator: str) -> None:
+    """R18's replace-in-place needs the input columns; say so, don't degrade.
+
+    Whether the alias collides with an existing column is precisely what is
+    unknowable here, and guessing wrong is a wrong *answer* rather than a wrong
+    column order. So these forms join `join`/`lookup` in forcing resolution.
+    """
+    from duckdb_kql.errors import KqlSchemaError
+
+    with pytest.raises(KqlSchemaError) as exc:
+        duckdb_kql.to_sql(f"T3 | {operator}")
+    assert "T3" in str(exc.value)
+
+
+@pytest.mark.parametrize("operator", ["mv-expand a", "mv-expand a, b"])
+def test_a_plain_mv_expand_still_needs_no_schema(operator: str) -> None:
+    """The refusal is scoped to the forms that can corrupt, not to the operator.
+
+    A same-name expansion renders as ``* EXCLUDE (a), UNNEST(...) AS a``, which
+    cannot produce a duplicate. Its residue is position — `a` moves to the end
+    — which is `extend`'s documented residue too, and visible rather than
+    silent.
+    """
+    assert "UNNEST" in str(duckdb_kql.to_sql(f"T3 | {operator}"))
+
+
+def test_the_schema_may_come_from_the_connection(con) -> None:
+    """`kql(con, ...)` derives it, so the refusal never reaches that caller.
+
+    Pinned because it is the difference between "a schema is required" and
+    "a schema is required and you already have one".
+    """
+    con.execute(
+        "CREATE TABLE T3 AS SELECT 1 AS id, 'orig' AS b, CAST('[10,20]' AS JSON) AS a"
+    )
+    assert _rows(con, "T3 | mv-expand b = a | project b") == [("10",), ("20",)]
+    assert list(duckdb_kql.kql(con, "T3 | mv-expand with_itemindex=b a").columns) == [
+        "id", "b", "a", "b1"
+    ]
+
+
 @pytest.mark.parametrize(
     ("a", "b", "rows"),
     [

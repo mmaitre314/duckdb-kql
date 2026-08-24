@@ -164,50 +164,6 @@ only) and a refusal when a name is referenced in the same clause that binds it.
 The colliding case needs no change and must keep working; a fix that "repairs"
 it by making assignments sequential would break agreement with Kusto.
 
-### S1-4 · `mv-expand` silently corrupts results when no schema is supplied
-
-`translate/__init__.py:2600-2667` (`render_mv_expand`), esp. `2637-2643` (star
-fallback) vs `2644-2652` (known-columns path).
-
-R18's in-place replacement is implemented **only** when `cols is not None`. The
-star fallback drops a column only when the alias equals its *own* source column
-(`names[t] == t.column`); it cannot know the alias collides with some *other*
-existing column, so it emits `SELECT *, UNNEST(...) AS "b"` — two columns named
-`b`, and any downstream reference binds to the stale one.
-
-```python
-# T3(id INT, a JSON, b VARCHAR) = (1, '[10,20]', 'orig')
-duckdb_kql.to_sql("T3 | mv-expand b = a | project b")
-# executes to [('orig',), ('orig',)]   —  should be [('10',), ('20',)]
-```
-
-Right row count, no error, wrong values. Same root cause breaks
-`with_itemindex=` disambiguation: the `cols is None` branch uses `op.item_index`
-unqualified, so DuckDB's own collision handling produces `b_1` — precisely the
-answer R18 says was measured and rejected in favour of `b1`.
-
-**Reachable on the main path:** `cols` is `None` whenever the source is a bare
-table and no schema was supplied — `_known_source_cols` (`:788`) swallows
-`KqlSchemaError` and returns `None`. `to_sql()` advertises "requires no
-connection and no database."
-
-**Fix:** `mv-expand` must either resolve columns and raise `KqlSchemaError` when
-it cannot — the way `join`/`lookup` already do (see the comment at `:677`,
-"Only these force us to resolve columns") — or refuse the aliased/`with_itemindex`
-forms without a schema. Degrading silently is the one option principle 5 forbids.
-
-**Also fix:** `__init__.py:200`'s docstring still says `schema:` is
-"Only consulted by ``join``". That is now false, and it is what makes this bug
-invisible to a caller.
-
-**Test gap, and an instructive one:** `tests/test_dynamic.py:145-168`
-(`test_mv_expand_column_shape`) *does* cover `mv-expand b = a` and
-`with_itemindex=b a`, including the expected `b1`. But every case runs over
-`_SHAPE = "datatable(id:long, a:dynamic, b:dynamic)[...]"`, and a `datatable`
-carries its columns in the IR — so `cols` is **never** `None` in those tests.
-The only tests of this rule are structurally incapable of reaching the branch
-that is wrong.
-
 ---
 
 ## S2 — safety / contract
@@ -448,6 +404,12 @@ Twice, the *only* test of a rule was structurally blind to the bug: every
 for these fixes, assert the *source type* matters — cover the bare-table,
 no-schema path explicitly.
 
+This one bit the fixer as well as the author: the first attempt to reproduce
+S1-4 used `duckdb_kql.kql(con, ...)`, which derives a schema from the
+connection, and concluded the finding did not reproduce. It reproduces exactly
+as written — through `to_sql()` with no schema. **The path a repro takes is
+part of the repro.**
+
 ## Suggested order of work
 
 1. **Settle the two open semantics questions against the emulator** — S1-2's
@@ -455,6 +417,12 @@ no-schema path explicitly.
    vocabulary. Cheap, and two of them gate fixes below.
 2. **The name-collision cluster as one change** — S1-1, S1-2, S1-4, S2-1, S2-2.
    Largest blast radius; do it while the analysis above is fresh.
+   **S1-4 is done** and did *not* need the shared layer: the two forms that can
+   corrupt (an alias, a `with_itemindex=` name) now force column resolution and
+   raise `KqlSchemaError`, the way `join`/`lookup` already do. Refusing settles
+   it because the collision is unknowable without a schema, not merely
+   undetected — there is nothing for a resolution layer to resolve. The
+   remaining four still want one.
 3. ~~**The two allow-lists** — S1-3, S1-5.~~ **Done.** Both shipped with trap
    tests (`test_has_list.py`, `test_tostring.py`) and their entries deleted.
    S1-5's fix went further than the entry asked: deriving boolean-ness from the

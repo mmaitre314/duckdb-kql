@@ -685,11 +685,21 @@ So the alias names an *output* column that replaces a same-named input and is
 appended otherwise — the source disappears only when it happens to be the
 target. `* EXCLUDE (a), UNNEST(…) AS a` got both halves wrong: it moved the
 expanded column to the end (column order is user-visible, R1) and dropped `a`
-under an alias. Writing the list out needs the incoming columns; without them
-the `EXCLUDE` form is kept and the position is the residual divergence, exactly
-as for `extend`. `with_itemindex=` always lands last and collides like a join
+under an alias. `with_itemindex=` always lands last and collides like a join
 key — measured, `with_itemindex=b` over a table that already has `b` answers
 **b1**, not DuckDB's own `b_1`.
+
+Writing the list out needs the incoming columns, and **an alias or a
+`with_itemindex=` name without a schema is refused rather than approximated.**
+The two cases are not alike. A same-name expansion falls back to `* EXCLUDE
+(a), UNNEST(…) AS a`, whose only residue is position — `extend`'s residue, and
+visible. An alias has no safe fallback: whether it collides with an existing
+column is exactly what is unknown, so the star keeps the old column and appends
+a second of the same name, DuckDB resolves a later reference to the **stale**
+one, and `T(id, b, a) | mv-expand b = a | project b` answers `orig` twice where
+a cluster answers 10 and 20. Right row count, no error, wrong values — so these
+forms join `join`/`lookup` in raising `KqlSchemaError`. `duckdb_kql.kql()`
+derives the schema from the connection and never sees it.
 
 **Several columns zip, they do not cross-product.** The row count is the
 longest list's and the shorter ones pad with null. DuckDB's rule for several

@@ -34,8 +34,9 @@ def _table_columns(name: str, schema: Schema | None) -> list[str]:
     if schema is None:
         raise KqlSchemaError(
             name,
-            hint="join needs the table's columns to reproduce KQL's column "
-            "renaming; use duckdb_kql.kql(con, ...) or pass schema=",
+            hint="this query needs the table's columns to reproduce KQL's "
+            "column rules — join/lookup renaming, or mv-expand's replace-in-"
+            "place; use duckdb_kql.kql(con, ...) or pass schema=",
         )
     # Exact match only. KQL identifiers are case-sensitive (R7), so folding the
     # case here would let `foo` silently bind to a table named `Foo` — resolving
