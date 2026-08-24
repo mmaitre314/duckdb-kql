@@ -283,6 +283,46 @@ def test_the_wildcard_does_not_leak_through_startswith_or_endswith(con) -> None:
     assert _col(con, 'L | where s endswith "_b"') == ["a_b"]
 
 
+def test_a_backslash_in_the_needle_is_a_literal_backslash(con) -> None:
+    """The escape character itself has to be escaped, or it eats the next char.
+
+    `ESCAPE '\\'` is in force on every LIKE built from a runtime value (see the
+    test above), which makes a backslash *already present* in the needle or the
+    data an escape introducer. Measured on the emulator over the rows below:
+    `contains "a\\b"` is `['a\\b']`, where this answered `['ab']` — a false
+    positive on the row without a backslash and a false negative on the row
+    that matches, from one needle. Windows paths hit it immediately.
+
+    The `_cs` prefix/suffix variants were never affected: they route through
+    `starts_with`/`ends_with` and never build a LIKE. That inconsistency inside
+    one family is what makes this worth pinning on both.
+    """
+    con.execute("CREATE TABLE B(s VARCHAR)")
+    con.execute(r"INSERT INTO B VALUES ('a\b'), ('ab'), ('C:\Users\foo')")
+    assert _col(con, r'B | where s contains "a\\b"') == [r"a\b"]
+    assert _col(con, r'B | where s contains_cs "a\\b"') == [r"a\b"]
+    assert _col(con, r'B | where s startswith "a\\"') == [r"a\b"]
+    assert _col(con, r'B | where s endswith "\\b"') == [r"a\b"]
+    assert _col(con, r'B | where s contains "\\Users\\"') == [r"C:\Users\foo"]
+    # the `_cs` prefix/suffix pair, which takes the non-LIKE path
+    assert _col(con, r'B | where s startswith_cs "a\\"') == [r"a\b"]
+    assert _col(con, r'B | where s endswith_cs "\\b"') == [r"a\b"]
+    # and the negations, where a false positive becomes a dropped row
+    assert _col(con, r'B | where s !contains "a\\b"') == ["ab", r"C:\Users\foo"]
+
+
+def test_escaping_the_escape_does_not_break_the_metacharacters(con) -> None:
+    """The three replacements are order-dependent: escaping `\\` has to come
+    first, or the backslashes the `%`/`_` escaping introduces are doubled in
+    turn and the pattern stops meaning what it says."""
+    con.execute("CREATE TABLE E(s VARCHAR)")
+    con.execute(r"INSERT INTO E VALUES ('100%'), ('100x'), ('user_id'), ('userXid'), ('a\%b')")
+    assert _col(con, 'E | where s contains "100%"') == ["100%"]
+    assert _col(con, 'E | where s contains "user_id"') == ["user_id"]
+    # a backslash *and* a metacharacter in one needle — the case the ordering is for
+    assert _col(con, r'E | where s contains "\\%"') == [r"a\%b"]
+
+
 def test_delimiter_only_needles_fall_back_to_substring(con) -> None:
     """`has " "` is **true** on the emulator — wrapping it in term boundaries
     would make it false, since a space is never at a term boundary.

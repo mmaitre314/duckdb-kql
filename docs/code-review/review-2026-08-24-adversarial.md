@@ -27,7 +27,7 @@ what a green suite does not catch.
 
 ## Verdict
 
-**5 S1, 5 S2, 5 S3, 2 S4/Nit.** Unlike the 2026-08-04 pass, this one found a
+**5 S1, 5 S2, 5 S3, 2 S4/Nit.** *(S1-3 fixed 2026-08-24 and its entry removed; S1-2 reclassified to S2-6 — see the note there.)* Unlike the 2026-08-04 pass, this one found a
 **systemic weakness**, not a scatter of independent divergences: four of the
 five S1s are the same underlying problem wearing different clothes (see
 [The pattern](#the-pattern-that-matters-more-than-any-single-finding)). The
@@ -163,46 +163,6 @@ in production. Needs an R-rule (assignments see the operator's *input* columns
 only) and a refusal when a name is referenced in the same clause that binds it.
 The colliding case needs no change and must keep working; a fix that "repairs"
 it by making assignments sequential would break agreement with Kusto.
-
-### S1-3 · `contains`/`startswith`/`endswith` mis-match any needle containing a backslash
-
-`translate/functions.py:383-389` (`_escape_like`), `374-380` (`_LIKE_ESCAPE`),
-`505-508` (the operator rows).
-
-`_escape_like` escapes the two LIKE metacharacters and nothing else:
-
-```python
-def _escape_like(operand: str) -> str:
-    return f"replace(replace({operand}, '%', '\\%'), '_', '\\_')"
-```
-
-but the emitted pattern always ends `ESCAPE '\'`. A backslash already present in
-the **user's data or needle** is therefore read as an escape introducer, so it
-"eats" the next character instead of matching a literal backslash.
-
-```
-rows: 'a\b'  (3 chars),  'ab'  (2 chars)
-T | where s contains "a\\b"   ->  ['ab']
-```
-
-Both failure directions at once: a false positive on the row with no backslash,
-a false negative on the row that actually matches. `endswith "\foo"` likewise
-matches `'CUsersfoo'`. Windows paths and regex-ish log text hit this immediately.
-
-**Affected:** `contains`, `!contains`, `contains_cs`, `!contains_cs`,
-`startswith`, `!startswith`, `endswith`, `!endswith`.
-**Not affected:** `startswith_cs`/`endswith_cs` (they route through DuckDB's
-`starts_with`/`ends_with`, no LIKE) — so the family is internally inconsistent.
-
-**The fix pattern already exists in this codebase:** `term_match_sql` escapes
-correctly via `regexp_escape()` for the whole `has` family. It was simply never
-applied to the LIKE path. Escape the escape character, or move these rows onto
-the same regex machinery.
-
-**Test gap:** `tests/test_has_list.py:260-284` has dedicated regression tests for
-`%` and `_` leaking through these exact operators — citing this same
-"ESCAPE is inert without a clause" bug class — but nothing for the escape
-character itself. `grep -rn backslash tests/` finds nothing relevant.
 
 ### S1-4 · `mv-expand` silently corrupts results when no schema is supplied
 

@@ -383,10 +383,27 @@ _LIKE_ESCAPE = " ESCAPE '\\'"
 def _escape_like(operand: str) -> str:
     """Escape LIKE metacharacters in a runtime value.
 
-    Only half the job -- the resulting comparison must also end with
-    :data:`_LIKE_ESCAPE`, or the escaping is inert.
+    Three replacements, and the **order matters**: the escape character has to
+    be escaped *first*, or the backslashes the other two introduce get doubled
+    in turn and the pattern stops meaning what it says.
+
+    Escaping the escape character is the half that was missing, and it was a
+    wrong answer in both directions on ordinary log text. With
+    ``ESCAPE '\\'`` in force, a backslash already present in the needle or the
+    data introduces an escape rather than matching itself, so it eats the
+    character after it. Measured on the emulator against rows ``a\\b`` and
+    ``ab``::
+
+        T | where s contains "a\\b"      Kusto ['a\\b']   was ['ab']
+
+    A false positive on the row without a backslash and a false negative on the
+    row that matches — from one needle. Windows paths hit it immediately.
+
+    Only half the job in the other sense too: the resulting comparison must also
+    end with :data:`_LIKE_ESCAPE`, or all of this is inert.
     """
-    return f"replace(replace({operand}, '%', '\\%'), '_', '\\_')"
+    escaped = f"replace({operand}, '\\', '\\\\')"
+    return f"replace(replace({escaped}, '%', '\\%'), '_', '\\_')"
 
 
 # Term boundary for `has` (R3): KQL matches whole *terms*, so a substring LIKE
