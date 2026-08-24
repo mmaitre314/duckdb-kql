@@ -130,7 +130,7 @@ returns an approximate answer.
 
 ## Binary and string operators
 
-33 supported.
+41 supported.
 
 ### Supported
 
@@ -143,6 +143,10 @@ returns an approximate answer.
 | `!endswith_cs` | Negated case-sensitive suffix match. |
 | `!has` | Negated whole-term match — not `NOT contains`. Null handling pinned against the emulator. |
 | `!has_cs` | Negated case-sensitive whole-term match. |
+| `!hasprefix` | Negated term-prefix match. Null handling pinned against the emulator: a null haystack is **false** here and **true** negated. |
+| `!hasprefix_cs` | Negated case-sensitive term-prefix match. |
+| `!hassuffix` | Negated term-suffix match. Null handling pinned against the emulator. |
+| `!hassuffix_cs` | Negated case-sensitive term-suffix match. |
 | `!startswith` | Negated prefix match. Null handling pinned against the emulator. |
 | `!startswith_cs` | Negated case-sensitive prefix match. |
 | `!~` | Case-insensitive inequality. |
@@ -165,6 +169,10 @@ returns an approximate answer.
 | `endswith_cs` | Suffix, case-sensitive. |
 | `has` | Whole **term**, case-insensitive. `Text has "err"` is **false** for `"error"`. A term is a run of Unicode letters and digits; every other character delimits one, **underscore included** — so `"a_b" has "a"` is **true**. (Regex `\b` would say false; measured on the emulator.) |
 | `has_cs` | Whole term, case-**sensitive**. |
+| `hasprefix` | A **term** that *starts with* the needle — not the whole string. `'x-error' hasprefix 'err'` is true (the hyphen ends a term) and `'err or' hasprefix 'r o'` is false (the `r` inside `err` has no boundary before it). Case-insensitive by default. |
+| `hasprefix_cs` | Term-prefix match, case-**sensitive**. |
+| `hassuffix` | A **term** that *ends with* the needle — the mirror image of `hasprefix`. `'x-error' hassuffix 'err'` is **false**, because `or` follows. Case-insensitive by default. |
+| `hassuffix_cs` | Term-suffix match, case-**sensitive**. |
 | `matches regex` | Regex match, case-sensitive. Both engines use RE2-family syntax, so lookarounds are unavailable on either side. |
 | `or` | — |
 | `startswith` | Prefix, case-**insensitive** by default. `startswith_cs` is the sensitive form. |

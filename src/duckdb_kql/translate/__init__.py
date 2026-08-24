@@ -3727,12 +3727,12 @@ def _render_extract_all(node: ir.FunctionCall) -> str:
     groups = _capture_group_count(regex)
     if groups <= 1:
         return f"to_json(regexp_extract_all({subject}, {pattern}))"
-    names = ", ".join(f"'g{i}'" for i in range(1, groups + 1))
+    per_match = ", ".join(
+        f"regexp_extract(m, {pattern}, {i})" for i in range(1, groups + 1)
+    )
     return (
         f"to_json(list_transform("
-        f"regexp_extract_all({subject}, {pattern}), "
-        f"m -> [{', '.join(f'regexp_extract(m, {pattern}, {i})' for i in range(1, groups + 1))}]"
-        f"))".replace(f"[{names}]", "")
+        f"regexp_extract_all({subject}, {pattern}), m -> [{per_match}]))"
     )
 
 

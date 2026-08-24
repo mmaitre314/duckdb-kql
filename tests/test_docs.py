@@ -260,3 +260,38 @@ def test_the_docs_call_it_kql() -> None:
             continue
         text = _read(path)
         assert "duckdb_kql.sql(" not in text, f"{path} still documents duckdb_kql.sql()"
+
+
+_TRAP_LINE = re.compile(r"^\*Traps?: (.+)\*$", re.MULTILINE)
+_TRAP_PATH = re.compile(r"`(tests/[A-Za-z0-9_./]+)`")
+
+
+def test_every_r_rule_names_a_trap_test_that_exists() -> None:
+    """§4's own standard: *"a rule is not 'known' until its test exists"*.
+
+    These citations used to be invented IDs — `trap-r7-identifiers`,
+    `trap-r5-join-kinds` — that appeared nowhere in the test tree. That is not
+    bookkeeping pedantry. It is how R7's second clause went unimplemented
+    without anyone noticing: there was no artifact to open and find missing, so
+    the rule read as covered.
+
+    This test is the thing that would have noticed. It is deliberately about
+    *existence*, not content — a citation that resolves is a claim someone can
+    check, which is the whole difference from an ID that resolves to nothing.
+    """
+    spec = Path("docs/TRANSLATION.md")
+    text = _read(spec)
+    citations = _TRAP_LINE.findall(text)
+    assert len(citations) >= 21, (
+        f"§4 has 21 R-rules; found {len(citations)} trap citations. A rule "
+        "without one is a rule nobody has to prove."
+    )
+
+    missing = []
+    for line in citations:
+        paths = _TRAP_PATH.findall(line)
+        if not paths:
+            missing.append(f"cites no test file at all: {line}")
+            continue
+        missing += [p for p in paths if not Path(p).exists()]
+    assert not missing, f"docs/TRANSLATION.md cites tests that do not exist: {missing}"

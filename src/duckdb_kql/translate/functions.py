@@ -463,11 +463,25 @@ def term_match_sql(
     *,
     case_sensitive: bool = False,
     needle_text: str | None = None,
+    lead: bool = True,
+    trail: bool = True,
 ) -> str:
-    """SQL testing whether *needle* occurs in *haystack* as a whole term.
+    """SQL testing whether *needle* occurs in *haystack* at a term boundary.
 
-    Shared by `has`/`has_cs` and the `has_any`/`has_all` list forms, so the term
-    definition lives in exactly one place.
+    Shared by `has`/`has_cs`, the `has_any`/`has_all` list forms, and the
+    `hasprefix`/`hassuffix` pair, so the term definition lives in exactly one
+    place.
+
+    *lead* and *trail* select which boundaries are required, which is the whole
+    difference between the three operators — measured, not assumed:
+
+    * `has` requires **both**: the needle is a whole term.
+    * `hasprefix` requires only the **leading** one: some term *starts with* the
+      needle, so ``'x-error' hasprefix 'err'`` is true and
+      ``'err or' hasprefix 'r o'`` is false — `r` inside `err` has no boundary
+      before it.
+    * `hassuffix` requires only the **trailing** one, the mirror image:
+      ``'x-error' hassuffix 'err'`` is false because `or` follows.
 
     The boundary is applied at an edge **only when the needle's own character at
     that edge is a term character** — found by a random differential sweep, not
@@ -499,22 +513,39 @@ def term_match_sql(
     """
     flag = "" if case_sensitive else "(?i)"
     if needle_text is not None and can_fold_term_boundary(needle_text):
-        lead = _TERM_START if is_term_char(needle_text[:1]) else ""
-        trail = _TERM_END if is_term_char(needle_text[-1:]) else ""
-        pattern = f"'{flag}{lead}' || regexp_escape({needle})"
-        if trail:
-            pattern += f" || '{trail}'"
+        start = _TERM_START if lead and is_term_char(needle_text[:1]) else ""
+        end = _TERM_END if trail and is_term_char(needle_text[-1:]) else ""
+        pattern = f"'{flag}{start}' || regexp_escape({needle})"
+        if end:
+            pattern += f" || '{end}'"
         return f"regexp_matches({haystack}, {pattern})"
-    lead = f"CASE WHEN regexp_matches({needle}, '^[\\pL\\pN]') THEN '{_TERM_START}' ELSE '' END"
-    trail = f"CASE WHEN regexp_matches({needle}, '[\\pL\\pN]$') THEN '{_TERM_END}' ELSE '' END"
+    start = (
+        f"CASE WHEN regexp_matches({needle}, '^[\\pL\\pN]') "
+        f"THEN '{_TERM_START}' ELSE '' END"
+        if lead
+        else "''"
+    )
+    end = (
+        f"CASE WHEN regexp_matches({needle}, '[\\pL\\pN]$') "
+        f"THEN '{_TERM_END}' ELSE '' END"
+        if trail
+        else "''"
+    )
     return (
-        f"regexp_matches({haystack}, '{flag}' || {lead} "
-        f"|| regexp_escape({needle}) || {trail})"
+        f"regexp_matches({haystack}, '{flag}' || {start} "
+        f"|| regexp_escape({needle}) || {end})"
     )
 
 
 _HAS = term_match_sql("{0}", "{1}")
 _HAS_CS = term_match_sql("{0}", "{1}", case_sensitive=True)
+
+# R3's third pair: a term that *starts with* / *ends with* the needle. Same
+# machinery as `has`, one boundary instead of two.
+_HASPREFIX = term_match_sql("{0}", "{1}", trail=False)
+_HASPREFIX_CS = term_match_sql("{0}", "{1}", case_sensitive=True, trail=False)
+_HASSUFFIX = term_match_sql("{0}", "{1}", lead=False)
+_HASSUFFIX_CS = term_match_sql("{0}", "{1}", case_sensitive=True, lead=False)
 
 # `contains` IS plain substring (R3) -- the mirror image of `has`. The needle is
 # a runtime value, so its LIKE metacharacters must be escaped or `a contains "%"`
@@ -582,6 +613,25 @@ BINARY_OPERATORS: dict[str, BinarySpec] = {
         BinarySpec("!has", f"NOT {_HAS}", ("R3", "R4", "R17"), null_result="TRUE"),
         BinarySpec("has_cs", _HAS_CS, ("R3", "R4", "R17"), null_result="FALSE"),
         BinarySpec("!has_cs", f"NOT {_HAS_CS}", ("R3", "R4", "R17"), null_result="TRUE"),
+        # `hasprefix`/`hassuffix`: a term that starts/ends with the needle, not
+        # the whole string. Documented by R3 and present in the corpus, but
+        # unmapped until now — `Logs | where Text hasprefix "er"` was refused.
+        BinarySpec("hasprefix", _HASPREFIX, ("R3", "R4", "R17"),
+                   "a term starts with the needle", null_result="FALSE"),
+        BinarySpec("!hasprefix", f"NOT {_HASPREFIX}", ("R3", "R4", "R17"),
+                   null_result="TRUE"),
+        BinarySpec("hasprefix_cs", _HASPREFIX_CS, ("R3", "R4", "R17"),
+                   null_result="FALSE"),
+        BinarySpec("!hasprefix_cs", f"NOT {_HASPREFIX_CS}", ("R3", "R4", "R17"),
+                   null_result="TRUE"),
+        BinarySpec("hassuffix", _HASSUFFIX, ("R3", "R4", "R17"),
+                   "a term ends with the needle", null_result="FALSE"),
+        BinarySpec("!hassuffix", f"NOT {_HASSUFFIX}", ("R3", "R4", "R17"),
+                   null_result="TRUE"),
+        BinarySpec("hassuffix_cs", _HASSUFFIX_CS, ("R3", "R4", "R17"),
+                   null_result="FALSE"),
+        BinarySpec("!hassuffix_cs", f"NOT {_HASSUFFIX_CS}", ("R3", "R4", "R17"),
+                   null_result="TRUE"),
         # R3 — prefix / suffix, case-insensitive by default
         BinarySpec("startswith", _STARTSWITH, ("R3", "R4", "R17"), null_result="FALSE"),
         BinarySpec("!startswith", f"NOT {_STARTSWITH}", ("R3", "R4", "R17"),

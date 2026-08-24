@@ -39,8 +39,9 @@ pytestmark = pytest.mark.skipif(not CORPUS.is_file(), reason=f"no corpus at {COR
 #: old `list_filter` / `bool_and` shapes could express. Then 280 -> 285 with
 #: `parse` / `parse-where` in `kind=simple` and `kind=relaxed`. 291 -> 292 with
 #: `tostring` dispatching on run-time `typeof`, which drained the last known
-#: divergence (`reverse` of a datetime *column*).
-BASELINE_PASSING = 292
+#: divergence (`reverse` of a datetime *column*). 292 -> 301 with
+#: `hasprefix`/`hassuffix`, which R3 documented and the registry had no row for.
+BASELINE_PASSING = 301
 
 #: Cases whose *data* makes them nondeterministic, which the query text cannot
 #: show. Not a divergence and not a waiver — there is no single right answer to

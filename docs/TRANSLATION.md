@@ -9,10 +9,16 @@
 > mapping is wrong — fix the mapping.
 >
 > **Verification status.** The semantic rules in §4 are drawn from Microsoft's
-> public KQL documentation, which is our normative specification. Each one is
-> marked with the ID of the trap test that must pin it against the Kusto Emulator.
-> **A rule is not "known" until its test exists and passes.** Until then it is a
-> documented expectation, not a verified fact.
+> public KQL documentation, which is our normative specification. Each one names
+> the trap test that pins it against the Kusto Emulator. **A rule is not "known"
+> until its test exists and passes.** Until then it is a documented expectation,
+> not a verified fact.
+>
+> Those citations used to be invented IDs — `trap-r7-identifiers` and the like —
+> that appeared nowhere in the test tree. That is not bookkeeping pedantry: it is
+> how R7's collision clause went years unimplemented, because there was no
+> artifact anyone could open and find missing. They are now real paths, and
+> `tests/test_docs.py` fails if one stops resolving.
 
 ## 0. Governing principles
 
@@ -72,13 +78,28 @@ SELECT * FROM _s3
 | `real` | `DOUBLE` | |
 | `decimal` | `DECIMAL(38,9)` | the scale is rendered, so `1` reads as `1.000000000` — which is why `todecimal` and `parse … : decimal` are refused rather than mapped |
 | `string` | `VARCHAR` | UTF-8; `strlen` counts **characters** (§4 R11) |
-| `datetime` | `TIMESTAMP` | **always UTC** (§4 R8) |
+| `datetime` | `TIMESTAMP` | **always UTC** (§4 R8); **100 ns ticks are lost** — see below |
 | `timespan` | `INTERVAL` | see §3 literals |
 | `guid` | `UUID` | |
 | `dynamic` | `JSON` | §4 R9; lists/structs only where provably equivalent |
 
 **Integer default:** a bare integer literal in KQL is `long` → emit `BIGINT`.
 Do not let DuckDB infer `INTEGER` and silently overflow at 2^31.
+
+**Datetime resolution: KQL keeps 100 ns *ticks*, DuckDB stores microseconds.**
+The seventh fractional digit is therefore **discarded, not rounded**, and this
+is the one lossy mapping in the table:
+
+```
+datetime(2024-01-01T12:34:56.1234567Z)   ->  ...1234560Z, the 7 is gone
+```
+
+Everything downstream inherits it — `tostring` prints a trailing `0` because
+there is nothing else to print (R20), and `datetime_part("nanosecond", …)` is
+**refused** rather than answering a rounded value, since a caller asking for
+nanoseconds is asking for exactly the digit that is missing. Ordinary log
+timestamps are microsecond-resolution or coarser and are unaffected; a value
+carrying real tick precision is not round-trippable here at all.
 
 ## 3. Literal mapping
 
@@ -102,13 +123,14 @@ bare `NULL`, which would lose type information in a `UNION`.
 
 **This section is the heart of the guide.** Each rule is a place where KQL and SQL
 look identical and behave differently — the *"syntactically identical, semantically
-different"* failure mode that produced most of Bun's regressions. Every rule needs
-a trap test (`tests/traps/`) whose expectation comes from the emulator.
+different"* failure mode that produced most of Bun's regressions. Every rule names
+the trap test whose expectations come from the emulator, by path, so the claim can
+be opened and read.
 
 ---
 
 ### R1 — Conversions return **null**, never an error → `TRY_CAST`
-*Trap: `trap-r1-conversions`*
+*Traps: `tests/test_countof_tobool.py`, `tests/test_substring_floor_todatetime.py`, `tests/test_parse.py`*
 
 KQL's `toint()`, `tolong()`, `todouble()`, `todatetime()`, `toguid()`,
 `totimespan()` return **null** on unparseable input. DuckDB's `CAST` **throws**.
@@ -121,7 +143,7 @@ value (e.g. typed null literals, §3).
 ---
 
 ### R2 — String comparison case-sensitivity
-*Trap: `trap-r2-case-sensitivity`*
+*Traps: `tests/test_keyword_names.py`, `tests/test_case_collisions.py`*
 
 | KQL | Case | DuckDB |
 |---|---|---|
@@ -136,7 +158,7 @@ value (e.g. typed null literals, §3).
 ---
 
 ### R3 — `has` is **term-based**; `contains` is **substring**; both default **case-insensitive**
-*Trap: `trap-r3-has-vs-contains`*
+*Traps: `tests/test_has_list.py`, `tests/test_hasprefix_hassuffix.py`*
 
 The highest-risk family in the language.
 
@@ -149,6 +171,7 @@ The highest-risk family in the language.
 | `startswith` / `endswith` | prefix / suffix | insensitive |
 | `startswith_cs` / `endswith_cs` | prefix / suffix | sensitive |
 | `hasprefix` / `hassuffix` | **term** prefix / suffix | insensitive |
+| `hasprefix_cs` / `hassuffix_cs` | term prefix / suffix | sensitive |
 | `has_any (a, b, …)` | whole term, **any** item matches | insensitive |
 | `has_all (a, b, …)` | whole term, **every** item matches | insensitive |
 
@@ -168,6 +191,23 @@ Measured on the emulator across ~30 punctuation characters (all delimit) against
 `a1`, `aa` and `éa` (none do — accented letters are term characters). The
 mapping is therefore `(?:^|[^\pL\pN])needle(?:$|[^\pL\pN])`, spelled with the
 brace-free `\pL` form because these patterns double as `str.format` templates.
+
+**`hasprefix` and `hassuffix` are the same pattern with one boundary dropped**,
+which is the whole difference between the three operators and is why they share
+one function. `hasprefix` keeps the **leading** boundary only — some term
+*starts with* the needle — and `hassuffix` the trailing one. Measured:
+
+| query | Kusto | why |
+|---|---|---|
+| `'x-error' hasprefix 'err'` | true | `-` ends the previous term |
+| `'x-error' hassuffix 'err'` | **false** | `or` follows, so no term ends there |
+| `'err or' hasprefix 'r o'` | false | the `r` inside `err` has no boundary before |
+| `'x ab y' hasprefix ' a'` | **true** | needle starts with a delimiter, so no boundary applies |
+
+That last row is the same edge rule `has` has: a boundary is required at an edge
+only when the **needle's own** character at that edge is a term character. Which
+means the rule composes — the two flags select which edges to consider, and the
+needle still decides whether each one applies.
 
 **`has_any` / `has_all` are the list forms of `has`, not of `in`.** The grammar
 groups them with `in` — they share `listEqualityExpression` — but they are term
@@ -220,7 +260,7 @@ the argument is cast rather than required to be boolean.
 ---
 
 ### R4 — Null semantics
-*Trap: `trap-r4-nulls`*
+*Trap: `tests/test_null_semantics.py`*
 
 - **Aggregates ignore nulls:** `count(Expr)` counts **non-null** values
   (→ `count(expr)`), while bare `count()` counts **all rows** (→ `count(*)`).
@@ -255,7 +295,7 @@ the argument is cast rather than required to be boolean.
 ---
 
 ### R5 — `join` defaults to `innerunique`, **not** SQL inner join ⚠️
-*Trap: `trap-r5-join-kinds`*
+*Trap: `tests/test_join.py`*
 
 This is the single most dangerous default in KQL.
 
@@ -280,7 +320,7 @@ Implement **all kinds in one wave**, never incrementally.
 ---
 
 ### R6 — `sort` defaults to **descending**
-*Trap: `trap-r6-sort-defaults`*
+*Traps: `tests/test_column_order_and_null_sort.py`, `tests/test_top.py`*
 
 > `sort by X` and `order by X` default to **`desc`** — the opposite of SQL's
 > `ASC` default. Always emit an explicit `ASC`/`DESC`.
@@ -291,7 +331,7 @@ explicitly rather than relying on DuckDB's default.
 ---
 
 ### R7 — Identifiers are **case-sensitive**
-*Traps: `trap-r7-identifiers`, `tests/test_case_collisions.py`*
+*Trap: `tests/test_case_collisions.py`*
 
 KQL identifiers are case-sensitive; DuckDB's are case-insensitive by default.
 `Foo` and `foo` are distinct KQL columns.
@@ -331,7 +371,7 @@ to check — one more reason `duckdb_kql.kql()` is the better entry point.
 ---
 
 ### R8 — datetime is UTC; binning has an origin
-*Trap: `trap-r8-datetime`*
+*Trap: `tests/test_datetime_traps.py`*
 
 - `datetime` is **always UTC**; never emit `TIMESTAMPTZ` or apply a local zone.
 - `now()` and `ago(ts)` must be **evaluated once per query**, not per row, so
@@ -345,7 +385,7 @@ to check — one more reason `duckdb_kql.kql()` is the better entry point.
 ---
 
 ### R9 — `dynamic`: missing property is **null**, never an error
-*Trap: `trap-r9-dynamic`*
+*Trap: `tests/test_dynamic.py`*
 
 - Accessing a missing property or out-of-range index returns **null**, never an
   error. Map to `json_extract`, which must not be allowed to raise.
@@ -360,7 +400,7 @@ to check — one more reason `duckdb_kql.kql()` is the better entry point.
 ---
 
 ### R10 — Nondeterministic operators must be asserted as sets
-*Trap: `trap-r10-nondeterminism`*
+*Trap: `tests/test_behavior.py` (`NONDETERMINISTIC_BY_DATA`)*
 
 `take`/`limit`, `sample`, and `top … by` tie-breaking are **not deterministic** in
 KQL. The translation is still `LIMIT`, but tests must compare **unordered**, and
@@ -369,7 +409,7 @@ we must never claim a specific row order absent a terminal `sort`.
 ---
 
 ### R11 — Strings are character-oriented; approximations are approximate
-*Traps: `trap-r11-strings`, `trap-r11-approx`*
+*Traps: `tests/test_substring_floor_todatetime.py`, `tests/test_countof_tobool.py`, `tests/test_summarize.py`*
 
 - `strlen` counts **characters**, not bytes → `length()` (not `octet_length`).
   `substring` uses **0-based** indices and must tolerate negative/out-of-range
@@ -404,7 +444,7 @@ we must never claim a specific row order absent a terminal `sort`.
 ---
 
 ### R12 — `summarize` and `distinct` output column naming
-*Traps: `trap-r12-summarize-naming`, `tests/test_distinct.py`*
+*Traps: `tests/test_summarize.py`, `tests/test_distinct.py`*
 
 Auto-generated names are user-visible and must match exactly: `count()` →
 `count_`, `avg(X)` → `avg_X`, etc. Group-by keys come first, in source order, then
@@ -633,7 +673,7 @@ labels, which are right whenever every branch is in the current database.
 ---
 
 ### R17 — A `dynamic` in a **string context** is its unwrapped text
-*Trap: `trap-r17-dynamic-string`*
+*Trap: `tests/test_dynamic_strings.py`*
 
 A KQL `dynamic` is DuckDB `JSON`, and the two disagree about a value's text
 form: JSON quotes a string, KQL does not. Kusto coerces a dynamic to its
@@ -710,7 +750,7 @@ in the official model (`Symbols/ScalarTypes.cs`).
 ---
 
 ### R18 — `mv-expand` zips, replaces in place, and **converts**
-*Trap: `trap-r18-mv-expand`*
+*Trap: `tests/test_dynamic.py`*
 
 Three separate rules, none of them what the operator looks like it does.
 
@@ -788,7 +828,7 @@ sub-pipeline per element and is a different operator.
 ---
 
 ### R19 — `parse` is all-or-nothing, and its captures are type-shaped
-*Trap: `trap-r19-parse`*
+*Trap: `tests/test_parse.py`*
 
 `parse Expression with <pattern>` compiles to **one** regex with a named group
 per declared column, matched once per row by `regexp_extract(s, pattern,
@@ -1048,10 +1088,10 @@ Columns: `kql_name`, `arity`, `kind` (`native` | `template` | `udf` |
 kql_name  arity  kind      duckdb                                    rules    wave  test_ids
 strlen    1      native    length({0})                               R11      1     case-strlen-01
 toupper   1      native    upper({0})                                         1     case-toupper-01
-toint     1      template  TRY_CAST({0} AS INTEGER)                  R1       1     trap-r1-conversions
-ago       1      template  (now() - {0})                             R8       1     trap-r8-datetime
+toint     1      template  TRY_CAST({0} AS INTEGER)                  R1       1     test_parse.py
+ago       1      template  (now() - {0})                             R8       1     test_datetime_traps.py
 iff       3      template  CASE WHEN {0} THEN {1} ELSE {2} END                1     case-iff-01
-contains  2      template  ({0} ILIKE '%' || escape({1}) || '%')      R3       1     trap-r3-has-vs-contains
+contains  2      template  ({0} ILIKE '%' || escape({1}) || '%')      R3       1     test_has_list.py
 ```
 
 Rules: one row per KQL function; `unsupported` rows are legitimate and drive

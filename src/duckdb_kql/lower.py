@@ -40,7 +40,8 @@ _BINARY_TEXT_OPS = {
     "contains", "!contains", "contains_cs", "!contains_cs",
     "startswith", "!startswith", "startswith_cs", "!startswith_cs",
     "endswith", "!endswith", "endswith_cs", "!endswith_cs",
-    "hasprefix", "!hasprefix", "hassuffix", "!hassuffix",
+    "hasprefix", "!hasprefix", "hasprefix_cs", "!hasprefix_cs",
+    "hassuffix", "!hassuffix", "hassuffix_cs", "!hassuffix_cs",
     "matches regex", "matchesregex",
 }
 

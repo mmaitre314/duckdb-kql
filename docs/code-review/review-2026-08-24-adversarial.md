@@ -81,45 +81,26 @@ between two *columns* still reaches DuckDB, and that residue stays with
 
 ## S3 — correctness-adjacent
 
-### S3-4 · `hasprefix`/`hassuffix` are documented and in the corpus, but unmapped
+**All closed.**
 
-R3 documents them; the lexer supports all four spellings plus negations; the
-corpus (`tests/cases/docs/docs-corpus.json`) contains cases. But
-`BINARY_OPERATORS` has **no rows** for any of them, and `lower.py:43`'s
-`_BINARY_TEXT_OPS` omits the `_cs` variants entirely.
-`Logs | where Text hasprefix "er"` → `KqlUnsupportedError`. Fails loudly, so not
-dangerous — but it is a live gap between what §4 documents as behaviour and what
-the translator accepts.
-
-### S3-5 · The trap-test IDs the spec relies on do not exist
-
-`docs/TRANSLATION.md` §4 cites specific IDs (`trap-r7-identifiers`,
-`trap-r2-case-sensitivity`, `trap-r5-join-kinds`, …) as the artifact that "must
-pin" each rule, and its own preamble says **"a rule is not 'known' until its
-test exists and passes."** None of those literal ID strings appears anywhere in
-the test tree. Coverage mostly exists under conventional filenames
-(`test_join.py`, `test_null_semantics.py`, …) with no traceable link back to the
-promised ID.
-
-This is not bookkeeping pedantry: **it is how S1-1 stayed invisible.** There is
-no artifact anyone can point at and say "this is `trap-r7-identifiers`, and it
-covers only table-name lookup, not column collision." Either introduce the IDs
-as test markers/ids, or amend §4 to cite the real test names.
-
----
+* **S3-1, S3-2, S3-3** were wrong *values* — `countof`'s overlap, `tobool`'s
+  string vocabulary, `substring`'s null indices. Trap tests in
+  `tests/test_countof_tobool.py` and `tests/test_substring_floor_todatetime.py`.
+* **S3-4** — `hasprefix`/`hassuffix` are implemented, all eight spellings
+  including the `_cs` variants the lexer omitted, sharing `has`'s term machinery
+  with one boundary dropped. Corpus coverage went 292 → **301**. Trap tests in
+  `tests/test_hasprefix_hassuffix.py`.
+* **S3-5** — §4's trap citations are real paths now, and
+  `tests/test_docs.py::test_every_r_rule_names_a_trap_test_that_exists` fails if
+  one stops resolving. The entry's point stands and is worth keeping: an ID that
+  resolves to nothing is how R7's second clause read as covered for years.
 
 ## S4 / Nit
 
-- **S4 — dead code.** `translate/__init__.py:3354-3377` (`_render_extract_all`):
-  `names = ", ".join(f"'g{i}'" ...)` is computed and used only in
-  `.replace(f"[{names}]", "")`, but that literal substring never appears in the
-  string being built. Permanent no-op; output is correct regardless.
-- **Nit — undisclosed precision loss.** `datetime` values lose the 7th
-  (100 ns tick) digit: `tostring(datetime(2024-01-01T12:34:56.1234567Z))` →
-  `'...1234560Z'`. A consequence of the `datetime → TIMESTAMP` mapping (§2), not
-  a registry bug, but §2/R8 do not disclose it.
-
----
+**Both closed.** The dead `names` variable in `_render_extract_all` is gone (the
+generated SQL is byte-identical, as it was always a no-op), and §2 now discloses
+the 100 ns tick loss — measured: `.1234567Z` comes back `.1234560Z`, truncated
+rather than rounded.
 
 ## The pattern that matters more than any single finding
 
@@ -215,10 +196,11 @@ part of the repro.**
    which was the same hole wearing a different type.
 4. ~~**Error-taxonomy sweep** — S2-3, S2-4, S2-5~~ — **done**, along with the
    `__init__.py:200` docstring correction from S1-4.
-5. **S3-4, S3-5, S4** as maintenance.
+5. ~~**S3-4, S3-5, S4** as maintenance.~~ — **done.**
 
-**Fixed, with trap tests, entries deleted:** all of S1 and all of S2, plus
-S3-1, S3-2, S3-3. **Still open:** S3-4, S3-5, S4 and the Nit.
+**Every finding in this review is now fixed**, each with a trap test, and the
+per-finding entries are deleted. What remains below is the reasoning worth
+keeping: the patterns, the corrections, and the list of things that held up.
 
 Every fix lands with a trap test, per §4's own standard — and per S3-5, name it
 so the spec can cite it.
