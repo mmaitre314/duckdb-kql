@@ -128,18 +128,41 @@ alias activates and the answer is right: `T(x=10) | project a = x + 1, b = a + 1
 This is the most common real-world shape there is: transforming a column under
 its own name.
 
-**Needs a ruling before it is fixed.** The DuckDB-side stale resolution is
-certain and mechanically explained above. What is *not* verified against the
-emulator is Kusto's ground truth for the colliding case specifically — the
-expected values above rest on Kusto's documented left-to-right evaluation of
-`extend`/`project` assignments. Either way there is **no rule in §4 and no test
-anywhere** about intra-clause forward references, colliding or not. Settle the
-semantics, write the rule, then fix.
+> ### ⚠ Settled against the emulator 2026-08-24 — **this finding is inverted**
+>
+> The ruling this asked for was taken, and it reverses the entry. Kusto's rule
+> is that an assignment sees **only the operator's input columns**, never a name
+> assigned earlier in the same clause. So:
+>
+> | Query | Kusto | Ours | |
+> |---|---|---|---|
+> | `T(Total=100) \| extend Total = Total*2, Ratio = Total/100` | `(200, 1)` | `(200, 1)` | ✔ agree |
+> | `T(a=100,x=10) \| project a = x+1, b = a+1` | `(11, 101)` | `(11, 101)` | ✔ agree |
+> | `T(a=100,x=10) \| distinct a = x+1, b = a+1` | `(11, 101)` | `(11, 101)` | ✔ agree |
+> | `T(k=100,x=10) \| summarize count() by k = x, m = k+1` | `(10, 101)` | `(10, 101)` | ✔ agree |
+> | `T(x=10) \| extend a = x+1, b = a+1` | **SEM0100, refused** | `(11, 12)` | ✘ **diverges** |
+> | `T(x=10) \| project a = x+1, b = a+1` | **SEM0100, refused** | `(11, 12)` | ✘ **diverges** |
+>
+> Every expected value in the table above — `Ratio=2`, `b=12`, `(11,12)`,
+> `m=11` — is wrong; the entry's "control case pinning the mechanism" is in fact
+> the **only** case that diverges, and it diverges the other way. Kusto refuses
+> it (*"Failed to resolve scalar expression named 'a'"*) because `a` is not an
+> input column; DuckDB's lateral alias answers it.
+>
+> **So there is no wrong answer here — this is not S1.** The real defect is
+> **S2-class and inverted**: we *accept* a query a cluster refuses, the same
+> class as `floor(7.9)`. Reclassified below.
+>
+> The mechanism the entry describes is real and correctly explained; only the
+> ground truth it was measured against was assumed rather than taken.
 
-**Fix direction (assuming left-to-right holds):** render sequential assignments
-within one clause as nested stages, or alias each computed column to a unique
-internal name and project it back — do not rely on DuckDB's lateral alias, which
-is exactly the mechanism that fails under collision.
+**Reclassified: S2-6 — an intra-clause forward reference is accepted, and Kusto
+refuses it.** `datatable(x:long)[10] | extend a = x + 1, b = a + 1` answers 12
+here and is SEM0100 on a cluster. Not a wrong answer — a query that will not run
+in production. Needs an R-rule (assignments see the operator's *input* columns
+only) and a refusal when a name is referenced in the same clause that binds it.
+The colliding case needs no change and must keep working; a fix that "repairs"
+it by making assignments sequential would break agreement with Kusto.
 
 ### S1-3 · `contains`/`startswith`/`endswith` mis-match any needle containing a backslash
 
@@ -296,10 +319,28 @@ let T = datatable(x:long)[1,2];
 let T = datatable(x:long)[3,4];
 T | count
 ```
-→ `Parser Error: Duplicate CTE name "T"`. Kusto shadows and answers `2`.
-**Fix:** implement shadowing the way the scalar path already does — keep the
-last binding, drop the earlier one from `tabulars`. `tests/test_let.py` has no
-let-vs-let redeclaration case.
+→ `Parser Error: Duplicate CTE name "T"`.
+
+> ### ⚠ Corrected against the emulator 2026-08-24 — **do not implement the fix as written**
+>
+> Kusto does **not** shadow. It refuses, both forms:
+>
+> ```
+> let T = datatable(x:long)[1,2]; let T = datatable(x:long)[3,4]; T | count
+>   -> SEM0079: Let with the same name was already used in current context: 'T'
+> let v = 1; let v = 2; print x = v
+>   -> SEM0079: ... 'v'
+> ```
+>
+> So the scalar path is the one that is wrong: it silently shadows and answers
+> `2` where a cluster refuses the query. "Implement shadowing the way the scalar
+> path already does" would spread that defect to the tabular path rather than
+> fix it — and the crash it replaced is at least loud.
+>
+> **Fix:** raise on *any* `let` redeclaration, scalar or tabular, naming SEM0079.
+> Two divergences close at once: the tabular crash and the silent scalar shadow.
+
+`tests/test_let.py` has no let-vs-let redeclaration case.
 
 ### S2-3 · An aggregate in a `summarize ... by` key reaches the binder
 
@@ -382,12 +423,27 @@ string vocabulary. **Escalates to S1 if the oracle confirms.**
 
 ```
 print x = substring("abcdefg", 1, int(null))  -> ''      (length silently -> 0)
-print x = substring("abcdefg", long(null))    -> NULL    (start propagates) ✔
+print x = substring("abcdefg", long(null))    -> NULL    (start propagates)
 ```
 
-The internal inconsistency is a hard fact; the correct Kusto answer for a null
-`length` is unverified and untested/undocumented in this repo. R4's
-null-propagation default makes `''` the suspicious one.
+> ### ⚠ Settled against the emulator 2026-08-24 — **the halves are the other way round**
+>
+> R4's null-propagation default made `''` look like the suspicious one. It is
+> the correct one:
+>
+> | Call | Kusto | Ours | |
+> |---|---|---|---|
+> | `substring("abcdefg", 1, int(null))` | `''` | `''` | ✔ agree |
+> | `substring("abcdefg", long(null))` | `'abcdefg'` | `NULL` | ✘ **diverges** |
+> | `substring("abcdefg", int(null), 3)` | `'abc'` | `NULL` | ✘ **diverges** |
+>
+> A null **length** clamps to 0 and yields `''`; a null **start** is treated as
+> 0 and the substring runs from the beginning. Neither propagates. The entry
+> marked the diverging half ✔ and the agreeing half suspicious.
+>
+> **Fix:** `coalesce(<start>, 0)`, same shape as the existing length clamp. The
+> internal inconsistency the entry spotted is real — it is just that both
+> arguments should stop propagating, not that both should.
 
 ### S3-4 · `hasprefix`/`hassuffix` are documented and in the corpus, but unmapped
 
