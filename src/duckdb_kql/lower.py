@@ -201,6 +201,9 @@ def _lower_expr(node: Any) -> ir.Expr:
     if kind == "ListEqualityExpression":
         return _lower_in_list(node)
 
+    if kind == "BetweenEqualityExpression":
+        return _lower_between(node)
+
     if kind == "ParenthesizedExpression":
         inner = _rule_children(node)
         if inner:
@@ -1471,6 +1474,10 @@ def _resolve_in_subqueries(query: ir.Query, tabular_names: set[str]) -> ir.Query
             return dataclasses.replace(node, operand=fix(node.operand))
         if isinstance(node, ir.FunctionCall):
             return dataclasses.replace(node, args=tuple(fix(a) for a in node.args))
+        if isinstance(node, ir.Between):
+            return dataclasses.replace(
+                node, value=fix(node.value), low=fix(node.low), high=fix(node.high)
+            )
         return node
 
     def recurse(inner: ir.Query) -> ir.Query:
@@ -1717,6 +1724,18 @@ def _substitute(node: Any, scalars: Scalars) -> Any:
             value=_substitute(node.value, scalars),
             items=tuple(_substitute(i, scalars) for i in node.items),
         )
+    if isinstance(node, ir.Between):
+        # `let Start = datetime(...); let End = Start + 7d;
+        #  T | where StartTime between (Start .. End)` is corpus KQL too, and
+        # without this the bounds stayed ColumnRefs — DuckDB then reported a
+        # missing column called `Start`, which is the whole bug a walker that
+        # does not descend into a new node produces.
+        return dataclasses.replace(
+            node,
+            value=_substitute(node.value, scalars),
+            low=_substitute(node.low, scalars),
+            high=_substitute(node.high, scalars),
+        )
     if isinstance(node, ir.SortKey):
         return dataclasses.replace(node, expr=_substitute(node.expr, scalars))
     return node
@@ -1930,18 +1949,37 @@ def _lower_in_list(node: Any) -> ir.Expr:
     return ir.InList(value, tuple(items), negated, case_insensitive)
 
 
-def _list_operator_text(node: Any) -> str | None:
-    """The operator token of a ``listEqualityExpression``, as written.
+def _lower_between(node: Any) -> ir.Expr:
+    """Lower ``x between (low .. high)`` / ``x !between (low .. high)``.
 
-    Used only to name the construct in an error. Everything between the value
-    and the opening parenthesis is the operator, so the first bare token that is
-    not punctuation is it.
+    Three operand rules and one operator token; `..` and the brackets are
+    punctuation. The negation is read from the token rather than from the node
+    text, which would also match a `!between` occurring inside a string literal
+    on the left.
+    """
+    rules = _rule_children(node)
+    if len(rules) != 3:
+        raise _unsupported(node, "between")
+    negated = (_list_operator_text(node) or "between").startswith("!")
+    return ir.Between(
+        _lower_expr(rules[0]), _lower_expr(rules[1]), _lower_expr(rules[2]), negated
+    )
+
+
+def _list_operator_text(node: Any) -> str | None:
+    """The operator token of a ``listEqualityExpression`` or a ``between``.
+
+    Everything between the value and the opening parenthesis is the operator, so
+    the first bare token that is not punctuation is it. `in`/`has_any` use it
+    only to name the construct in an error; `between` reads its **negation**
+    from it, so `..` is excluded too rather than relying on the operator token
+    coming first.
     """
     for child in _children(node):
         if type(child).__name__.endswith("Context"):
             continue
         text: str = child.getText().strip()
-        if text and text not in ("(", ")", ","):
+        if text and text not in ("(", ")", ",", ".."):
             return text.lower()
     return None
 
@@ -2371,5 +2409,12 @@ def _qualify_expr(
     if isinstance(expr, ir.FunctionCall):
         return dataclasses.replace(
             expr, args=tuple(_qualify_expr(a, database, scope, clusters) for a in expr.args)
+        )
+    if isinstance(expr, ir.Between):
+        return dataclasses.replace(
+            expr,
+            value=_qualify_expr(expr.value, database, scope, clusters),
+            low=_qualify_expr(expr.low, database, scope, clusters),
+            high=_qualify_expr(expr.high, database, scope, clusters),
         )
     return expr

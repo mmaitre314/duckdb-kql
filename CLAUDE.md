@@ -65,7 +65,7 @@ differ, and every differing line should be one you can explain.
 ## Ratchets that may only go up
 
 - `tests/test_behavior.py::BASELINE_PASSING` — corpus cases matching ground
-  truth. Currently 301.
+  truth. Currently 312.
 - `KNOWN_DIVERGENCES` — an **admission of a bug**, not a waiver. A case listed
   there that starts passing *fails the build*, so the list cannot rot into a
   silent allowlist. It is currently down to one entry.

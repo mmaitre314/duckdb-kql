@@ -23,6 +23,7 @@ that one missing fact.
 | R18 — `mv-expand` of a non-dynamic column | we answer; Kusto refuses (SEM0447) |
 | R14 residue | null-string handling that needs to know a column is a string |
 | `reverse()` of a datetime column | in `KNOWN_DIVERGENCES`: KQL reverses the .NET string form, and we only get it right when the type is statically visible |
+| `between` — a timespan high bound, and unordered operands | `t between (StartCol .. 3d)` is a 3-day window on a cluster and a DuckDB type error here, because nothing says `StartCol` is a datetime; and `s between ('a' .. 'b')` answers where Kusto raises SEM0208, once the operand is a column rather than a literal |
 
 Two of those are **silent wrong answers**, which is the failure mode this
 project exists to prevent. The rest are loud but wrong-shaped: an engine error

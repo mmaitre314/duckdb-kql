@@ -193,8 +193,25 @@ true for every row, while under `has_all` the null simply drops out of
 the conjunction. And `has_all` over an **empty** list is **true** (the
 empty conjunction) where `has_any` over one is false.
 
-Not supported: `between` / `!between`, and the term-prefix forms
-`hasprefix` / `hassuffix`.
+`between` and `!between` are supported. `x between (low .. high)` is
+**inclusive at both ends** and **null whenever any of the three is null**
+— the value or either bound — which is what SQL `BETWEEN` already does, so
+this is one operator where the obvious emission is the measured one. A
+reversed range is simply false, not an error.
+
+The trap is a **timespan high bound**, which is a *duration*:
+`t between (datetime(2020-01-01) .. 3d)` ends at 2020-01-04 inclusive,
+while `d between (2h .. 6h)` over a timespan column is the plain reading.
+The completion is applied only where both bounds are statically typed; a
+bare column carries no type, so anything less falls through to the plain
+reading — where that is the wrong guess the operands are a TIMESTAMP and
+an INTERVAL and DuckDB refuses them, so a missed completion costs an error
+rather than rows from the wrong window.
+
+Kusto takes only *ordered* scalars here — numeric, `datetime`, `timespan`
+and `bool` — and refuses `string`, `dynamic` and `guid` with SEM0208. So
+does this, for a literal operand; a bare string column still answers,
+because nothing here knows it is a string.
 
 ## Aggregate functions
 

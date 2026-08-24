@@ -28,7 +28,7 @@ __all__ = [
     "Node", "Expr", "Operator", "Query",
     # expressions
     "Literal", "ColumnRef", "BinaryOp", "UnaryOp", "FunctionCall", "NamedExpr",
-    "InList", "HasList", "PathAccess", "PathStep", "Parameter",
+    "InList", "HasList", "Between", "PathAccess", "PathStep", "Parameter",
     # sources
     "TableRef", "WildcardTableRef", "DataTable", "PrintSource", "RangeSource",
     # operators
@@ -382,6 +382,23 @@ class InList(Expr):
     #: ``items`` is empty and membership is tested against the query's first
     #: column.
     subquery: Query | None = None
+
+
+@dataclass(frozen=True)
+class Between(Expr):
+    """``x between (low .. high)`` and ``x !between (...)``.
+
+    Its own node rather than a lowered ``x >= low and x <= high`` for two
+    reasons. Desugaring would evaluate *value* twice, which KQL does not; and
+    the **high bound may be a timespan** — ``t between (datetime(2020-01-01) ..
+    3d)`` ends at ``low + 3d``, measured — a decision that needs the static type
+    predicates, which live in the emitter and not here.
+    """
+
+    value: Expr
+    low: Expr
+    high: Expr
+    negated: bool = False
 
 
 @dataclass(frozen=True)

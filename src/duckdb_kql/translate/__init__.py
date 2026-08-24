@@ -253,6 +253,9 @@ def render_expr(node: ir.Expr) -> str:
     if isinstance(node, ir.HasList):
         return render_has_list(node)
 
+    if isinstance(node, ir.Between):
+        return render_between(node)
+
     if isinstance(node, ir.FunctionCall):
         special = _SPECIAL_FORMS.get(node.name.lower())
         if special is not None:
@@ -1150,6 +1153,14 @@ def _nested_aggregate(expr: ir.Expr) -> str | None:
         return _nested_aggregate(expr.left) or _nested_aggregate(expr.right)
     if isinstance(expr, ir.UnaryOp):
         return _nested_aggregate(expr.operand)
+    if isinstance(expr, ir.Between):
+        return next(
+            filter(
+                None,
+                (_nested_aggregate(e) for e in (expr.value, expr.low, expr.high)),
+            ),
+            None,
+        )
     return None
 
 
@@ -1203,6 +1214,12 @@ def _lift_aggregates(expr: ir.Expr, *, depth: int = 0) -> tuple[ir.Expr, int]:
     if isinstance(expr, ir.UnaryOp):
         operand, found = _lift_aggregates(expr.operand, depth=depth)
         return dataclasses.replace(expr, operand=operand), found
+
+    if isinstance(expr, ir.Between):
+        value, a = _lift_aggregates(expr.value, depth=depth)
+        low, b = _lift_aggregates(expr.low, depth=depth)
+        high, c = _lift_aggregates(expr.high, depth=depth)
+        return dataclasses.replace(expr, value=value, low=low, high=high), a + b + c
 
     return expr, 0
 
@@ -1694,6 +1711,80 @@ def _render_in_list(node: ir.InList, value: str) -> str:
         items = [f"lower({i})" for i in items]
     sql = f"({value} IN ({', '.join(items)}))"
     return _in_result(sql, node, value)
+
+
+def render_between(node: ir.Between) -> str:
+    """``x between (low .. high)`` -> SQL ``BETWEEN``.
+
+    Measured against the emulator, on rows rather than folded constants, and
+    DuckDB's `BETWEEN` matches it on every case checked: inclusive at both ends,
+    **null wherever any of the three is null** (the value and each bound), and a
+    reversed range is simply false rather than an error. `!between` is `NOT
+    BETWEEN`, null-propagating in the same way — unlike the `!contains` family,
+    whose null handling had to be pinned separately.
+
+    So this is one place the obvious SQL is the right SQL. It also evaluates the
+    value once, which `x >= low and x <= high` would not.
+    """
+    _refuse_unordered_between(node)
+    value, low = render_expr(node.value), render_expr(node.low)
+    op = "NOT BETWEEN" if node.negated else "BETWEEN"
+    return f"({value} {op} {low} AND {_between_high(node)})"
+
+
+#: Types `between` refuses, measured one by one. It takes the *ordered* scalars
+#: — int, long, real, datetime, timespan, and bool — and rejects the rest with
+#: SEM0208, naming which of its three arguments was wrong.
+_BETWEEN_REFUSED_KINDS = frozenset({"string", "dynamic", "guid"})
+
+
+def _refuse_unordered_between(node: ir.Between) -> None:
+    """Kusto refuses `'a' between ('a' .. 'b')` (SEM0208); so does this.
+
+    SQL would happily answer it — `BETWEEN` orders strings — so without this we
+    return rows where a cluster returns an error, which is a divergence even
+    though it is not a wrong number.
+
+    Only claimed where the IR carries the type. A bare string column still
+    reaches DuckDB and still answers, because nothing here knows it is a string
+    — that residue is `docs/column-types-proposal.md`'s, not something a shape
+    predicate can close, and guessing from shape is how `_is_bool_expr` went
+    wrong. Literals are the case that can be settled, and settling it is what
+    keeps the common mistake from looking supported.
+    """
+    for position, operand in enumerate((node.value, node.low, node.high), start=1):
+        if isinstance(operand, (ir.Literal, ir.Parameter)):
+            if operand.kind in _BETWEEN_REFUSED_KINDS:
+                raise KqlUnsupportedError(
+                    "between",
+                    hint=f"argument #{position} is a {operand.kind}; `between` "
+                    "takes ordered scalars (numeric, datetime, timespan, bool) "
+                    "and Kusto refuses the rest (SEM0208)",
+                )
+
+
+def _between_high(node: ir.Between) -> str:
+    """The high bound, which is a *duration* when it is a timespan.
+
+    Measured: `t between (datetime(2020-01-01) .. 3d)` ends at 2020-01-04
+    inclusive, so a timespan high bound means ``low + high``. It is genuinely
+    conditional on the types and not on the syntax — `d between (2h .. 6h)` over
+    a timespan column is the plain reading (7h is outside it), and Kusto refuses
+    the other mixtures outright: `long .. timespan` is SEM0234, `timespan ..
+    datetime` SEM0232.
+
+    Kusto decides this from its static types. Here the claim is only made when
+    the IR carries it — both bounds statically typed — and a bare column carries
+    nothing, so anything less falls through to the plain reading. That
+    conservatism is safe in the one direction that matters: when the plain
+    reading is the wrong guess, the operands are a TIMESTAMP and an INTERVAL and
+    DuckDB's binder **refuses** them rather than answering. Checked, for each
+    mixture this can produce. So a missed completion costs an error, never a row
+    from the wrong window.
+    """
+    if _is_timespan_expr(node.high) and _is_datetime_expr(node.low):
+        return f"({render_expr(node.low)} + {render_expr(node.high)})"
+    return render_expr(node.high)
 
 
 def render_has_list(node: ir.HasList) -> str:
