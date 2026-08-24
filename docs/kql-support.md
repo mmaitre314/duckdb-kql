@@ -104,7 +104,7 @@ returns an approximate answer.
 
 | Source | Notes |
 |---|---|
-| `cluster()` | Needs a **mapping** saying which local database stands in for each cluster: `clusters={("c", "d"): "local"}`, or `--cluster-map` for the server. Without one it is refused, because reading it as local would answer a question about somewhere else with data from here. Cluster spellings are normalized (scheme, trailing slash, host case) since Kusto resolves the argument to `https://host/`; a short name is **not** expanded to a domain, because the engine does not expand it either. `cluster(...)` without `.database(...)` is refused, as Kusto refuses it (SEM0048). |
+| `cluster()` | Needs a **mapping** saying which local database stands in for each cluster: `clusters={("c", "d"): "local"}`, or `--cluster-map` for the server. Without one it is refused, because reading it as local would answer a question about somewhere else with data from here. Cluster spellings are normalized (scheme, trailing slash, host case) since Kusto resolves the argument to `https://host/`, and a short name matches its `.kusto.windows.net` domain, so one entry covers `cluster("c.eastus")` and `cluster("c.eastus.kusto.windows.net")` alike — mapping the two spellings to *different* databases is refused. An unmapped reference names the entry to add. `cluster(...)` without `.database(...)` is refused, as Kusto refuses it (SEM0048). |
 | `externaldata` | Fetches a URL at query time — out of scope for an offline transpiler. Read the file with DuckDB (`read_csv`, `read_parquet`) and expose it as a view instead. |
 
 ## Statements

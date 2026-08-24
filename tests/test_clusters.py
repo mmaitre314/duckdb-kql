@@ -16,9 +16,10 @@ name, which is the same thing `database=` renders.
 
 Cluster spellings are normalized because Kusto itself resolves the argument to
 `https://<host>/`, which was measured on the emulator: `cluster('mycluster')`,
-`cluster('https://mycluster')` and a trailing slash are one host. The **short
-name is not expanded** to a domain — the emulator does not expand it either, and
-inventing that rule would resolve a name the engine resolves differently.
+`cluster('https://mycluster')` and a trailing slash are one host. A **short name
+and its `.kusto.windows.net` domain are one cluster**, which one entry covers —
+see `test_a_short_name_and_its_domain_are_one_cluster` for what that costs and
+why the completion happens at lookup rather than in the normalizer.
 """
 
 from __future__ import annotations
@@ -141,17 +142,133 @@ def test_one_entry_covers_every_spelling_of_a_host(con, written: str) -> None:
     assert rows == [(2,)]
 
 
-def test_a_short_name_is_not_expanded_to_a_domain(con) -> None:
-    """Measured: the emulator resolves `cluster('mycluster')` to `https://mycluster/`.
+def test_a_short_name_and_its_domain_are_one_cluster(con) -> None:
+    """Trap. This refused, and the refusal was the bug.
 
-    So the short name is a *different host*, not shorthand. Expanding it here
-    would resolve a name differently from the engine we translate for.
+    **The wrong answer.** A map keyed on the full domain and a query written
+    `cluster('mycluster.eastus')` — the spelling the ADX UI and a hand-written
+    query both use — raised `KqlSchemaError`, listing the entry that was, to the
+    reader, plainly the same cluster.
+
+    **What was measured.** The emulator resolves `cluster('help')` to
+    `https://help/` and fails with "Name or service not known" — and that is
+    exactly why it is not the oracle here. A single-node emulator has no cluster
+    federation and no DNS suffix to complete a name with, so what that error
+    shows is its URI builder, not a resolution rule. Microsoft's `cluster()`
+    reference is unambiguous that the argument may be "the name of the cluster
+    without the .kusto.windows.net suffix", and gives `cluster('help')` and
+    `cluster('help.kusto.windows.net')` as the same cluster.
+
+    **Why the obvious fix was wrong.** Completing the name inside
+    `normalize_cluster` — one canonical key, no lookup change — puts a guessed
+    domain into every host the module merely *echoes*: an entity group written
+    `cluster('prod').database('X')` would be reported by `.show entity_groups`
+    as `cluster('prod.kusto.windows.net')`, a domain nobody wrote. And the guess
+    is only right for the public cloud: `.kusto.chinacloudapi.cn` and a custom
+    domain complete differently, so canonicalizing rewrites hosts it has no
+    business rewriting.
+
+    Completing at *lookup* keeps the blast radius at one question. A wrong guess
+    can only fail to find an entry — a refusal, never a query answered from the
+    wrong database — which is the trade the charter asks for.
     """
-    assert normalize_cluster("mycluster") == "mycluster"
-    with pytest.raises(KqlSchemaError):
-        duckdb_kql.kql(
-            con, "cluster('mycluster').database('mydb').table1", clusters=MAP
+    # The normalizer still only normalizes spelling: it does not invent a domain.
+    assert normalize_cluster("mycluster.eastus") == "mycluster.eastus"
+
+    rows = duckdb_kql.kql(
+        con, "cluster('mycluster.eastus').database('mydb').table1 | count", clusters=MAP
+    ).fetchall()
+    assert rows == [(2,)]
+
+
+def test_the_map_may_be_written_short_and_the_query_long(con) -> None:
+    """The other direction: completion is about the pair, not about the map."""
+    rows = duckdb_kql.kql(
+        con,
+        f"cluster('{CLUSTER}').database('mydb').table1 | count",
+        clusters={("mycluster.eastus", "mydb"): "database1"},
+    ).fetchall()
+    assert rows == [(2,)]
+
+
+def test_the_repro_that_prompted_this(con) -> None:
+    """The reported failure, in shape: two clusters, both written short."""
+    rows = duckdb_kql.kql(
+        con,
+        "cluster('mycluster.eastus').database('mydb').table1"
+        "| join kind=leftouter (cluster('othercluster.westus').database('otherdb').table2)"
+        " on AlertId"
+        "| count",
+        clusters={(CLUSTER, "mydb"): "database1", (OTHER, "otherdb"): "database2"},
+    ).fetchall()
+    assert rows == [(2,)]
+
+
+def test_an_address_is_not_completed() -> None:
+    """A host that is already an address gets no second key.
+
+    Not a correctness rule — an extra candidate that matches nothing is
+    harmless — but `localhost.kusto.windows.net` in a suggested map entry reads
+    like a bug, and the suggestion is the whole point of the error message.
+    """
+    from duckdb_kql.clusters import cluster_fqdn
+
+    assert cluster_fqdn("mycluster.eastus") == CLUSTER
+    assert cluster_fqdn("help") == "help.kusto.windows.net"
+    assert cluster_fqdn(CLUSTER) == CLUSTER
+    for already_an_address in (
+        "localhost",
+        "kusto.localhost",
+        "127.0.0.1",
+        "localhost:8080",
+        "mycluster.eastus.kusto.chinacloudapi.cn",
+        "abc.z5.kusto.fabric.microsoft.com",
+    ):
+        assert cluster_fqdn(already_an_address) == already_an_address
+
+
+def test_two_spellings_of_one_cluster_may_not_disagree() -> None:
+    """The one way completion could answer from the wrong database — refused.
+
+    Both keys name the cluster a query calls `mycluster.eastus`, so which local
+    database it read would depend on how it happened to spell the host.
+    """
+    with pytest.raises(KqlSchemaError, match="two spellings"):
+        parse_cluster_map(
+            {("mycluster.eastus", "mydb"): "database1", (CLUSTER, "mydb"): "database2"}
         )
+
+
+def test_the_conflict_check_sees_every_pair_a_lookup_could_confuse() -> None:
+    """The invariant the refusal rests on, checked rather than assumed.
+
+    `_refuse_aliased_conflicts` groups keys by `cluster_fqdn`; a lookup matches
+    by `_spellings`. If those two ever disagreed, a conflicting pair could slip
+    past the check and be resolved two ways — which is the exact failure the
+    check exists to prevent. They are inverses, so they cannot.
+    """
+    from duckdb_kql.clusters import _spellings, cluster_fqdn
+
+    for host in (
+        "mycluster.eastus",
+        CLUSTER,
+        "help",
+        "help.kusto.windows.net",
+        "localhost",
+        "localhost.kusto.windows.net",
+        "127.0.0.1",
+        "mycluster.eastus.kusto.chinacloudapi.cn",
+        "",
+    ):
+        for spelling in _spellings(host):
+            assert cluster_fqdn(spelling) == cluster_fqdn(host), host
+
+
+def test_two_spellings_agreeing_are_allowed() -> None:
+    """Redundant, not contradictory — there is an answer, so it is not refused."""
+    assert parse_cluster_map(
+        {("mycluster.eastus", "mydb"): "database1", (CLUSTER, "mydb"): "database1"}
+    ) == {("mycluster.eastus", "mydb"): "database1", (CLUSTER, "mydb"): "database1"}
 
 
 def test_the_database_name_is_matched_exactly(con) -> None:
@@ -174,15 +291,48 @@ def test_without_a_map_it_is_refused(con) -> None:
     assert "clusters=" in str(caught.value)
 
 
-def test_an_unmapped_cluster_lists_what_is_mapped(con) -> None:
-    """The usual mistake is a spelling, so the error shows the alternatives."""
+def test_an_unmapped_cluster_names_the_entry_to_add(con) -> None:
+    """The error is a copy/paste, not a puzzle.
+
+    "not in the map" leaves the reader to work out *which* of the two halves
+    they got wrong, and to guess the tuple syntax. So the entry that is missing
+    is spelled out as Python, keyed on the fully qualified host — that is the
+    key that names the cluster on its own, and the completion at lookup means it
+    matches the short spelling the query used.
+    """
     with pytest.raises(KqlSchemaError) as caught:
         duckdb_kql.kql(
             con, f"cluster('{OTHER}').database('mydb').table1", clusters=MAP
         )
     message = str(caught.value)
     assert OTHER in message
-    assert f"{CLUSTER}/mydb" in message
+    assert f"add ('{OTHER}', 'mydb')" in message
+    # and it still lists what *is* mapped, in the same pasteable syntax
+    assert f"('{CLUSTER}', 'mydb'): 'database1'" in message
+
+
+def test_the_suggested_entry_is_the_one_that_works(con) -> None:
+    """Whatever the error suggests has to resolve when pasted — including for a
+    query that wrote the short name, which is where the suggested key and the
+    written host differ."""
+    with pytest.raises(KqlSchemaError) as caught:
+        duckdb_kql.kql(
+            con, "cluster('othercluster.westus').database('mydb').table1", clusters=MAP
+        )
+    assert f"add ('{OTHER}', 'mydb')" in str(caught.value)
+    rows = duckdb_kql.kql(
+        con,
+        "cluster('othercluster.westus').database('mydb').table1 | count",
+        clusters={(OTHER, "mydb"): "database1"},
+    ).fetchall()
+    assert rows == [(2,)]
+
+
+def test_with_no_map_at_all_the_entry_is_named_too(con) -> None:
+    """The first error a caller sees is the one that should teach the shape."""
+    with pytest.raises(KqlSchemaError) as caught:
+        duckdb_kql.kql(con, "cluster('mycluster.eastus').database('mydb').table1")
+    assert f"clusters={{('{CLUSTER}', 'mydb')" in str(caught.value)
 
 
 def test_an_unmapped_cluster_reads_nothing(con) -> None:

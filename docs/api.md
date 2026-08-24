@@ -183,8 +183,21 @@ mapping raises at `set_clusters()` rather than at whichever query runs first.
 Omitted, `cluster(...)` is **refused**: reading it as local would answer a
 question about somewhere else with data from here. Spellings are normalized —
 one entry covers `mycluster.example.net`, `https://mycluster.example.net` and a
-trailing slash — but a short name is *not* expanded to a domain, because Kusto
-does not expand it either.
+trailing slash — and a short name matches its domain, so one entry also covers
+both `cluster('mycluster.eastus')` and
+`cluster('mycluster.eastus.kusto.windows.net')`, which Kusto documents as the
+same cluster. The map may be written either way round. What it may *not* do is
+map both spellings to different databases: that is refused where it is written,
+since which local database a query read would then depend on how it spelled the
+host.
+
+An unmapped reference names the entry to add, spelled so it can be pasted:
+
+```
+schema error for 'cluster("mycluster.eastus").database("mydb")' (not in the
+cluster map; add ('mycluster.eastus.kusto.windows.net', 'mydb'):
+"duckdb_database" — mapped: {...})
+```
 
 `database` selects which attached database unqualified table names belong to.
 It is applied by **qualifying the names during translation**, not by switching

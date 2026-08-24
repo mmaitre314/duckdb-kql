@@ -181,10 +181,13 @@ values are the names the databases are attached under, which `.show databases`
 lists.
 
 Cluster spellings are normalized (scheme, trailing slash, host case), so one
-entry covers every way of writing one host. A short name is not expanded to a
-domain: Kusto resolves `cluster('mycluster')` to `https://mycluster/`, a
-different host from `mycluster.eastus.kusto.windows.net`, so both need entries
-if your queries use both.
+entry covers every way of writing one host — and a short name matches its
+domain, so `cluster('mycluster.eastus')` finds the entry above without a second
+one. Mapping both spellings to *different* databases is refused, since a query's
+answer would then depend on how it spelled the host.
+
+An unmapped reference names the entry to add, ready to paste into the JSON's
+flat equivalent.
 
 ## Several databases at once
 

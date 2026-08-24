@@ -26,11 +26,33 @@ written                                          resolved to
 ===============================================  ==========================================
 
 So the scheme and the trailing slash are noise and are normalized away here,
-letting one entry cover every spelling of one host. The **short name is not
-expanded**, because the emulator does not expand it either — `mycluster` is the
-host `mycluster`, not shorthand for `mycluster.kusto.windows.net`. Guessing that
-expansion would invent a resolution rule the engine does not apply; a query that
-uses both spellings needs both entries, which is a mapping the caller can see.
+letting one entry cover every spelling of one host.
+
+**A short name names the same cluster as its domain.** Microsoft's reference for
+`cluster()` says the argument "can be specified as a fully qualified domain
+name, or the name of the cluster without the `.kusto.windows.net` suffix", and
+gives `cluster('help')` and `cluster('help.kusto.windows.net')` as the same
+cluster. A real cluster completes a bare name with its own DNS suffix; the
+emulator has none to complete with, which is why the table above shows it
+resolving `cluster('mycluster')` to `https://mycluster/` and never reaching
+anything. That row is the emulator's URI builder, not a resolution rule — the
+emulator has no cluster federation to resolve *with*, so it is not the oracle
+for this one question and the documented behaviour stands.
+
+The completion is therefore applied **when matching against the map, not when
+normalizing a host**: :func:`resolve` tries the reference as written and then
+its other spelling, so one entry covers both and neither `cluster('c.eastus')`
+nor `cluster('c.eastus.kusto.windows.net')` has to be the one the map was
+written in. Nothing else sees the completed form — `.show entity_groups` still
+echoes the host as its group was written.
+
+That containment is what makes the guess safe. `.kusto.windows.net` is the
+public cloud's suffix, and a sovereign cloud's (`.kusto.chinacloudapi.cn`) or a
+custom domain's is not knowable from the name alone. Because the completion only
+ever *adds a candidate key*, guessing wrong costs a refusal — never a query
+answered from the wrong database. A map whose two keys spell one cluster two
+ways and point at different databases would cost exactly that, so
+:func:`parse_cluster_map` refuses it.
 
 Host comparison is case-insensitive (hostnames are); the **database name is
 compared exactly**, matching this project's identifier rule (R7).
@@ -42,6 +64,7 @@ from .errors import KqlSchemaError
 
 __all__ = [
     "ClusterMap",
+    "cluster_fqdn",
     "normalize_cluster",
     "parse_cluster_map",
     "resolve",
@@ -61,13 +84,20 @@ ClusterMap = dict[tuple[str, str] | str, str | dict[str, str]]
 #: The normalized form: ``(host, database) -> DuckDB database name``.
 Resolved = dict[tuple[str, str], str]
 
+#: The suffix a public-cloud cluster completes a bare name with. Sovereign
+#: clouds use their own; see the module docstring for why guessing this one is
+#: safe anyway.
+KUSTO_SUFFIX = ".kusto.windows.net"
+
 
 def normalize_cluster(cluster: str) -> str:
     """`https://Mycluster.EastUS.kusto.windows.net/` -> `mycluster.eastus.kusto.windows.net`.
 
     Strips the scheme and any trailing slash or path, and lowercases the host,
     so the three spellings Kusto accepts key one entry. Deliberately does *not*
-    expand a short name — see the module docstring.
+    complete a short name to its domain — that is :func:`cluster_fqdn`, applied
+    only where it is matched, so nothing that merely echoes a host shows a
+    domain the caller never wrote.
     """
     text = cluster.strip()
     for scheme in ("https://", "http://"):
@@ -78,6 +108,59 @@ def normalize_cluster(cluster: str) -> str:
     # not part of the identity.
     text = text.split("/", 1)[0]
     return text.rstrip(".").lower()
+
+
+def _is_bare_cluster_name(host: str) -> bool:
+    """Would a cluster complete *host* with its DNS suffix?
+
+    True for a name that is only a name — `help`, `cluster1.eastus`. The
+    exclusions are the spellings that are already an address and so cannot be
+    completed: a host inside a Kusto service domain, an explicit port, an IPv4
+    or IPv6 literal, and `localhost`. Each excluded case would otherwise be
+    offered a nonsense second key like `localhost.kusto.windows.net`, which
+    costs nothing at lookup but reads like a bug in an error message.
+    """
+    if not host or ":" in host:
+        return False
+    labels = host.split(".")
+    if labels[-1] == "localhost":
+        return False
+    if all(label.isdigit() for label in labels):
+        return False
+    return "kusto" not in labels
+
+
+def cluster_fqdn(host: str) -> str:
+    """The fully qualified name for a normalized *host*.
+
+    `cluster1.eastus` -> `cluster1.eastus.kusto.windows.net`; anything already
+    qualified is returned unchanged. This is the form error messages suggest as
+    a map key, because it is the one that identifies the cluster on its own.
+    """
+    return host + KUSTO_SUFFIX if _is_bare_cluster_name(host) else host
+
+
+def _spellings(host: str) -> tuple[str, ...]:
+    """Every key a normalized *host* may be mapped under, as-written first.
+
+    Two at most, and they are the two the reference documents as naming one
+    cluster: the short name and the `.kusto.windows.net` domain. As-written
+    first so an exact entry always wins over a completed one.
+
+    Stripping the suffix is gated on :func:`cluster_fqdn` putting it back, so
+    the two are exact inverses and this returns precisely the hosts sharing one
+    `cluster_fqdn`. That is what lets :func:`_refuse_aliased_conflicts` group by
+    `cluster_fqdn` and be sure it sees every pair a lookup could confuse:
+    `localhost.kusto.windows.net` does *not* offer `localhost`, because
+    `localhost` is an address that is never completed back.
+    """
+    if _is_bare_cluster_name(host):
+        return (host, host + KUSTO_SUFFIX)
+    if host.endswith(KUSTO_SUFFIX):
+        short = host[: -len(KUSTO_SUFFIX)]
+        if cluster_fqdn(short) == host:
+            return (host, short)
+    return (host,)
 
 
 def parse_cluster_map(clusters: ClusterMap | None) -> Resolved | None:
@@ -118,31 +201,68 @@ def parse_cluster_map(clusters: ClusterMap | None) -> Resolved | None:
                     f"{key}.{database}", hint="database and target must both be strings"
                 )
             out[(host, database)] = name
+    _refuse_aliased_conflicts(out)
     return out
+
+
+def _refuse_aliased_conflicts(out: Resolved) -> None:
+    """Refuse a map that spells one cluster two ways and means two databases.
+
+    `{("help", "S"): "a", ("help.kusto.windows.net", "S"): "b"}` is the one way
+    the short-name completion can produce a *wrong* answer rather than a
+    refusal: both keys name the cluster the reference calls `help`, so which
+    local database a query reads would depend on how the query happened to spell
+    it. Two spellings agreeing on one target are fine and stay allowed — it is
+    the disagreement that is unanswerable.
+    """
+    by_cluster: dict[tuple[str, str], dict[str, str]] = {}
+    for (host, database), target in out.items():
+        by_cluster.setdefault((cluster_fqdn(host), database), {})[host] = target
+    for (host, database), spellings in sorted(by_cluster.items()):
+        if len(set(spellings.values())) > 1:
+            listed = ", ".join(
+                f"({written!r}, {database!r}): {target!r}"
+                for written, target in sorted(spellings.items())
+            )
+            raise KqlSchemaError(
+                f"({host!r}, {database!r})",
+                hint=f"two spellings of one cluster map to different databases "
+                f"— {listed}; a short name and its .kusto.windows.net domain "
+                f"are the same cluster, so this has no answer",
+            )
 
 
 def resolve(cluster: str, database: str, clusters: Resolved | None) -> str:
     """The DuckDB database for *cluster*/*database*, or raise saying why not.
 
-    The error names the reference as written and lists what *is* mapped, because
-    the usual mistake is a spelling — one query saying `mycluster` and another
-    the full domain — and a bare "not found" leaves the reader to guess which.
+    A reference matches its host as written first, then the other spelling of
+    the same cluster (`c.eastus` <-> `c.eastus.kusto.windows.net`), so one entry
+    covers both — see the module docstring.
+
+    Both errors name **the entry that is missing**, spelled as Python so it can
+    be pasted into the map, because "not in the map" leaves the reader to work
+    out which of the two things they got wrong.
     """
     host = normalize_cluster(cluster)
+    entry = f"({cluster_fqdn(host)!r}, {database!r})"
     if clusters is None:
         raise KqlSchemaError(
             f'cluster("{cluster}").database("{database}")',
-            hint="there is no cluster here; pass clusters={(cluster, database): "
+            hint=f"there is no cluster here; pass clusters={{{entry}: "
             '"duckdb_database"} to say which local database stands in for it',
         )
-    target = clusters.get((host, database))
-    if target is None:
-        known = sorted(f"{c}/{d}" for c, d in clusters)
-        raise KqlSchemaError(
-            f'cluster("{cluster}").database("{database}")',
-            hint=f"not in the cluster map; mapped: {known}",
-        )
-    return target
+    for candidate in _spellings(host):
+        target = clusters.get((candidate, database))
+        if target is not None:
+            return target
+    known = ", ".join(
+        f"({c!r}, {d!r}): {t!r}" for (c, d), t in sorted(clusters.items())
+    )
+    raise KqlSchemaError(
+        f'cluster("{cluster}").database("{database}")',
+        hint=f"not in the cluster map; add {entry}: \"duckdb_database\" — "
+        + (f"mapped: {{{known}}}" if known else "the map is empty"),
+    )
 
 
 # ---------------------------------------------------------------------------

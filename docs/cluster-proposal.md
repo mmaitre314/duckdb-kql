@@ -50,6 +50,19 @@ expanding `mycluster` to `mycluster.kusto.windows.net` would be inventing a
 resolution rule the engine does not apply. Better to let the caller map both
 spellings if their queries use both.
 
+> **Superseded (2026-08-24).** The second half of that paragraph was wrong, and
+> the hedge above it — "at least not in the emulator" — is where the mistake
+> was. Microsoft's `cluster()` reference states the argument may be "the name of
+> the cluster without the `.kusto.windows.net` suffix" and gives
+> `cluster('help')` and `cluster('help.kusto.windows.net')` as one cluster. The
+> emulator resolves `cluster('help')` to `https://help/` because a single-node
+> emulator has no DNS suffix to complete a name with, not because completion is
+> not the rule; that row is its URI builder, and on this one question it is not
+> the oracle. A short name now matches its domain **at lookup**, so one entry
+> covers both — see the module docstring of `duckdb_kql.clusters` for why the
+> completion is kept out of the normalizer, and
+> `tests/test_clusters.py::test_a_short_name_and_its_domain_are_one_cluster`.
+
 **3. An unreachable cluster fails loudly** — `Error getting schema for
 Cluster='https://.../': Name or service not known` — not as an empty result. So
 refusing an unmapped cluster is the behaviour-preserving choice, not a
