@@ -1356,7 +1356,18 @@ def lower(kql: str, entity_groups: ResolvedGroups | None = None) -> ir.Query:
                 label, hint="statements other than a single query are Wave 1+"
             )
 
-    statements = _find_all(tree, "QueryStatement")
+    # Only the statements at the **top level** count. Searching the tree for
+    # `QueryStatement` is not the same question: a `macro-expand` body is itself
+    # a `Statement > QueryStatement`, so `let T = macro-expand G as X (X.T); T`
+    # has two of them and was refused as multi-statement. `_find_all` returns
+    # the shallowest matches and does not descend into one, so asking it for
+    # `Statement` stops at the top level and a nested body stays invisible.
+    statements = [
+        child
+        for statement in _find_all(tree, "Statement")
+        for child in _rule_children(statement)
+        if _cls(child) == "QueryStatement"
+    ]
     if not statements:
         raise KqlUnsupportedError("statement", hint="no query statement found")
     if len(statements) > 1:
@@ -1370,11 +1381,15 @@ def lower(kql: str, entity_groups: ResolvedGroups | None = None) -> ir.Query:
     seed: Scalars = {
         d.name: ir.Parameter(d.name, d.type, d.slot) for d in declarations
     }
-    scalars, tabulars = _lower_lets(tree, seed)
+    # Groups are collected before the bindings, and the context wraps them, because
+    # a `let` may itself be bound to a `macro-expand` — which resolves its group
+    # through this context. Lowering the bindings outside it reported every group
+    # as unmapped, however well mapped it was.
     groups = dict(_lower_let_entity_groups(tree))
 
     pipe = _collapse(statements[0])
     with _macro_context(groups, entity_groups):
+        scalars, tabulars = _lower_lets(tree, seed)
         if _cls(pipe) != "PipeExpression":
             # A source with no pipeline at all, e.g. `print 1` or `datatable()`.
             query = _lower_head(pipe, [])
@@ -1583,9 +1598,13 @@ def _parameter_default(node: Any, kind: str) -> Any:
 #: Node kinds that make a `let` value tabular rather than scalar.
 _TABULAR_VALUE = {
     "PipeExpression", "DataTableExpression", "RangeExpression", "PrintOperator",
-    # `union` is the one operator that can also *start* a query, so a `let`
-    # bound to one is tabular even though nothing pipes into it.
+    # The two operators that can also *start* a query, so a `let` bound to one is
+    # tabular even though nothing pipes into it. `union` was here alone, and the
+    # comment claiming it was the only one is how `macro-expand` came to be read
+    # as a scalar: `let T = macro-expand G as X (X.T)` failed on the operator
+    # rather than binding a table.
     "UnionOperator",
+    "MacroExpandOperator",
 }
 
 

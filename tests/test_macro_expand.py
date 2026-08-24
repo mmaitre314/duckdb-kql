@@ -154,6 +154,99 @@ def test_a_nested_macro_expand_is_refused(con) -> None:
 
 
 # ---------------------------------------------------------------------------
+# R16c2 — a `let` may bind a macro-expand
+# ---------------------------------------------------------------------------
+
+
+def test_a_let_can_bind_a_macro_expand(con) -> None:
+    """Trap. Reported as "multi-statement", and that was the third of three bugs.
+
+    **What was measured.** On the emulator, against a real entity group::
+
+        let MyTable2 = macro-expand MyEntityGroup as X ( X.MyTable );
+        MyTable2
+
+    returns the body's rows, exactly as the bare `macro-expand` does. It is
+    ordinary KQL. Here it raised `KqlUnsupportedError: 'multi-statement'`.
+
+    **Three bugs, stacked, each hidden by the one in front of it.**
+
+    1. `lower()` counted query statements with `_find_all(tree,
+       "QueryStatement")`. A `macro-expand` body is itself a `Statement >
+       QueryStatement`, and `_find_all` returns the *shallowest* matches — so a
+       bare `macro-expand` stopped at the top-level statement and counted 1,
+       while the same operator under a `let` was no longer shielded by an
+       enclosing QueryStatement and its body counted as a second statement.
+       The refusal named `multi-statement`, which is why this reads as a parser
+       limitation and not as a `macro-expand` bug.
+
+    2. `_lower_lets` ran *before* `_macro_context` was established, so a
+       macro-expand inside a binding resolved its group against no context at
+       all and reported every group as unmapped.
+
+    3. `_TABULAR_VALUE` held `UnionOperator` under a comment calling `union`
+       "the one operator that can also start a query". `macro-expand` starts one
+       too, so the binding was classified as a **scalar** and lowered through
+       `_lower_expr`, which refused the operator.
+
+    **Why fixing one was not enough.** Each fix only exposed the next, and the
+    error text moved from "multi-statement" to "unknown entity group" to
+    "expression:MacroExpandOperator" — three unrelated-looking messages for one
+    unsupported shape. A fix validated on the first error alone would have
+    shipped a query that still did not run.
+    """
+    assert _rows(
+        con, f"let T = macro-expand {EG} as s (s.MT); T"
+    ) == [(1, "a"), (2, "b"), (7, "z")]
+
+
+def test_the_binding_may_shadow_the_table_it_expands(con) -> None:
+    """The reported query's exact shape: the `let` name is the body's table name.
+
+    Measured on the emulator, which answers it rather than recursing: `s.MT`
+    inside the body is the *entity's* table, so the binding does not capture its
+    own reference. Worth pinning — the emitted CTE is named `MT` and reads from
+    `d1.MT`/`d2.MT`, and an unqualified emission here would silently self-join.
+    """
+    assert _rows(
+        con, f"let MT = macro-expand {EG} as s (s.MT); MT"
+    ) == [(1, "a"), (2, "b"), (7, "z")]
+
+
+def test_a_bound_macro_expand_is_still_one_statement(con) -> None:
+    """The guard has to keep refusing what it was written for.
+
+    Counting only *top-level* query statements is a narrower question than
+    "how many QueryStatement nodes are there", not a weaker one.
+    """
+    with pytest.raises(KqlUnsupportedError, match="multi-statement"):
+        duckdb_kql.kql(con, f"let T = macro-expand {EG} as s (s.MT); T; T")
+    with pytest.raises(KqlUnsupportedError, match="multi-statement"):
+        duckdb_kql.kql(con, "d1.MT; d2.MT")
+
+
+def test_a_bound_macro_expand_matches_the_unbound_one(con) -> None:
+    """The binding is a name, not a second code path — same rows, same columns."""
+    bound = f"let T = macro-expand {EG} as s (s.Diff); T"
+    bare = f"macro-expand {EG} as s (s.Diff)"
+    assert _rows(con, bound) == _rows(con, bare)
+    assert _cols(con, bound) == _cols(con, bare)
+
+
+def test_a_named_group_resolves_from_inside_a_binding(con) -> None:
+    """Bug 2 on its own: the mapping has to reach a group named in a binding."""
+    assert _rows(
+        con, "let T = macro-expand EG as s (s.MT); T", entity_groups=GROUPS
+    ) == [(1, "a"), (2, "b"), (7, "z")]
+
+
+def test_an_unmapped_group_in_a_binding_still_refuses(con) -> None:
+    """And when it is genuinely unmapped, the error says so — not "multi-statement"."""
+    with pytest.raises(KqlSchemaError, match="entity group"):
+        duckdb_kql.kql(con, "let T = macro-expand Nope as s (s.MT); T")
+
+
+# ---------------------------------------------------------------------------
 # R16d — the three ways to name a group
 # ---------------------------------------------------------------------------
 

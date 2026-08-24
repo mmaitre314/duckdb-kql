@@ -647,6 +647,15 @@ question about several databases with none. Entries are KQL entity references as
 text, so a `cluster(...)` entity resolves through the existing `clusters=` map
 and the two features compose.
 
+**It can start a query, so a `let` can bind it.** `let T = macro-expand G as s
+(s.MT); T` is ordinary KQL — measured on the emulator, it answers exactly as the
+bare operator does, the binding's name may even shadow the table the body reads,
+and `s.MT` still resolves to the *entity's* table rather than to the binding.
+`union` is the only other operator that starts a query this way, and treating it
+as the only one is what broke this: see
+`tests/test_macro_expand.py::test_a_let_can_bind_a_macro_expand`, which records
+the three stacked bugs one query hit.
+
 Refused, each because Kusto refuses it: a duplicate entity (SEM0614), a nested
 `macro-expand` (SEM0611), a bare scope used as a table (SEM0608), and an empty
 group.
