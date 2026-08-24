@@ -118,6 +118,12 @@ and TRANSLATION.md §4, and reports in the format above.
 
 - [`review-2026-08-04.md`](review-2026-08-04.md) — the first full pass of this
   framework over the whole repo (at `728fb55`): 1 S1, 3 S2, 4 S3, 1 S4.
+- [`review-2026-08-24-adversarial.md`](review-2026-08-24-adversarial.md) — five
+  adversarial reviewers over the whole mapping surface (at `d7be6ff`):
+  5 S1, 5 S2, 5 S3, 2 S4/Nit. Unlike the pass above it found a *systemic*
+  weakness — name resolution modelled as exact-match Python string comparison,
+  which is not what DuckDB does with the SQL we emit. Kept as an open worklist,
+  not a snapshot.
 
 Boundaries overlap on purpose at one seam: **identifier/literal quoting** is a
 translation concern (is it *correct*?) and a security concern (is it *safe*?).
