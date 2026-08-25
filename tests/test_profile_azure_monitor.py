@@ -143,6 +143,88 @@ def test_the_two_counts_describe_one_profile(results) -> None:
     )
 
 
+#: The prose write-up. Nothing checked it until `parse` was implemented and the
+#: page went on naming it as the most valuable next step for three days.
+GAP_ANALYSIS = Path("docs/azure-monitor-profile.md")
+
+#: Profile category -> the row label the write-up gives it. Two names for one
+#: thing, which is the arrangement that rots; this is where they are tied.
+_GROUP_ROWS = {
+    "tabular_operators": "Tabular operators",
+    "string_operators": "String operators",
+    "scalar_functions.bitwise": "Bitwise functions",
+    "scalar_functions.conversion": "Conversion functions",
+    "scalar_functions.datetime": "Datetime/timespan functions",
+    "scalar_functions.dynamic": "Dynamic & array functions",
+    "scalar_functions.math": "Mathematical functions",
+    "scalar_functions.conditional": "Conditional functions",
+    "scalar_functions.string": "String functions",
+    "scalar_functions.type": "Type functions",
+    "scalar_functions.transformation_only": "Transformation-only functions",
+}
+
+
+def test_the_gap_analysis_states_the_measured_totals(results) -> None:
+    """The write-up's headline numbers, against what the probes actually do."""
+    import re
+
+    text = GAP_ANALYSIS.read_text(encoding="utf-8")
+    flat = _flat(results)
+    supported = sum(1 for e in flat if e["supported"])
+
+    probes = re.search(r"^\| Probes \| (\d+) \|$", text, re.MULTILINE)
+    assert probes and int(probes.group(1)) == len(flat), (
+        f"{GAP_ANALYSIS} states {probes and probes.group(1)} probes; there are {len(flat)}"
+    )
+
+    passing = re.search(r"^\| \*\*Passing\*\* \| \*\*(\d+) \((\d+)%\)\*\* \|$", text, re.MULTILINE)
+    assert passing, f"{GAP_ANALYSIS} no longer states a passing count"
+    assert int(passing.group(1)) == supported, (
+        f"{GAP_ANALYSIS} says {passing.group(1)} passing; measured {supported}"
+    )
+    assert int(passing.group(2)) == 100 * supported // len(flat), (
+        f"{GAP_ANALYSIS}'s percentage does not match its own count"
+    )
+
+
+def test_the_gap_analysis_lists_the_same_gaps(results) -> None:
+    """Its table and `KNOWN_GAPS` are one list written twice.
+
+    `parse` outlived its gap here by three days *and* was still headlined "most
+    valuable next step" — the page is the one a reader meets first, so a stale
+    entry there is worse than a stale constant.
+    """
+    import re
+
+    text = GAP_ANALYSIS.read_text(encoding="utf-8")
+    listed = set(re.findall(r"^\| `([a-z_0-9]+)`(?: operator)? \| ", text, re.MULTILINE))
+    assert listed == set(KNOWN_GAPS), (
+        f"{GAP_ANALYSIS} lists {sorted(listed)}; KNOWN_GAPS has {sorted(KNOWN_GAPS)}"
+    )
+
+    heading = re.search(r"^## The (\w+) gaps$", text, re.MULTILINE)
+    words = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five", 6: "six"}
+    assert heading and heading.group(1) == words[len(KNOWN_GAPS)], (
+        f"{GAP_ANALYSIS} is headed 'The {heading and heading.group(1)} gaps'; "
+        f"there are {len(KNOWN_GAPS)}"
+    )
+
+
+def test_the_gap_analysis_coverage_table_is_current(results) -> None:
+    """The per-group table — the row that rotted silently was `7/9`."""
+    import re
+
+    text = GAP_ANALYSIS.read_text(encoding="utf-8")
+    for category, label in _GROUP_ROWS.items():
+        entries = results[category]
+        expected = f"{sum(1 for e in entries if e['supported'])}/{len(entries)}"
+        row = re.search(rf"^\| {re.escape(label)} \| (\S+) \|$", text, re.MULTILINE)
+        assert row, f"{GAP_ANALYSIS} has no coverage row for {label!r}"
+        assert row.group(1) == expected, (
+            f"{GAP_ANALYSIS} says {label} is {row.group(1)}; measured {expected}"
+        )
+
+
 def test_every_gap_has_a_reason() -> None:
     for name, reason in KNOWN_GAPS.items():
         assert len(reason) > 30, f"{name} needs a real explanation, not a placeholder"

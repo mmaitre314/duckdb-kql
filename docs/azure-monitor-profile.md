@@ -22,7 +22,7 @@ support those anyway — the profile is a floor to clear, not a ceiling.
 | Doc dated | 2026-05-15 |
 | Captured | 2026-08-03 |
 | Probes | 119 |
-| **Passing** | **114 (96%)** |
+| **Passing** | **115 (96%)** |
 
 ## How it is measured
 
@@ -42,7 +42,7 @@ added since this snapshot). Neither can hide inside a percentage.
 
 | Group | Passing |
 |---|---|
-| Tabular operators | 7/9 |
+| Tabular operators | 8/9 |
 | String operators | 23/23 |
 | Bitwise functions | 6/6 |
 | Conversion functions | 9/9 |
@@ -54,24 +54,23 @@ added since this snapshot). Neither can hide inside a percentage.
 | Type functions | 3/3 |
 | Transformation-only functions | 0/2 |
 
-## The five gaps
+## The four gaps
 
 | Gap | Why it is open |
 |---|---|
-| `parse` operator | Needs a pattern-to-regex compiler. Worth doing — it is also ~27 corpus cases — but it is a feature, not a mapping. **Most valuable next step.** |
 | `columnifexists` | Needs the input schema at translation time to decide whether the column exists. The plumbing exists (`join` uses it); this just is not wired through. |
-| `parse_xml` | DuckDB has no XML parser. Would need a Python UDF, like `xxhash64`. |
+| `parse_xml` | DuckDB has no XML parser: no `xml()` and no XML extension in the pinned build. The odd one out — the emulator implements it, so this is the only one of the four with ground truth available, and the only one both implementable and verifiable. §7 permits a Python UDF for exactly this case, but nothing in the tree registers one yet. |
 | `parse_cef_dictionary` | Azure Monitor only — not KQL proper, so the emulator cannot supply ground truth for it either. |
 | `geo_location` | Azure Monitor only, **and it calls an external IP geolocation service**. Out of scope for an offline transpiler by construction. |
 
-Two of the five are not really ours to close: `parse_cef_dictionary` and
+Two of the four are not really ours to close: `parse_cef_dictionary` and
 `geo_location` exist only inside Azure Monitor, and the second one is a network
 call. A realistic ceiling for this profile is **117/119**.
 
 ## What building it found
 
 Every mapping added here was verified against the Kusto Emulator rather than
-inferred from the docs. That caught six things:
+inferred from the docs. That caught eight things:
 
 - **`now()` and `ago()` were broken.** DuckDB's `now()` returns `TIMESTAMPTZ`,
   and rendering that needs a module which is not always present. KQL's `now()`

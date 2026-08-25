@@ -212,8 +212,17 @@ def test_readme_counts_match_the_generated_support_matrix() -> None:
     )
 
 
-def test_readme_coverage_number_is_not_ahead_of_the_baseline() -> None:
-    """The README quotes a corpus number; it must not overstate the tested one."""
+def test_readme_coverage_number_matches_the_baseline() -> None:
+    """The README quotes a corpus number; it must be *the* tested one.
+
+    This asked only that the README not **overstate** the baseline, which let it
+    understate one indefinitely — and it did, sitting at 285 while the baseline
+    climbed to 312. Understating is not the safe direction it looks like: it is
+    still a wrong number in the first table a reader sees, and the one-sided
+    check is why nobody noticed for five commits. Equality is what the sibling
+    test above already requires of the matrix counts, on the reasoning in its
+    docstring: two numbers in two files is one number too many.
+    """
     baseline = re.search(
         r"^BASELINE_PASSING = (\d+)$",
         _read(Path("tests/test_behavior.py")),
@@ -223,8 +232,9 @@ def test_readme_coverage_number_is_not_ahead_of_the_baseline() -> None:
 
     claimed = re.search(r"\*\*(\d+)\*\* of 1036", _read(README))
     assert claimed, "README no longer states a corpus coverage number"
-    assert int(claimed.group(1)) <= int(baseline.group(1)), (
-        "README claims more passing corpus cases than the test baseline enforces"
+    assert int(claimed.group(1)) == int(baseline.group(1)), (
+        f"README says {claimed.group(1)} passing corpus cases, the baseline "
+        f"enforces {baseline.group(1)} — update the README table"
     )
 
 
