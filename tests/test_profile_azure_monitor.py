@@ -28,7 +28,12 @@ PROFILE = Path("tests/profiles/azure-monitor.json")
 pytestmark = pytest.mark.skipif(not PROFILE.is_file(), reason=f"no profile at {PROFILE}")
 
 #: Probes that must pass. May only go UP.
-BASELINE_SUPPORTED = 114
+#:
+#: Kept honest by `test_the_two_counts_describe_one_profile`: this and
+#: :data:`KNOWN_GAPS` are two views of the same 119 probes, and they drifted —
+#: `parse` was implemented, removed from the gap list, and this was left at 114
+#: for three days, in a commit whose own message read "Azure Monitor 114 -> 115".
+BASELINE_SUPPORTED = 115
 
 #: Every known gap, with why it is still open. Checked exactly — an entry that
 #: starts passing fails the build (remove it), and an unlisted failure fails the
@@ -40,7 +45,13 @@ KNOWN_GAPS = {
         "has not been wired through."
     ),
     "parse_xml": (
-        "DuckDB has no XML parser. Would need a Python UDF, like xxhash64."
+        "DuckDB has no XML parser: no `xml()` and no XML extension in the "
+        "pinned build, checked rather than assumed. The odd one out here — the "
+        "emulator implements it (`parse_xml('<a>1</a>')` answers `{'a': 1}`), so "
+        "unlike parse_cef_dictionary and geo_location this one has ground truth "
+        "and is the only gap of the four that is both implementable and "
+        "verifiable. §7 permits a Python UDF for exactly this case, but nothing "
+        "in the tree registers one yet, so it is scaffolding plus a mapping."
     ),
     "parse_cef_dictionary": (
         "Azure Monitor only — not part of KQL proper, so the emulator cannot "
@@ -110,6 +121,25 @@ def test_gaps_are_exactly_the_known_ones(results) -> None:
     }
     assert not unexpected, (
         f"{len(unexpected)} probes fail that are not recorded as known gaps: {detail}"
+    )
+
+
+def test_the_two_counts_describe_one_profile(results) -> None:
+    """`BASELINE_SUPPORTED` and `KNOWN_GAPS` are two views of the same probes.
+
+    Every probe either passes or is a known gap — `test_gaps_are_exactly_the_
+    known_ones` enforces that in both directions — so the two must add up to the
+    profile's size. They are maintained by hand and separately, which is how
+    they came apart: closing the `parse` gap updated one and not the other,
+    leaving the ratchet a probe behind and able to absorb a regression silently.
+
+    Deriving the baseline would remove the redundancy, but the redundancy is
+    what makes a bad edit visible; checking it costs one assertion.
+    """
+    total = len(_flat(results))
+    assert BASELINE_SUPPORTED + len(KNOWN_GAPS) == total, (
+        f"BASELINE_SUPPORTED ({BASELINE_SUPPORTED}) + {len(KNOWN_GAPS)} known "
+        f"gaps != {total} probes — one of the two was not updated"
     )
 
 
