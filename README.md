@@ -222,6 +222,12 @@ tools/regen_parser.sh        # regenerate the parser (maintainers; needs Java)
 The acceptance suite compares against the Kusto Emulator, which runs in Docker;
 see [`docs/oracle-harness.md`](https://github.com/mmaitre314/duckdb-kql/blob/main/docs/oracle-harness.md).
 
+## Alternatives
+
+Some other ways to run KQL queries locally:
+- Using Docker, [Azure Data Explorer Kusto emulator](https://learn.microsoft.com/en-us/azure/data-explorer/kusto-emulator-install)
+- In C#, [kusto-loco](https://github.com/NeilMacMullen/kusto-loco) / [BabyKusto](https://github.com/davidnx/baby-kusto-csharp)
+
 ## License
 
 MIT. See [`LICENSE`](https://github.com/mmaitre314/duckdb-kql/blob/main/LICENSE), [`THIRD-PARTY-NOTICES.md`](https://github.com/mmaitre314/duckdb-kql/blob/main/THIRD-PARTY-NOTICES.md), and [`licenses/`](https://github.com/mmaitre314/duckdb-kql/tree/main/licenses).
