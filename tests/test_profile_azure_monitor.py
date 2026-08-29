@@ -225,6 +225,34 @@ def test_the_gap_analysis_coverage_table_is_current(results) -> None:
         )
 
 
+def test_the_readme_states_the_measured_coverage(results) -> None:
+    """The README quotes this profile too, and nothing checked that either.
+
+    The gap-analysis page and the README are two more copies of one measured
+    number. `docs/azure-monitor-profile.md` was bound to reality in 0d78597 and
+    this line was left unbound in the same pass — which is how the previous one
+    got missed as well.
+    """
+    import re
+
+    flat = _flat(results)
+    supported = sum(1 for e in flat if e["supported"])
+    readme = Path("README.md").read_text(encoding="utf-8")
+
+    claimed = re.search(
+        r"Azure Monitor's published KQL subset[^|]*\| \*\*(\d+) / (\d+) \((\d+)%\)\*\*",
+        readme,
+    )
+    assert claimed, "README no longer states an Azure Monitor coverage figure"
+    assert (int(claimed.group(1)), int(claimed.group(2))) == (supported, len(flat)), (
+        f"README says {claimed.group(1)}/{claimed.group(2)} Azure Monitor probes; "
+        f"measured {supported}/{len(flat)}"
+    )
+    assert int(claimed.group(3)) == 100 * supported // len(flat), (
+        "README's Azure Monitor percentage does not match its own count"
+    )
+
+
 def test_every_gap_has_a_reason() -> None:
     for name, reason in KNOWN_GAPS.items():
         assert len(reason) > 30, f"{name} needs a real explanation, not a placeholder"

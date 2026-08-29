@@ -202,14 +202,38 @@ def test_readme_counts_match_the_generated_support_matrix() -> None:
         f"{operators.groups()}"
     )
 
+    # All THREE numbers in that cell, not just the first. Checking only the
+    # scalar count let the binary-operator one sit at 33 after hasprefix and
+    # hassuffix took the registry to 41 — the same commit whose stale "not
+    # supported" line in the matrix generator was corrected in 04947b8.
     claimed_scalars = re.search(
-        r"\| Scalar functions / aggregates / binary operators \| \*\*(\d+) /", readme
+        r"\| Scalar functions / aggregates / binary operators \| "
+        r"\*\*(\d+) / (\d+) / (\d+)\*\* \|",
+        readme,
     )
-    assert claimed_scalars, "README no longer states a scalar-function count"
-    assert claimed_scalars.group(1) == scalars.group(1), (
-        f"README says {claimed_scalars.group(1)} scalar functions, the matrix says "
-        f"{scalars.group(1)}"
-    )
+    assert claimed_scalars, "README no longer states the scalar/aggregate/operator counts"
+
+    # `N supported.` appears under more than one heading, so each is read from
+    # its own section rather than by first match.
+    def _section_count(heading: str) -> str:
+        body = matrix.split(f"## {heading}", 1)
+        assert len(body) == 2, f"the support matrix has no '{heading}' section"
+        found = re.search(r"^(\d+) supported\.$", body[1], re.MULTILINE)
+        assert found, f"the matrix's {heading!r} section no longer states a count"
+        return found.group(1)
+
+    for claimed, expected, label in (
+        (claimed_scalars.group(1), scalars.group(1), "scalar functions"),
+        (claimed_scalars.group(2), _section_count("Aggregate functions"), "aggregates"),
+        (
+            claimed_scalars.group(3),
+            _section_count("Binary and string operators"),
+            "binary operators",
+        ),
+    ):
+        assert claimed == expected, (
+            f"README says {claimed} {label}, the matrix says {expected}"
+        )
 
 
 def test_readme_coverage_number_matches_the_baseline() -> None:
