@@ -160,6 +160,8 @@ SCALAR_FUNCTIONS: dict[str, FunctionSpec] = {
            "regexp_extract({2}, {0}, CAST({1} AS INTEGER))", (3, 4), ("R11",)),
         _f("extract_all", "template", "", (2, 3), ("R11",), "special"),
         _f("parse_ipv4", "template", "", (1,), ("R1",), "special"),
+        _f("parse_url", "template", "", (1,), ("R9",), "special"),
+        _f("parse_ipv6", "template", "", (1,), ("R1",), "special"),
         _f("countof", "template", "", (2, 3), ("R11",), "variadic:countof"),
         _f("base64_encode_tostring", "template", "to_base64(CAST({0} AS BLOB))", (1,)),
         _f("base64_encodestring", "template", "to_base64(CAST({0} AS BLOB))", (1,),

@@ -3946,6 +3946,190 @@ def _render_parse_ipv4(node: ir.FunctionCall) -> str:
     return f"CASE WHEN regexp_matches({text}, {pattern}) THEN (({value}) & {mask}) END"
 
 
+#: scheme://[user:password@]host[:port][path][?query][#fragment].
+#: Userinfo is captured only when it carries a colon — measured, the `user` of
+#: `https://user@h.io/p` ends up in **Host**, as `user@h.io`, not in Username.
+#: A bracketed IPv6 host is one unit.
+_URL_PATTERN = (
+    r"^([A-Za-z][A-Za-z0-9+.\-]*)://"
+    r"(?:([^:@/?#]*):([^@/?#]*)@)?"
+    r"(\[[^\]]*\]|[^:/?#]*)"
+    r"(?::([0-9]*))?"
+    r"([^?#]*)"
+    r"(?:\?([^#]*))?"
+    r"(?:#(.*))?$"
+)
+
+#: The eight keys `parse_url` returns, in the order it returns them.
+_URL_FIELDS = (
+    ("Scheme", 1), ("Host", 4), ("Port", 5), ("Path", 6),
+    ("Username", 2), ("Password", 3),
+)
+
+
+def _render_parse_ipv6(node: ir.FunctionCall) -> str:
+    """``parse_ipv6(s)`` -> the address in full, lower-case, zero-padded form.
+
+    `2001:db8::10` becomes `2001:0db8:0000:0000:0000:0000:0000:0010`. Every rule
+    measured on the emulator, and the last three are not obvious:
+
+    * a `%zone` suffix is **dropped**, so `fe80::1%eth0` parses;
+    * a **bare IPv4** is the IPv4-mapped address — `203.0.113.10` is
+      `::ffff:cb00:710a` in full — and an IPv4 tail anywhere becomes the last
+      two groups;
+    * a CIDR suffix **masks**, as `parse_ipv4`'s does, but over 128 bits;
+    * invalid input is the **empty string**, not null.
+
+    The mask is applied group by group rather than to a 128-bit integer, which
+    keeps it inside DuckDB's exact integer range and out of HUGEINT's sign bit:
+    for group *i* the prefix either covers it whole, misses it whole, or cuts it
+    partway, and only the last needs arithmetic.
+    """
+    if len(node.args) != 1:
+        raise KqlUnsupportedError("parse_ipv6", hint="expects one string argument")
+    subject = render_expr(node.args[0])
+
+    # lower-cased and trimmed, with any `%zone` removed before the prefix.
+    text = f"regexp_replace(lower(trim({subject})), '%[^/]*', '')"
+    address = f"split_part({text}, '/', 1)"
+    given = (
+        f"CASE WHEN strpos({text}, '/') > 0 "
+        f"THEN TRY_CAST(split_part({text}, '/', 2) AS INTEGER) END"
+    )
+
+    quad = r"([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$"
+    def octet(n: int) -> str:
+        return f"TRY_CAST(regexp_extract({address}, {quote_string(quad)}, {n}) AS INTEGER)"
+
+    pair = f"printf('%x:%x', {octet(1)} * 256 + {octet(2)}, {octet(3)} * 256 + {octet(4)})"
+    tail = quote_string(r"(^|:)([0-9]{1,3}\.){3}[0-9]{1,3}$")
+    dotted = (
+        f"regexp_matches({address}, {tail}) "
+        f"AND {octet(1)} < 256 AND {octet(2)} < 256 "
+        f"AND {octet(3)} < 256 AND {octet(4)} < 256"
+    )
+    resolved = (
+        f"CASE WHEN {dotted} THEN CASE WHEN strpos({address}, ':') = 0 "
+        f"THEN '::ffff:' || {pair} ELSE regexp_replace({address}, '[0-9.]+$', {pair}) END "
+        f"ELSE {address} END"
+    )
+
+    # A dotted tail makes the suffix an **IPv4** prefix: measured, `1.2.3.4/24`
+    # and `::ffff:1.2.3.4/24` are the same answer, `/0` still keeps the `::ffff:`
+    # mapping, and `/120` — legal over 128 bits — is refused. So it is 0..32,
+    # applied to the last 32 bits, which is 96 + p of the whole address.
+    limit = f"CASE WHEN {dotted} THEN 32 ELSE 128 END"
+    # No suffix means the whole address, which is the limit rather than a
+    # constant 128 — for a dotted form the limit is 32, and defaulting to 128
+    # made every prefix-less `::1.2.3.4` fail its own range check.
+    prefix = f"coalesce({given}, {limit})"
+    bits = f"CASE WHEN {dotted} THEN 96 + {prefix} ELSE {prefix} END"
+
+    left = f"list_filter(str_split(split_part({resolved}, '::', 1), ':'), x -> x <> '')"
+    right = f"list_filter(str_split(split_part({resolved}, '::', 2), ':'), x -> x <> '')"
+    groups = (
+        f"CASE WHEN strpos({resolved}, '::') > 0 THEN list_concat(list_concat({left}, "
+        f"list_transform(range(8 - len({left}) - len({right})), x -> '0')), {right}) "
+        f"ELSE str_split({resolved}, ':') END"
+    )
+
+    valid = (
+        f"len({groups}) = 8 "
+        f"AND len(list_filter({groups}, g -> regexp_matches(g, '^[0-9a-f]{{1,4}}$'))) = 8 "
+        f"AND {prefix} BETWEEN 0 AND {limit} "
+        # more than one `::` is not an address; the length difference counts them
+        f"AND length({resolved}) - length(replace({resolved}, '::', '')) <= 2"
+    )
+
+    # `i` is 1-based, so group `i` covers bits [16(i-1), 16i). The prefix either
+    # covers it whole, misses it whole, or cuts it partway — and only the last
+    # needs arithmetic. The first branch used to read `<= prefix - 16`, which is
+    # one group out: it sent a fully-covered group down the partial path, where
+    # `/24` on group 1 asked DuckDB to shift by -8 and raised.
+    value = "CAST(('0x' || g) AS INTEGER)"
+    kept = (
+        f"CASE WHEN 16 * i <= {bits} THEN {value} "
+        f"WHEN 16 * (i - 1) >= {bits} THEN 0 "
+        f"ELSE {value} & ((65535 << (16 - ({bits} - 16 * (i - 1)))) & 65535) END"
+    )
+    masked = (
+        f"list_transform({groups}, (g, i) -> lpad(printf('%x', {kept}), 4, '0'))"
+    )
+    return f"CASE WHEN {valid} THEN list_aggregate({masked}, 'string_agg', ':') ELSE '' END"
+
+
+def _render_parse_url(node: ir.FunctionCall) -> str:
+    """``parse_url(s)`` — the URL's parts as a dynamic, measured field by field.
+
+    Five rules here are the parser's rather than the RFC's, and each was
+    measured on the emulator:
+
+    * **userinfo splits only on a colon.** `https://user@h.io/p` puts `user@h.io`
+      in *Host* and leaves Username empty.
+    * **query keys are sorted**, and a key seen more than once holds an
+      **array**: `?x=1&y=2&x=3` is `{"x":["1","3"],"y":"2"}`.
+    * a parameter with an **empty key or value** is dropped — `?k=`, `?=v` and
+      `?flag` all contribute nothing.
+    * a **lone trailing slash** is the empty path, but only at end of input:
+      `https://h.io/` has Path `''` while `https://h.io/?x=1` and
+      `https://h.io/#` both have `/`.
+    * nothing is **percent-decoded**, and nothing is case-folded.
+
+    Anything that does not match answers the same object with every field empty
+    — not null — which is what a failed `regexp_extract` gives for free.
+    """
+    if len(node.args) != 1:
+        raise KqlUnsupportedError("parse_url", hint="expects one string argument")
+    subject = render_expr(node.args[0])
+    pattern = quote_string(_URL_PATTERN)
+
+    def group(n: int) -> str:
+        return f"regexp_extract({subject}, {pattern}, {n})"
+
+    # A lone `/` is the empty path only when the input ends there; a `?` or `#`
+    # anywhere means the slash was a real path. Neither can occur *inside* the
+    # path, so testing the whole string is safe.
+    path = (
+        f"CASE WHEN {group(6)} = '/' AND NOT regexp_matches({subject}, '[?#]') "
+        f"THEN '' ELSE {group(6)} END"
+    )
+    rendered = {name: group(n) for name, n in _URL_FIELDS}
+    rendered["Path"] = path
+
+    # Built as text rather than through `json_object` so the key order is this
+    # function's to set; Kusto's is fixed and not alphabetical.
+    body = " || ',' || ".join(
+        [f"""'"{name}":' || to_json({sql})::VARCHAR""" for name, sql in rendered.items()]
+        + [f"""'"Query Parameters":' || {_url_query_object(group(7))}"""]
+        + [f"""'"Fragment":' || to_json({group(8)})::VARCHAR"""]
+    )
+    return f"CAST('{{' || {body} || '}}' AS JSON)"
+
+
+def _url_query_object(query: str) -> str:
+    """The `Query Parameters` object, as JSON *text*.
+
+    Built as text rather than through `json_object` so the key order is this
+    function's to set: Kusto sorts them, and a repeated key becomes an array
+    rather than the last value winning.
+    """
+    pairs = (
+        f"list_transform(list_filter(str_split({query}, '&'), "
+        f"p -> strpos(p, '=') > 1 AND length(p) > strpos(p, '=')), "
+        f"p -> {{'k': p[1:strpos(p, '=') - 1], 'v': p[strpos(p, '=') + 1:]}})"
+    )
+    values = f"list_transform(list_filter({pairs}, x -> x.k = k), x -> x.v)"
+    entry = (
+        f"to_json(k)::VARCHAR || ':' || CASE WHEN len({values}) = 1 "
+        f"THEN to_json({values}[1])::VARCHAR ELSE to_json({values})::VARCHAR END"
+    )
+    entries = (
+        f"list_transform(list_sort(list_distinct("
+        f"list_transform({pairs}, x -> x.k))), k -> {entry})"
+    )
+    return f"('{{' || coalesce(list_aggregate({entries}, 'string_agg', ','), '') || '}}')"
+
+
 def _render_coalesce(node: ir.FunctionCall) -> str:
     """``coalesce(a, b, ...)`` — first non-null, and for a **string** non-empty.
 
@@ -4143,6 +4327,8 @@ _SPECIAL_FORMS.update(
     {
         "coalesce": _render_coalesce,
         "parse_ipv4": _render_parse_ipv4,
+        "parse_ipv6": _render_parse_ipv6,
+        "parse_url": _render_parse_url,
         "extract_all": _render_extract_all,
         **{
             n: _render_period

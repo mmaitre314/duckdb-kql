@@ -250,7 +250,7 @@ Not supported: `arg_max`, `arg_min`, `binary_all_*`, `buildschema`,
 
 ## Scalar functions
 
-112 supported, grouped by family.
+114 supported, grouped by family.
 
 ### Conditional
 
@@ -276,6 +276,7 @@ Not supported: `arg_max`, `arg_min`, `binary_all_*`, `buildschema`,
 | Function | Limitations and gotchas |
 |---|---|
 | `parse_ipv4` | Special. |
+| `parse_ipv6` | Special. |
 
 ### Null and type checks
 
@@ -306,6 +307,7 @@ Not supported: `arg_max`, `arg_min`, `binary_all_*`, `buildschema`,
 | `pack_array` | Renders as `json_array`, which takes mixed types — `to_json([...])` cannot. |
 | `pack` | Variadic. |
 | `parse_json` | A missing property or out-of-range index is **null**, never an error. |
+| `parse_url` | Special. |
 | `set_has_element` | A missing property or out-of-range index is **null**, never an error. |
 | `todynamic` | A missing property or out-of-range index is **null**, never an error. |
 | `zip` | Built by positional indexing: DuckDB's `list_zip` produces structs (`[{"":1}]`), not the arrays KQL returns. |
