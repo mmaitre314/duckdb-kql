@@ -3750,7 +3750,8 @@ _SPECIAL_FORMS: dict[str, Callable[[ir.FunctionCall], str | None]] = {
     "toboolean": _render_tobool,
     "iff": _render_conditional,
     "iif": _render_conditional,
-    "coalesce": _render_conditional,
+    # `coalesce` is `_render_coalesce`, registered below — it emits rather than
+    # declining, and calls the same branch-type guard itself.
     "zip": _render_zip,
     "make_datetime": _render_make_datetime,
     "make_timespan": _render_make_timespan,
@@ -3801,50 +3802,202 @@ def _render_period(node: ir.FunctionCall) -> str:
     return f"({start} + {step} - INTERVAL 1 MICROSECOND)"
 
 
-def _render_extract_all(node: ir.FunctionCall) -> str:
-    """``extract_all(regex, text)`` — every match, grouped.
+def _render_coalesce(node: ir.FunctionCall) -> str:
+    """``coalesce(a, b, ...)`` — first non-null, and for a **string** non-empty.
 
-    With ONE capture group KQL returns a flat array of matches; with several it
-    returns an array *per match*, each holding that match's groups. DuckDB's
-    ``regexp_extract_all`` only ever gives the flat form, so the multi-group
-    case needs building up from the group count.
+    SQL's `COALESCE` skips null and stops. KQL skips the empty string too, which
+    is the whole of the reported bug: `coalesce('', 'fallback')` answered `''`.
+    Measured on the emulator, and the rule is narrower than "falsy" — only the
+    empty string qualifies:
+
+    ============================  =========
+    argument                      skipped?
+    ============================  =========
+    ``''``                        yes
+    ``' '`` (a space)             no
+    ``0``, ``0.0``, ``false``     no
+    ``0s`` (a zero timespan)      no
+    ``dynamic([])``, ``{}``       no
+    null, of any type             yes
+    ============================  =========
+
+    So the test is emptiness of the *rendered* value, and casting to VARCHAR
+    applies it to every type without needing to know which one this is: the
+    empty string is the only value whose text form is empty, and `CAST(NULL AS
+    VARCHAR)` is null, so nulls fall out of the same comparison. That matters
+    because Kusto requires every argument to share one type (SEM0525) but a bare
+    column does not say which — `docs/column-types-proposal.md`'s gap, side-
+    stepped here rather than guessed at.
+
+    When *every* argument is skipped the answer is type-dependent: measured, all-
+    empty strings give `''` while all-null longs give null. `isnull` cannot see
+    the difference — it is always false for a KQL string — but `strlen` can, 0
+    against null, which is how this was caught after the first version returned
+    null for both.
+
+    So the raw arguments are appended after the filtered ones. `coalesce` takes
+    the first non-null of the whole list, so the tail is reached only when every
+    value was null or empty, and it then yields the first *non-null* raw one —
+    `''` when any argument was an empty string, null when they were all null.
+    That reproduces both cases without naming either type.
     """
-    if len(node.args) != 2:
-        raise KqlUnsupportedError("extract_all", hint="expects (regex, text)")
-    regex, text = node.args
-    pattern = render_expr(regex)
-    subject = render_expr(text)
+    if not 2 <= len(node.args) <= 64:
+        raise KqlUnsupportedError(
+            "coalesce",
+            hint=f"takes 2 to 64 arguments, got {len(node.args)} (Kusto: SEM0223)",
+        )
+    # Kusto requires one type across the arguments (SEM0525). This used to run
+    # via `_render_conditional`, which guarded and then declined to the registry
+    # template; emitting here instead has to carry the guard with it.
+    _refuse_mixed_branch_types("coalesce", list(node.args))
+    rendered = [render_expr(arg) for arg in node.args]
+    filtered = [f"CASE WHEN CAST({r} AS VARCHAR) <> '' THEN {r} END" for r in rendered]
+    return f"coalesce({', '.join(filtered + rendered)})"
+
+
+def _render_extract_all(node: ir.FunctionCall) -> str:
+    """``extract_all(regex [, captureGroups], text)`` — every match's groups.
+
+    Measured on the emulator, over rows and folded, because four separate rules
+    hide in one signature and only one of them is the obvious reading:
+
+    * the result is the **capture groups**, never the whole match. With one
+      group selected it is a flat array, with several an array per match holding
+      that match's groups, in the order asked for.
+    * a regex with **no** capture group is refused (SEM0213), as is one with
+      more than 16.
+    * the regex must be a **scalar constant** (SEM0040), so a column cannot
+      reach here — which is what makes counting its groups at translation time
+      sound rather than a guess.
+    * **no match answers null**, not an empty array.
+
+    `captureGroups` picks and orders the groups. Indices outside `[1..n]` are
+    dropped rather than refused, and if that leaves nothing the call behaves as
+    though the argument had been omitted — measured: `[1,5]` over a two-group
+    regex gives group 1 alone, while `[5]` and `[]` both give every group.
+    """
+    if len(node.args) == 2:
+        regex, selection, text = node.args[0], None, node.args[1]
+    elif len(node.args) == 3:
+        regex, selection, text = node.args
+    else:
+        raise KqlUnsupportedError(
+            "extract_all", hint="expects (regex, text) or (regex, captureGroups, text)"
+        )
 
     groups = _capture_group_count(regex)
-    if groups <= 1:
-        return f"to_json(regexp_extract_all({subject}, {pattern}))"
-    per_match = ", ".join(
-        f"regexp_extract(m, {pattern}, {i})" for i in range(1, groups + 1)
-    )
-    return (
-        f"to_json(list_transform("
-        f"regexp_extract_all({subject}, {pattern}), m -> [{per_match}]))"
-    )
+    wanted = _extract_all_capture_groups(selection, groups)
+    pattern, subject = render_expr(regex), render_expr(text)
+
+    if len(wanted) == 1:
+        # DuckDB's third argument is the group; without it `regexp_extract_all`
+        # returns the whole match, which is the bug this replaced.
+        matches = f"regexp_extract_all({subject}, {pattern}, {wanted[0]})"
+    else:
+        per_match = ", ".join(
+            f"regexp_extract(m, {pattern}, {g})" for g in wanted
+        )
+        matches = (
+            f"list_transform(regexp_extract_all({subject}, {pattern}), "
+            f"m -> [{per_match}])"
+        )
+    # `len` of a null list is null, so a null subject falls through the implicit
+    # ELSE to null as well — which is what Kusto answers for one.
+    return f"CASE WHEN len({matches}) > 0 THEN to_json({matches}) END"
+
+
+#: Kusto's own bound, reported by SEM0213.
+_EXTRACT_ALL_MAX_GROUPS = 16
 
 
 def _capture_group_count(node: ir.Expr) -> int:
-    """Count capture groups in a *literal* regex; 1 when it cannot be read."""
+    """Capture groups in a **literal** regex, refusing what Kusto refuses.
+
+    Previously returned 1 for anything it could not read, which silently picked
+    the flat single-group shape for a regex that might have had any number —
+    and 1 for a regex with *none*, where Kusto raises. Kusto requires this
+    argument to be a scalar constant (SEM0040), so "cannot read it" is a refusal
+    here rather than a guess.
+
+    `(?:...)` and the other `(?`-led forms are not captures; a named group
+    `(?<name>...)` is, which the `(?` test alone got wrong. Parentheses inside a
+    character class are literal.
+    """
     if not isinstance(node, ir.Literal) or node.kind != "string":
-        return 1
-    pattern, count, i = str(node.value), 0, 0
+        raise KqlUnsupportedError(
+            "extract_all",
+            hint="the regex must be a literal; Kusto requires a scalar constant "
+            "here too (SEM0040), and its capture groups decide the result shape",
+        )
+    pattern = str(node.value)
+    count, i, in_class = 0, 0, False
     while i < len(pattern):
         c = pattern[i]
         if c == "\\":
             i += 2
             continue
-        if c == "(" and not pattern.startswith("(?", i):
-            count += 1
+        if in_class:
+            in_class = c != "]"
+        elif c == "[":
+            in_class = True
+        elif c == "(":
+            rest = pattern[i + 1:]
+            # `(?<name>` and `(?'name'` capture; `(?:`, `(?=`, `(?<=` and the
+            # rest of the `(?` family do not.
+            named = re.match(r"\?(?:<(?![=!])|P<|')", rest)
+            if not rest.startswith("?") or named:
+                count += 1
         i += 1
-    return max(count, 1)
+    if not 1 <= count <= _EXTRACT_ALL_MAX_GROUPS:
+        raise KqlUnsupportedError(
+            "extract_all",
+            hint=f"the regex has {count} capture groups; Kusto requires "
+            f"[1..{_EXTRACT_ALL_MAX_GROUPS}] (SEM0213)",
+        )
+    return count
+
+
+def _extract_all_capture_groups(selection: ir.Expr | None, groups: int) -> list[int]:
+    """Which groups to return, in order — the `captureGroups` argument.
+
+    Out-of-range indices are dropped and an empty result means "all groups",
+    both measured. Group **names** are accepted by Kusto (SEM0214 names the
+    failure) and refused here: mapping a name to its index needs a second reader
+    of the regex, and refusing costs a query rather than an answer.
+    """
+    if selection is None:
+        return list(range(1, groups + 1))
+    if not isinstance(selection, ir.Literal) or selection.kind != "dynamic":
+        raise KqlUnsupportedError(
+            "extract_all",
+            hint="captureGroups must be a dynamic array literal, e.g. dynamic([1, 2])",
+        )
+    try:
+        members = json.loads(str(selection.value))
+    except ValueError:
+        members = None
+    if not isinstance(members, list):
+        raise KqlUnsupportedError(
+            "extract_all", hint="captureGroups must be a dynamic *array*, e.g. dynamic([1])"
+        )
+    for member in members:
+        if isinstance(member, str):
+            raise KqlUnsupportedError(
+                "extract_all",
+                hint="selecting a capture group by name is not supported; use its "
+                "1-based index, e.g. dynamic([1])",
+            )
+        if not isinstance(member, int) or isinstance(member, bool):
+            raise KqlUnsupportedError(
+                "extract_all", hint=f"captureGroups member {member!r} is not an index"
+            )
+    wanted = [m for m in members if 1 <= m <= groups]
+    return wanted or list(range(1, groups + 1))
 
 
 _SPECIAL_FORMS.update(
     {
+        "coalesce": _render_coalesce,
         "extract_all": _render_extract_all,
         **{
             n: _render_period

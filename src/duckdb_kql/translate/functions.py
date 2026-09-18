@@ -183,7 +183,7 @@ SCALAR_FUNCTIONS: dict[str, FunctionSpec] = {
            "({0} IS NULL OR CAST({0} AS VARCHAR) = '')", (1,), ("R4", "R17")),
         _f("isnotempty", "template",
            "({0} IS NOT NULL AND CAST({0} AS VARCHAR) <> '')", (1,), ("R4", "R17")),
-        _f("coalesce", "template", "coalesce({})", (), ("R4",), "variadic"),
+        _f("coalesce", "template", "", (), ("R4",), "special:variadic"),
         _f("isnan", "native", "isnan({0})", (1,)),
         _f("isfinite", "native", "isfinite({0})", (1,)),
         _f("isinf", "native", "isinf({0})", (1,)),
