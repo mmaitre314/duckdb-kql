@@ -28,7 +28,7 @@ __all__ = [
     "Node", "Expr", "Operator", "Query",
     # expressions
     "Literal", "ColumnRef", "BinaryOp", "UnaryOp", "FunctionCall", "NamedExpr",
-    "InList", "HasList", "Between", "PathAccess", "PathStep", "Parameter",
+    "InList", "HasList", "Between", "Wildcard", "PathAccess", "PathStep", "Parameter",
     # sources
     "TableRef", "WildcardTableRef", "DataTable", "PrintSource", "RangeSource",
     # operators
@@ -382,6 +382,17 @@ class InList(Expr):
     #: ``items`` is empty and membership is tested against the query's first
     #: column.
     subquery: Query | None = None
+
+
+@dataclass(frozen=True)
+class Wildcard(Expr):
+    """``*`` in an expression position — only `arg_max`/`arg_min` accept one.
+
+    Carried as a node rather than expanded at lowering time because what it
+    stands for is the operator's *input columns*, which the lowerer does not
+    have. `render_expr` refuses it, so every other position still reports the
+    star rather than silently dropping it.
+    """
 
 
 @dataclass(frozen=True)

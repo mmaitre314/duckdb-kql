@@ -204,6 +204,12 @@ def _lower_expr(node: Any) -> ir.Expr:
     if kind == "BetweenEqualityExpression":
         return _lower_between(node)
 
+    if kind == "StarExpression":
+        # Legal only as an `arg_max`/`arg_min` argument; `render_expr` refuses
+        # it anywhere else, so it is carried rather than resolved here — what it
+        # expands to is the operator's input columns, which this does not know.
+        return ir.Wildcard()
+
     if kind == "ParenthesizedExpression":
         inner = _rule_children(node)
         if inner:
@@ -614,7 +620,7 @@ def _literal_string(node: Any) -> str | None:
     return None
 
 
-def _lower_operator(node: Any) -> ir.Operator | None:
+def _lower_operator(node: Any) -> ir.Operator | list[ir.Operator] | None:
     # `pipedOperator` is `'|' afterPipeOperator`, so it has a token child
     # alongside the rule child and the generic collapse won't descend into it.
     while _cls(node) in ("PipedOperator", "AfterPipeOperator"):
@@ -1676,7 +1682,11 @@ def _lower_operators(nodes: list[Any]) -> list[ir.Operator]:
     out: list[ir.Operator] = []
     for node in nodes:
         op = _lower_operator(node)
-        if op is not None:
+        if isinstance(op, list):
+            # One written operator that desugars into several — `mv-expand` of a
+            # computed expression is an `extend` and then an expansion.
+            out.extend(op)
+        elif op is not None:
             out.append(op)
     return out
 
@@ -2165,7 +2175,7 @@ def _lower_parse_segment(node: Any) -> ir.ParseSegment:
 _BAG_EXPANSION = {"bag": False, "array": True}
 
 
-def _lower_mv_expand(node: Any, kids: list[Any]) -> ir.Operator:
+def _lower_mv_expand(node: Any, kids: list[Any]) -> ir.Operator | list[ir.Operator]:
     """``mv-expand [kind=] col [to typeof(T)][, …] [limit N]``.
 
     The grammar puts each column in its own ``MvexpandOperatorExpression``,
@@ -2176,6 +2186,8 @@ def _lower_mv_expand(node: Any, kids: list[Any]) -> ir.Operator:
     limit: int | None = None
     array_expansion = False
     targets: list[ir.MvExpandTarget] = []
+    #: `name = expr` targets, lifted into an `extend` that runs first.
+    computed: list[ir.NamedExpr] = []
 
     for k in kids:
         cls, text = _cls(k), k.getText()
@@ -2192,19 +2204,36 @@ def _lower_mv_expand(node: Any, kids: list[Any]) -> ir.Operator:
             else:
                 raise _unsupported(k, f"mv-expand parameter:{text}")
             continue
-        targets.append(_lower_mv_expand_target(k))
+        target, prelude = _lower_mv_expand_target(k)
+        targets.append(target)
+        if prelude is not None:
+            computed.append(prelude)
 
     if not targets:
         raise _unsupported(node, "mv-expand")
-    return ir.MvExpand(tuple(targets), item_index, limit, array_expansion)
+    expanded = ir.MvExpand(tuple(targets), item_index, limit, array_expansion)
+    if not computed:
+        return expanded
+    # `mv-expand name = expr` is `extend name = expr | mv-expand name`. Measured
+    # on the emulator, the two agree on rows *and* on column order, including
+    # when the alias shadows the column the expression reads — which `extend`
+    # already handles by reading the input value (R21).
+    return [ir.Extend(tuple(computed)), expanded]
 
 
-def _lower_mv_expand_target(node: Any) -> ir.MvExpandTarget:
-    """One ``col [to typeof(T)]`` of the list.
+def _lower_mv_expand_target(
+    node: Any,
+) -> tuple[ir.MvExpandTarget, ir.NamedExpr | None]:
+    """One ``[name =] col_or_expr [to typeof(T)]`` of the list.
 
     The `to` clause is a **sibling** of the named expression, not part of it,
     so the named expression has to be picked out rather than lowering the whole
     node — which otherwise falls through as an unsupported expression.
+
+    Returns the target, and the `extend` expression it needs first when the
+    thing being expanded is **computed** rather than a column. The operator
+    rewrites a column in place, so a computed expression has to become one, and
+    the caller runs that `extend` ahead of the expansion.
     """
     to_type = None
     named = node
@@ -2216,11 +2245,25 @@ def _lower_mv_expand_target(node: Any) -> ir.MvExpandTarget:
             named = k
 
     target = _lower_named(named)
-    if not isinstance(target.expr, ir.ColumnRef):
-        # Expanding a computed expression needs it named first; the operator
-        # rewrites a column in place, and there is no column to rewrite.
-        raise _unsupported(node, "mv-expand")
-    return ir.MvExpandTarget(target.expr.name, target.name, to_type)
+    if isinstance(target.expr, ir.ColumnRef):
+        return ir.MvExpandTarget(target.expr.name, target.name, to_type), None
+    if target.name is None:
+        # Kusto names an unnamed computed expansion by a rule this does not
+        # reproduce: measured, it takes over the column it reads when it reads
+        # exactly one (`mv-expand parse_json(a)` returns a column `a`), and is
+        # `Column1` when it reads two or none. Naming it is one word, and
+        # guessing which column it would consume is how a wrong column gets
+        # silently replaced.
+        raise KqlUnsupportedError(
+            "mv-expand of an unnamed computed expression",
+            span=_span(node),
+            hint="give it a name — `mv-expand item = ...` — since Kusto's own "
+            "name for it depends on how many columns the expression reads",
+        )
+    return (
+        ir.MvExpandTarget(target.name, None, to_type),
+        ir.NamedExpr(target.expr, target.name),
+    )
 
 
 # ---------------------------------------------------------------------------

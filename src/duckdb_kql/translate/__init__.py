@@ -580,7 +580,7 @@ def render_operator(op: ir.Operator, prev: str, cols: list[str] | None = None) -
         return render_parse(op, prev, cols)
 
     if isinstance(op, ir.Summarize):
-        return render_summarize(op, prev)
+        return render_summarize(op, prev, cols)
 
     if isinstance(op, ir.Sort):
         return f"SELECT * FROM {prev} ORDER BY {render_sort_keys(op.keys)}"
@@ -1261,7 +1261,98 @@ def render_aggregate(named: ir.NamedExpr) -> str:
     return render_expr(lifted)
 
 
-def render_summarize(op: ir.Summarize, prev: str) -> str:
+#: `arg_max` maximises, `arg_min` minimises; everything else about them is the
+#: same, so one renderer takes both.
+_ARG_EXTREMES = {"arg_max": "max", "arg_min": "min"}
+
+
+def _render_arg_max(
+    agg: ir.NamedExpr, key_names: list[str], cols: list[str] | None
+) -> list[tuple[str, str]] | None:
+    """``arg_max(ExprToMaximize, ExprToReturn, ...)`` -> one column each.
+
+    None when *agg* is not one of these, so the ordinary single-column path
+    takes it.
+
+    Two things stop this being DuckDB's `arg_max` directly, both measured:
+
+    * **DuckDB's skips rows whose returned value is null.** For
+      `[(t=2, v=null), (t=1, v='y')]` it answers `'y'`; Kusto answers the value
+      at the maximum, which is null. Wrapping the value in a struct fixes it —
+      the struct is never null, so no row is skipped, and the field comes back
+      null as it should.
+    * **When every maximised value is null Kusto still returns a row.** DuckDB's
+      `arg_max` answers null there, so `any_value` supplies the fallback. Which
+      row either engine picks is arbitrary, and with more than one such row the
+      answer is nondeterministic on both sides (R10).
+
+    Output names are KQL's: each column is named after its own expression, and
+    an explicit `m = arg_max(...)` renames only the first. A computed operand is
+    refused — Kusto names those `max_ts_arg1` and `max_`, schemes sampled rather
+    than established, and a wrong column name is a divergence like any other
+    (R12).
+    """
+    if not isinstance(agg.expr, ir.FunctionCall):
+        return None
+    extreme = _ARG_EXTREMES.get(agg.expr.name.lower())
+    if extreme is None:
+        return None
+
+    args = agg.expr.args
+    if len(args) < 2:
+        raise KqlUnsupportedError(
+            f"aggregate:{agg.expr.name}",
+            hint="expects the expression to maximise and at least one to return",
+        )
+    maximised, returned = args[0], args[1:]
+    if not isinstance(maximised, ir.ColumnRef):
+        raise KqlUnsupportedError(
+            f"aggregate:{agg.expr.name}",
+            hint="the expression to maximise must be a column; Kusto names the "
+            "output of a computed one `max_`, which this does not reproduce",
+        )
+
+    picked: list[ir.Expr] = []
+    for expr in returned:
+        if not isinstance(expr, ir.Wildcard):
+            picked.append(expr)
+            continue
+        if cols is None:
+            raise KqlUnsupportedError(
+                f"aggregate:{agg.expr.name}",
+                hint="`*` needs the input columns; pass schema= or use "
+                "duckdb_kql.kql(con, ...), or list the columns explicitly",
+            )
+        # Measured: `*` is every input column except the maximised one and the
+        # grouping keys — those are already columns of the output, and Kusto
+        # does not repeat them. Listing one explicitly *does* repeat it, under
+        # a suffixed name, which is `disambiguate`'s job and not this one.
+        already = {maximised.name, *key_names}
+        picked.extend(ir.ColumnRef(c) for c in cols if c not in already)
+
+    order = render_expr(maximised)
+    out: list[tuple[str, str]] = [
+        (agg.name or maximised.name, f"{extreme}({order})")
+    ]
+    for expr in picked:
+        if not isinstance(expr, ir.ColumnRef):
+            raise KqlUnsupportedError(
+                f"aggregate:{agg.expr.name}",
+                hint="each expression to return must be a column; Kusto names a "
+                "computed one `max_<expr>_argN`, which this does not reproduce",
+            )
+        value = render_expr(expr)
+        boxed = f"{{'v': {value}}}"
+        out.append(
+            (
+                expr.name,
+                f"COALESCE(arg_{extreme}({boxed}, {order}), any_value({boxed}))['v']",
+            )
+        )
+    return out
+
+
+def render_summarize(op: ir.Summarize, prev: str, cols: list[str] | None = None) -> str:
     """Render ``summarize`` as GROUP BY.
 
     Grouping keys are emitted **first**, which is the order KQL returns them in
@@ -1299,6 +1390,15 @@ def render_summarize(op: ir.Summarize, prev: str) -> str:
 
     taken = list(target_names(op.by))
     for agg in op.aggregates:
+        # `arg_max` is the one aggregate that produces *several* output columns
+        # from one call, so it yields a list rather than a single item.
+        argmax = _render_arg_max(agg, key_names, cols)
+        if argmax is not None:
+            for name, sql in argmax:
+                name = disambiguate(name, taken)
+                taken.append(name)
+                select.append(f"{sql} AS {quote_ident(name)}")
+            continue
         name = disambiguate(aggregate_name(agg), taken)
         taken.append(name)
         select.append(f"{render_aggregate(agg)} AS {quote_ident(name)}")
@@ -3802,6 +3902,50 @@ def _render_period(node: ir.FunctionCall) -> str:
     return f"({start} + {step} - INTERVAL 1 MICROSECOND)"
 
 
+#: One IPv4 octet, 0-255, **without** leading zeros — measured: `01.02.03.04`
+#: is null on a cluster, so the leading-zero forms are not merely tidied away.
+_IPV4_OCTET = "(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9][0-9]|[0-9])"
+#: A CIDR prefix, 0-32. Anything outside the range is null, `/33` included.
+_IPV4_PREFIX = "(3[0-2]|[12][0-9]|[0-9])"
+
+
+def _render_parse_ipv4(node: ir.FunctionCall) -> str:
+    """``parse_ipv4(s)`` — a dotted quad, optionally with a CIDR prefix, as a long.
+
+    Measured on the emulator, and three of the five rules are not guessable:
+
+    * a **CIDR suffix masks** the address rather than being ignored —
+      `203.0.113.10/24` is 3405803776, the `/24` network, not the host;
+    * **leading zeros are rejected**: `01.02.03.04` is null, not 16909060;
+    * surrounding **whitespace is tolerated**, so `' 203.0.113.10'` parses.
+
+    Everything invalid answers null rather than raising, which is R1's rule and
+    happens to be what `regexp_matches` failing gives here for free.
+
+    The whole validation lives in the regex — octet range and prefix range
+    included — so the arithmetic below runs only on input already known to be
+    well formed, and there is no second place for the two to disagree.
+    """
+    if len(node.args) != 1:
+        raise KqlUnsupportedError("parse_ipv4", hint="expects one string argument")
+    subject = render_expr(node.args[0])
+    text = f"trim({subject})"
+    octets = "\\.".join([_IPV4_OCTET] * 4)
+    pattern = quote_string(f"^{octets}(/{_IPV4_PREFIX})?$")
+    address = f"split_part({text}, '/', 1)"
+    value = " + ".join(
+        f"CAST(split_part({address}, '.', {i}) AS BIGINT) * {256 ** (4 - i)}"
+        for i in range(1, 5)
+    )
+    prefix = (
+        f"CASE WHEN strpos({text}, '/') > 0 "
+        f"THEN CAST(split_part({text}, '/', 2) AS BIGINT) ELSE 32 END"
+    )
+    # 4294967296 - 2^(32-p) is the /p netmask: 0 at /0, 4294967295 at /32.
+    mask = f"(4294967296 - (1 << (32 - {prefix})))"
+    return f"CASE WHEN regexp_matches({text}, {pattern}) THEN (({value}) & {mask}) END"
+
+
 def _render_coalesce(node: ir.FunctionCall) -> str:
     """``coalesce(a, b, ...)`` — first non-null, and for a **string** non-empty.
 
@@ -3998,6 +4142,7 @@ def _extract_all_capture_groups(selection: ir.Expr | None, groups: int) -> list[
 _SPECIAL_FORMS.update(
     {
         "coalesce": _render_coalesce,
+        "parse_ipv4": _render_parse_ipv4,
         "extract_all": _render_extract_all,
         **{
             n: _render_period

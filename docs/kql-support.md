@@ -215,13 +215,15 @@ because nothing here knows it is a string.
 
 ## Aggregate functions
 
-19 supported.
+21 supported.
 
 ### Supported
 
 | Function | Limitations and gotchas |
 |---|---|
 | `any` | Picks an **arbitrary** row from each group. Which one is not defined — do not depend on it. |
+| `arg_max` | Special. |
+| `arg_min` | Special. |
 | `avg` | Nulls are ignored. `count(X)` counts non-null values; bare `count()` counts rows. |
 | `avgif` | Nulls are ignored. `count(X)` counts non-null values; bare `count()` counts rows. |
 | `count` | Bare `count()` counts rows; `count(X)` counts non-null values. Auto-named `count_` (R12). |
@@ -248,7 +250,7 @@ Not supported: `arg_max`, `arg_min`, `binary_all_*`, `buildschema`,
 
 ## Scalar functions
 
-111 supported, grouped by family.
+112 supported, grouped by family.
 
 ### Conditional
 
@@ -268,6 +270,12 @@ Not supported: `arg_max`, `arg_min`, `binary_all_*`, `buildschema`,
 | `hash_md5` | Hashes KQL's **string** form of the value, so a datetime or a bool must be spelled the way KQL spells it or the digest silently differs (R20). The empty string hashes to the **empty string**, not to `d41d8cd9…`. |
 | `hash_sha1` | Hashes KQL's string form of the value — see `hash_md5`. |
 | `hash_sha256` | Hashes KQL's string form of the value — see `hash_md5`. |
+
+### IP address
+
+| Function | Limitations and gotchas |
+|---|---|
+| `parse_ipv4` | Special. |
 
 ### Null and type checks
 

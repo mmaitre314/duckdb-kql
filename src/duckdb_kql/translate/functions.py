@@ -159,6 +159,7 @@ SCALAR_FUNCTIONS: dict[str, FunctionSpec] = {
         _f("extract", "template",
            "regexp_extract({2}, {0}, CAST({1} AS INTEGER))", (3, 4), ("R11",)),
         _f("extract_all", "template", "", (2, 3), ("R11",), "special"),
+        _f("parse_ipv4", "template", "", (1,), ("R1",), "special"),
         _f("countof", "template", "", (2, 3), ("R11",), "variadic:countof"),
         _f("base64_encode_tostring", "template", "to_base64(CAST({0} AS BLOB))", (1,)),
         _f("base64_encodestring", "template", "to_base64(CAST({0} AS BLOB))", (1,),
@@ -743,6 +744,12 @@ AGGREGATE_FUNCTIONS: dict[str, AggregateSpec] = {
            (2,), rules=("R4",)),
         _a("min", "min({0})", (1,), rules=("R4",)),
         _a("max", "max({0})", (1,), rules=("R4",)),
+        # Rendered by `_render_arg_max`, which `summarize` reaches before the
+        # registry: these are the only aggregates producing *several* output
+        # columns from one call, which no template can express. The rows exist
+        # so the nested-aggregate guards and the support matrix know the names.
+        _a("arg_max", "", (), rules=("R4", "R12"), note="special"),
+        _a("arg_min", "", (), rules=("R4", "R12"), note="special"),
         _a("stdev", "coalesce(stddev_samp({0}), 0.0)", (1,), rules=("R4",)),
         _a("stdevif", "coalesce(stddev_samp({0}) FILTER (WHERE {1}), 0.0)", (2,)),
         _a("variance", "coalesce(var_samp({0}), 0.0)", (1,), rules=("R4",)),
