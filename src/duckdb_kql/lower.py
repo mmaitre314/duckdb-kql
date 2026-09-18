@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import re
 from collections.abc import Callable, Iterator
 from typing import Any
 
@@ -285,10 +286,45 @@ def _typed_literal(
     if text.lower() in ("null", ""):
         return ir.Literal(None, "null")
 
+    if kind == "datetime":
+        text = _datetime_parts_to_iso(text)
+
     try:
         return ir.Literal(convert(text), kind)
     except (ValueError, TypeError) as e:
         raise _unsupported(node, f"literal:{kind}") from e
+
+
+#: `datetime(2025, 6)` and `datetime(2025, 6, 14)` — year/month/day as separate
+#: numbers. Measured on the emulator: a **fourth** part is an error there, so
+#: this is not `make_datetime`'s hour/minute form under another name.
+_DATETIME_PARTS = re.compile(
+    r"^\s*(\d{1,4})\s*,\s*(\d{1,2})\s*(?:,\s*(\d{1,2})\s*)?$"
+)
+
+
+def _datetime_parts_to_iso(text: str) -> str:
+    """`2025, 6, 14` -> `2025-06-14`; anything else is returned untouched.
+
+    KQL spells a datetime literal two ways and only one of them is a date
+    string. The comma form reached the emitter as the text `'2025, 6, 14'`,
+    which no date parser accepts, so it became **null** — a silent wrong answer
+    that outlived its own corpus cases, because the two queries using it were
+    refused for an unrelated reason (a `let` function) and so never ran.
+
+    The **single-number** form is deliberately left alone. It is not "a year":
+    measured, `datetime(2025)` is 2025-01-01, `datetime(20250614)` is
+    2025-06-14, and `datetime(1)` is one second past the epoch — at least three
+    rules selected by magnitude and digit count, which six samples do not
+    establish. It stays null here rather than being guessed at.
+    """
+    if "," not in text:
+        return text
+    found = _DATETIME_PARTS.match(text)
+    if found is None:
+        return text
+    year, month, day = found.group(1), found.group(2), found.group(3) or "1"
+    return f"{int(year):04d}-{int(month):02d}-{int(day):02d}"
 
 
 def _lower_bare_literal(node: Any) -> ir.Expr:
@@ -424,6 +460,21 @@ def _lower_binary(node: Any) -> ir.Expr:
     return folded
 
 
+@dataclasses.dataclass(frozen=True)
+class LetFunction:
+    """A scalar function declared by `let`, kept as its lowered body.
+
+    ``parameters`` is ``(name, default)`` in declaration order; the declared
+    type is not carried, because the body is inlined rather than bound and
+    DuckDB types the result from the argument that arrives. A missing default
+    is None, which makes the argument required.
+    """
+
+    name: str
+    parameters: tuple[tuple[str, ir.Expr | None], ...]
+    body: ir.Expr
+
+
 def _lower_function_call(node: Any) -> ir.Expr:
     """Lower ``name(arg, ...)``.
 
@@ -434,7 +485,43 @@ def _lower_function_call(node: Any) -> ir.Expr:
         return ir.FunctionCall(node.getText().rstrip("()"))
     name = kids[0].getText()
     args = tuple(_lower_expr(k) for k in kids[1:])
+    declared = _LET_FUNCTIONS.get(name)
+    if declared is not None:
+        return _inline_let_function(node, declared, args)
     return ir.FunctionCall(name, args)
+
+
+def _inline_let_function(
+    node: Any, declared: LetFunction, args: tuple[ir.Expr, ...]
+) -> ir.Expr:
+    """Substitute *args* into the function's body, in place of the call.
+
+    Inlined rather than registered as a DuckDB UDF because a `let` function is
+    a *query-scope* binding, like every other `let` here: it disappears with the
+    query, and turning one into a connection-level object would outlive it.
+
+    Parameters substitute by name over the body's `ColumnRef`s, which is exactly
+    Kusto's scoping — measured, a parameter **shadows a column of the same
+    name**: with a column `s` in scope, `F('xy')` over `let F = (s:string) {
+    strlen(s) }` answers 2, the argument's length, not the column's.
+    """
+    required = [name for name, default in declared.parameters if default is None]
+    if len(args) > len(declared.parameters) or len(args) < len(required):
+        raise KqlUnsupportedError(
+            f"let function:{declared.name}",
+            span=_span(node),
+            hint=f"takes {len(required)}..{len(declared.parameters)} arguments, "
+            f"got {len(args)}",
+        )
+    binding: Scalars = {}
+    for i, (name, default) in enumerate(declared.parameters):
+        value = args[i] if i < len(args) else default
+        assert value is not None  # a missing default is a required parameter
+        binding[name] = value
+    # `_substitute` walks the whole IR and is typed Any for that reason; the
+    # body went in as an Expr and a substitution cannot change that.
+    inlined: ir.Expr = _substitute(declared.body, binding)
+    return inlined
 
 
 def _lower_named(node: Any) -> ir.NamedExpr:
@@ -799,6 +886,13 @@ _SCOPE: tuple[str, Entity] | None = None
 
 #: `let`-bound entity groups, and the caller's named-group mapping, in force
 #: for the query being lowered.
+#: Scalar functions declared by `let F = (a:t, ...) { body }`, in declaration
+#: order. Populated by `_lower_lets` and read by `_lower_function_call`, which
+#: inlines the body at each call site. A name is registered only *after* its own
+#: body is lowered, so a function cannot see itself — which is Kusto's rule too,
+#: measured: a recursive `let` fails with SEM0260, "Unknown function".
+_LET_FUNCTIONS: dict[str, LetFunction] = {}
+
 _LET_GROUPS: dict[str, tuple[Entity, ...]] = {}
 _NAMED_GROUPS: ResolvedGroups | None = None
 
@@ -807,13 +901,22 @@ _NAMED_GROUPS: ResolvedGroups | None = None
 def _macro_context(
     let_groups: dict[str, tuple[Entity, ...]], named: ResolvedGroups | None
 ) -> Iterator[None]:
-    global _LET_GROUPS, _NAMED_GROUPS
-    previous = (_LET_GROUPS, _NAMED_GROUPS)
-    _LET_GROUPS, _NAMED_GROUPS = let_groups, named
+    """Query-scope lowering state: entity groups and `let` functions.
+
+    `_LET_FUNCTIONS` is reset here rather than merely restored. Every one of
+    these is a **query-scope** binding, so a function declared by one call must
+    not be callable from the next — and it was: the first version left the
+    registry populated, and a second query calling `F` resolved it and answered.
+    A `let` that outlives its query is a wrong answer to a query that never
+    declared it.
+    """
+    global _LET_GROUPS, _NAMED_GROUPS, _LET_FUNCTIONS
+    previous = (_LET_GROUPS, _NAMED_GROUPS, _LET_FUNCTIONS)
+    _LET_GROUPS, _NAMED_GROUPS, _LET_FUNCTIONS = let_groups, named, {}
     try:
         yield
     finally:
-        _LET_GROUPS, _NAMED_GROUPS = previous
+        _LET_GROUPS, _NAMED_GROUPS, _LET_FUNCTIONS = previous
 
 
 @contextlib.contextmanager
@@ -863,6 +966,88 @@ def _within_macro_expand(node: Any) -> bool:
             return True
         parent = getattr(parent, "parentCtx", None)
     return False
+
+
+def _declare_let_function(decl: Any, scalars: Scalars) -> None:
+    """Register ``let F = (a:t, b:t = d) { body }`` for later call sites.
+
+    The body is lowered **here**, with the scalar `let`s declared before it
+    already substituted, so a function closes over the scope it was written in
+    rather than the one it is called from — measured: `let K = 7; let F =
+    (x:long) { x + K }` answers 8 for `F(1)`.
+
+    Registration happens *after* the body is lowered, which is what makes
+    recursion impossible; Kusto refuses it too (SEM0260, "Unknown function"), so
+    the ordering is the rule rather than an implementation limit.
+
+    A **tabular** body — `let F = (n:long) { range x from 1 to n step 1 }` — is
+    refused. Kusto supports it, but such a function is a *source*, and calling
+    one where a table is expected is a different feature from substituting an
+    expression into a scalar position.
+    """
+    kids = _rule_children(decl)
+    if len(kids) < 2:
+        raise _unsupported(decl, "let function")
+    names = _find_names(kids[0])
+    name = names[0] if names else kids[0].getText()
+
+    parameters: list[tuple[str, ir.Expr | None]] = []
+    body_node = None
+    for kid in kids[1:]:
+        if _cls(kid) == "LetFunctionParameterList":
+            for parameter in _rule_children(kid):
+                if _cls(parameter) != "ScalarParameter":
+                    raise _unsupported(parameter, "let function parameter")
+                parameters.append(_lower_let_parameter(parameter))
+        elif _cls(kid) == "LetFunctionBody":
+            body_node = kid
+
+    if body_node is None:
+        raise _unsupported(decl, "let function")
+    inner = [k for k in _rule_children(body_node) if _cls(k) != "LetStatement"]
+    if len(inner) != 1:
+        raise KqlUnsupportedError(
+            f"let function:{name}",
+            span=_span(decl),
+            hint="only a single-expression body is supported",
+        )
+    value = _collapse(inner[0])
+    # The parameters count as scalars in scope for this test. Without them a
+    # body that is just a parameter — `let F = (a:long) { a }` — reads as a bare
+    # name bound to nothing, which `_is_tabular_value` calls a table alias, and
+    # the function was refused as tabular.
+    scope: Scalars = {
+        **scalars,
+        **{name: ir.ColumnRef(name) for name, _ in parameters},
+    }
+    if _is_tabular_value(value, scope):
+        raise KqlUnsupportedError(
+            f"let function:{name}",
+            span=_span(decl),
+            hint="a tabular body is not supported; this handles scalar "
+            "functions, whose body substitutes into an expression",
+        )
+    body = _substitute(_lower_expr(value), scalars)
+    _LET_FUNCTIONS[name] = LetFunction(name, tuple(parameters), body)
+
+
+def _lower_let_parameter(node: Any) -> tuple[str, ir.Expr | None]:
+    """One ``name:type`` of a parameter list, with its optional default."""
+    name = None
+    default: ir.Expr | None = None
+    for kid in _rule_children(node):
+        cls = _cls(kid)
+        if cls == "ParameterName":
+            found = _find_names(kid)
+            name = found[0] if found else kid.getText()
+        elif cls == "ScalarParameterDefault":
+            inner = _rule_children(kid)
+            if not inner:
+                raise _unsupported(kid, "let function parameter default")
+            default = _lower_expr(inner[0])
+    if name is None:
+        raise _unsupported(node, "let function parameter")
+    return name, default
 
 
 def _lower_let_entity_groups(tree: Any) -> list[tuple[str, tuple[Entity, ...]]]:
@@ -1870,7 +2055,8 @@ def _lower_lets(
             # group is neither a scalar nor a table.
             continue
         if kind == "LetFunctionDeclaration":
-            raise _unsupported(decl, "let function")
+            _declare_let_function(decl, scalars)
+            continue
 
         kids = _rule_children(decl)
         if len(kids) < 2:

@@ -115,13 +115,13 @@ returns an approximate answer.
 |---|---|
 | `let` (scalar) | Substituted into the query before translation. |
 | `let` (tabular) | Becomes a named CTE. `x in (A)` resolves the name to that CTE — including inside another `let`, a join's right side, or a union branch. **Residue:** when a *column* in scope has the same name as the tabular `let`, this binds the `let` where Kusto binds the column and then rejects the query (SEM0040); telling them apart needs the input's column names, which lowering does not have. |
+| `let` (function) | Needs inlining with argument substitution and scope handling. A partial version would translate some calls and silently mis-scope others. |
 | `declare query_parameters` | Bound as a **value**, never spliced into the SQL. See [Getting started](getting-started.md#query-parameters-and-user-input). |
 
 ### Not supported
 
 | Statement | Notes |
 |---|---|
-| `let` (function) | Needs inlining with argument substitution and scope handling. A partial version would translate some calls and silently mis-scope others. |
 | `set` | Request options as a statement. Silently ignoring one — `query_now`, `truncationmaxrecords` — would change what the caller believes happened, so it raises instead. Same reasoning as [the client's option table](kusto-client.md#request-options). |
 | `alias database` | Names a remote database. There is no cluster, and resolving it locally would answer a question about somewhere else with data from here. |
 | `declare pattern` | A query-time macro expansion mechanism. Rare, and expanding it wrongly would be invisible. |

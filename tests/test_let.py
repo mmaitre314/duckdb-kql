@@ -85,10 +85,11 @@ def test_tabular_let_can_be_joined(con) -> None:
     assert sorted(rel.fetchall()) == [(1, "x", "p"), (9, "x", "q")]
 
 
-def test_let_function_declarations_still_refuse(con) -> None:
-    """User-defined functions are a later wave; refusing beats guessing."""
-    with pytest.raises(duckdb_kql.KqlUnsupportedError):
-        duckdb_kql.to_sql("let f = (a:int) { a + 1 }; print f(1)")
+def test_let_function_declarations_are_inlined(con) -> None:
+    """These were "a later wave" and are now implemented — see
+    `tests/test_let_function.py` for the measured scoping rules. Kept here
+    because this file is where a reader looks for what `let` can bind."""
+    assert _rows(con, "let f = (a:int) { a + 1 }; print f(1)")[0][0] == 2
 
 
 # --- timespan handling that `let` cases exposed ----------------------------
