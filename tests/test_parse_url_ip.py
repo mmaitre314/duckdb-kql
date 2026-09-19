@@ -246,6 +246,38 @@ def test_ipv6_rejects_with_an_empty_string(con, value: str) -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize("column", ["a", "g", "p", "m", "u", "r", "s", "t", "d", "ok"])
+@pytest.mark.parametrize("function", ["parse_ipv4", "parse_ipv6", "parse_url"])
+def test_a_bound_alias_cannot_collide_with_the_column(con, function, column) -> None:
+    """Regression. Binding the stages introduced this and the sweep caught it.
+
+    A correlated subquery that aliases an intermediate `a` sits in a scope where
+    the outer column `a` is also visible, so `SELECT <expr over "a"> AS a` is
+    circular and DuckDB refuses the whole query — `parse_ipv6(a)` stopped
+    working the moment the inline version was replaced, for every input.
+
+    The aliases carry a `_kql` prefix now. That is not proof against an escaped
+    KQL name spelled `['_kqla']`, which nothing here can rule out; it moves the
+    collision from a name people write to one they do not.
+    """
+    duckdb_kql.kql(
+        con,
+        f"datatable({column}:string)['1.2.3.4'] "
+        f"| project x = tostring({function}({column}))",
+    ).fetchall()
+
+
+def test_parse_url_binds_its_stages_instead_of_repeating_them() -> None:
+    """`parse_url` was the worst of the three: a 3.4 KB body with the subject in
+    it fourteen times, so one nested call — `parse_url(strcat(a, b))` — reached
+    46 KB. One `regexp_extract` with a *name list* returns all eight groups as a
+    struct, which removes most of it on its own."""
+    sql = str(
+        duckdb_kql.to_sql("T | project r = parse_url(s)", schema={"T": ["s"]})
+    )
+    assert len(sql) < 4000, f"parse_url emits {len(sql)} characters"
+
+
 def test_parse_ipv6_binds_its_stages_instead_of_repeating_them() -> None:
     """A size assertion, because the cost was invisible in every other test.
 

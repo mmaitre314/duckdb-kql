@@ -3968,46 +3968,32 @@ def _render_parse_ipv4(node: ir.FunctionCall) -> str:
     The whole validation lives in the regex — octet range and prefix range
     included — so the arithmetic below runs only on input already known to be
     well formed, and there is no second place for the two to disagree.
+
+    The trimmed text is bound by a scalar subquery rather than repeated: it is
+    needed eight times, and inline that made a nested call cost eight times the
+    body. See :func:`_render_parse_ipv6` for the same treatment.
     """
     if len(node.args) != 1:
         raise KqlUnsupportedError("parse_ipv4", hint="expects one string argument")
     subject = render_expr(node.args[0])
-    text = f"trim({subject})"
     octets = "\\.".join([_IPV4_OCTET] * 4)
     pattern = quote_string(f"^{octets}(/{_IPV4_PREFIX})?$")
-    address = f"split_part({text}, '/', 1)"
     value = " + ".join(
-        f"CAST(split_part({address}, '.', {i}) AS BIGINT) * {256 ** (4 - i)}"
+        f"CAST(split_part(_kqla, '.', {i}) AS BIGINT) * {256 ** (4 - i)}"
         for i in range(1, 5)
     )
-    prefix = (
-        f"CASE WHEN strpos({text}, '/') > 0 "
-        f"THEN CAST(split_part({text}, '/', 2) AS BIGINT) ELSE 32 END"
-    )
     # 4294967296 - 2^(32-p) is the /p netmask: 0 at /0, 4294967295 at /32.
-    mask = f"(4294967296 - (1 << (32 - {prefix})))"
-    return f"CASE WHEN regexp_matches({text}, {pattern}) THEN (({value}) & {mask}) END"
-
-
-#: scheme://[user:password@]host[:port][path][?query][#fragment].
-#: Userinfo is captured only when it carries a colon — measured, the `user` of
-#: `https://user@h.io/p` ends up in **Host**, as `user@h.io`, not in Username.
-#: A bracketed IPv6 host is one unit.
-_URL_PATTERN = (
-    r"^([A-Za-z][A-Za-z0-9+.\-]*)://"
-    r"(?:([^:@/?#]*):([^@/?#]*)@)?"
-    r"(\[[^\]]*\]|[^:/?#]*)"
-    r"(?::([0-9]*))?"
-    r"([^?#]*)"
-    r"(?:\?([^#]*))?"
-    r"(?:#(.*))?$"
-)
-
-#: The eight keys `parse_url` returns, in the order it returns them.
-_URL_FIELDS = (
-    ("Scheme", 1), ("Host", 4), ("Port", 5), ("Path", 6),
-    ("Username", 2), ("Password", 3),
-)
+    stage = (
+        f"SELECT split_part(_kqlt, '/', 1) AS _kqla, "
+        f"regexp_matches(_kqlt, {pattern}) AS _kqlok, "
+        "CASE WHEN strpos(_kqlt, '/') > 0 "
+        "THEN CAST(split_part(_kqlt, '/', 2) AS BIGINT) ELSE 32 END AS _kqlp "
+        f"FROM (SELECT trim({subject}) AS _kqlt)"
+    )
+    return (
+        f"(SELECT CASE WHEN _kqlok "
+        f"THEN (({value}) & (4294967296 - (1 << (32 - _kqlp)))) END FROM ({stage}))"
+    )
 
 
 def _render_parse_ipv6(node: ir.FunctionCall) -> str:
@@ -4046,61 +4032,90 @@ def _render_parse_ipv6(node: ir.FunctionCall) -> str:
     # Stage 1 — lower-cased and trimmed, `%zone` removed, prefix split off.
     text = f"regexp_replace(lower(trim({subject})), '%[^/]*', '')"
     stage1 = (
-        f"SELECT split_part({text}, '/', 1) AS a, "
-        f"CASE WHEN strpos({text}, '/') > 0 "
-        f"THEN TRY_CAST(split_part({text}, '/', 2) AS INTEGER) END AS given"
+        "SELECT split_part(_kqlt, '/', 1) AS _kqla, "
+        "CASE WHEN strpos(_kqlt, '/') > 0 "
+        "THEN TRY_CAST(split_part(_kqlt, '/', 2) AS INTEGER) END AS _kqlgiven "
+        f"FROM (SELECT {text} AS _kqlt)"
     )
 
     # Stage 2 — a trailing dotted quad becomes two hex groups, and decides
     # whether the prefix counts 32 bits or 128.
     quad = quote_string(r"([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$")
-    octets = [f"TRY_CAST(regexp_extract(a, {quad}, {n}) AS INTEGER)" for n in range(1, 5)]
+    octets = [f"TRY_CAST(regexp_extract(_kqla, {quad}, {n}) AS INTEGER)" for n in range(1, 5)]
     tail = quote_string(r"(^|:)([0-9]{1,3}\.){3}[0-9]{1,3}$")
     dotted = (
-        f"regexp_matches(a, {tail}) AND "
+        f"regexp_matches(_kqla, {tail}) AND "
         + " AND ".join(f"{o} < 256" for o in octets)
     )
     pair = f"printf('%x:%x', {octets[0]} * 256 + {octets[1]}, {octets[2]} * 256 + {octets[3]})"
     stage2 = (
-        f"SELECT CASE WHEN d THEN CASE WHEN strpos(a, ':') = 0 "
-        f"THEN '::ffff:' || {pair} ELSE regexp_replace(a, '[0-9.]+$', {pair}) END "
-        f"ELSE a END AS r, "
+        f"SELECT CASE WHEN _kqld THEN CASE WHEN strpos(_kqla, ':') = 0 "
+        f"THEN '::ffff:' || {pair} ELSE regexp_replace(_kqla, '[0-9.]+$', {pair}) END "
+        f"ELSE _kqla END AS _kqlr, "
         # No suffix means the whole address, which is the limit rather than a
         # constant 128: for a dotted form that limit is 32, and defaulting to
         # 128 made every prefix-less `::1.2.3.4` fail its own range check.
-        f"coalesce(given, CASE WHEN d THEN 32 ELSE 128 END) AS p, d "
-        f"FROM (SELECT a, given, {dotted} AS d FROM ({stage1}))"
+        f"coalesce(_kqlgiven, CASE WHEN _kqld THEN 32 ELSE 128 END) AS _kqlp, _kqld "
+        f"FROM (SELECT _kqla, _kqlgiven, {dotted} AS _kqld FROM ({stage1}))"
     )
 
     # Stage 3 — expand `::` into exactly eight groups.
-    left = "list_filter(str_split(split_part(r, '::', 1), ':'), x -> x <> '')"
-    right = "list_filter(str_split(split_part(r, '::', 2), ':'), x -> x <> '')"
+    left = "list_filter(str_split(split_part(_kqlr, '::', 1), ':'), x -> x <> '')"
+    right = "list_filter(str_split(split_part(_kqlr, '::', 2), ':'), x -> x <> '')"
     stage3 = (
-        f"SELECT CASE WHEN strpos(r, '::') > 0 THEN list_concat(list_concat({left}, "
+        f"SELECT CASE WHEN strpos(_kqlr, '::') > 0 THEN list_concat(list_concat({left}, "
         f"list_transform(range(8 - len({left}) - len({right})), x -> '0')), {right}) "
-        f"ELSE str_split(r, ':') END AS g, "
-        f"CASE WHEN d THEN 96 + p ELSE p END AS bits, "
-        f"p BETWEEN 0 AND CASE WHEN d THEN 32 ELSE 128 END "
+        f"ELSE str_split(_kqlr, ':') END AS _kqlg, "
+        f"CASE WHEN _kqld THEN 96 + _kqlp ELSE _kqlp END AS _kqlbits, "
+        f"_kqlp BETWEEN 0 AND CASE WHEN _kqld THEN 32 ELSE 128 END "
         # more than one `::` is not an address; the length difference counts them
-        f"AND length(r) - length(replace(r, '::', '')) <= 2 AS shape "
+        f"AND length(_kqlr) - length(replace(_kqlr, '::', '')) <= 2 AS _kqlshape "
         f"FROM ({stage2})"
     )
 
     value = "CAST(('0x' || x) AS INTEGER)"
     kept = (
-        f"CASE WHEN 16 * i <= bits THEN {value} "
-        f"WHEN 16 * (i - 1) >= bits THEN 0 "
-        f"ELSE {value} & ((65535 << (16 - (bits - 16 * (i - 1)))) & 65535) END"
+        f"CASE WHEN 16 * i <= _kqlbits THEN {value} "
+        f"WHEN 16 * (i - 1) >= _kqlbits THEN 0 "
+        f"ELSE {value} & ((65535 << (16 - (_kqlbits - 16 * (i - 1)))) & 65535) END"
     )
     valid = (
-        "shape AND len(g) = 8 "
-        "AND len(list_filter(g, x -> regexp_matches(x, '^[0-9a-f]{1,4}$'))) = 8"
+        "_kqlshape AND len(_kqlg) = 8 "
+        "AND len(list_filter(_kqlg, x -> regexp_matches(x, '^[0-9a-f]{1,4}$'))) = 8"
     )
-    masked = f"list_transform(g, (x, i) -> lpad(printf('%x', {kept}), 4, '0'))"
+    masked = f"list_transform(_kqlg, (x, i) -> lpad(printf('%x', {kept}), 4, '0'))"
     return (
         f"(SELECT CASE WHEN {valid} "
         f"THEN list_aggregate({masked}, 'string_agg', ':') ELSE '' END FROM ({stage3}))"
     )
+
+
+#: scheme://[user:password@]host[:port][path][?query][#fragment].
+#: Userinfo is captured only when it carries a colon — measured, the `user` of
+#: `https://user@h.io/p` ends up in **Host**, as `user@h.io`, not in Username.
+#: A bracketed IPv6 host is one unit.
+_URL_PATTERN = (
+    r"^([A-Za-z][A-Za-z0-9+.\-]*)://"
+    r"(?:([^:@/?#]*):([^@/?#]*)@)?"
+    r"(\[[^\]]*\]|[^:/?#]*)"
+    r"(?::([0-9]*))?"
+    r"([^?#]*)"
+    r"(?:\?([^#]*))?"
+    r"(?:#(.*))?$"
+)
+
+
+#: The pattern's capture groups, **in group order** — the name list handed to
+#: `regexp_extract`, which maps names onto groups by position.
+_URL_GROUPS = ("s", "user", "pw", "host", "port", "path", "query", "frag")
+
+#: Output key -> the group it comes from. `Query Parameters` and `Fragment` are
+#: appended separately, so this is the plain six; the order is the order Kusto
+#: returns them in, which is not the pattern's.
+_URL_FIELDS = (
+    ("Scheme", "s"), ("Host", "host"), ("Port", "port"), ("Path", "path"),
+    ("Username", "user"), ("Password", "pw"),
+)
 
 
 def _render_parse_url(node: ir.FunctionCall) -> str:
@@ -4122,57 +4137,69 @@ def _render_parse_url(node: ir.FunctionCall) -> str:
 
     Anything that does not match answers the same object with every field empty
     — not null — which is what a failed `regexp_extract` gives for free.
+
+    **Written as nested scalar subqueries**, for the reason
+    :func:`_render_parse_ipv6` is. One `regexp_extract` with a *name list*
+    returns all eight groups as a struct, and the query string then feeds the
+    pair list, the key list and each key's values. Spelled inline that repeated
+    the subject fourteen times over a 3.4 KB body, so a single nested call —
+    `parse_url(strcat(a, b))` is enough — reached 46 KB.
     """
     if len(node.args) != 1:
         raise KqlUnsupportedError("parse_url", hint="expects one string argument")
     subject = render_expr(node.args[0])
     pattern = quote_string(_URL_PATTERN)
+    names = ", ".join(quote_string(g) for g in _URL_GROUPS)
 
-    def group(n: int) -> str:
-        return f"regexp_extract({subject}, {pattern}, {n})"
+    # Stage 1 — the whole match in one pass, plus the raw text the path rule
+    # needs. `regexp_extract` with a name list returns a struct, and a non-match
+    # fills every field with the empty string rather than null.
+    stage1 = (
+        f"SELECT regexp_extract(_kqlu, {pattern}, [{names}]) AS _kqlm, _kqlu "
+        f"FROM (SELECT {subject} AS _kqlu)"
+    )
+    # Stage 2 — the query string split into key/value pairs, once.
+    stage2 = (
+        "SELECT _kqlm, _kqlu, list_transform(list_filter(str_split(_kqlm.query, '&'), "
+        "p -> strpos(p, '=') > 1 AND length(p) > strpos(p, '=')), "
+        "p -> {'k': p[1:strpos(p, '=') - 1], 'v': p[strpos(p, '=') + 1:]}) AS _kqlps "
+        f"FROM ({stage1})"
+    )
 
     # A lone `/` is the empty path only when the input ends there; a `?` or `#`
     # anywhere means the slash was a real path. Neither can occur *inside* the
     # path, so testing the whole string is safe.
     path = (
-        f"CASE WHEN {group(6)} = '/' AND NOT regexp_matches({subject}, '[?#]') "
-        f"THEN '' ELSE {group(6)} END"
+        "CASE WHEN _kqlm.path = '/' AND NOT regexp_matches(_kqlu, '[?#]') "
+        "THEN '' ELSE _kqlm.path END"
     )
-    rendered = {name: group(n) for name, n in _URL_FIELDS}
-    rendered["Path"] = path
+    fields = {name: f"_kqlm.{field}" for name, field in _URL_FIELDS}
+    fields["Path"] = path
 
     # Built as text rather than through `json_object` so the key order is this
     # function's to set; Kusto's is fixed and not alphabetical.
     body = " || ',' || ".join(
-        [f"""'"{name}":' || to_json({sql})::VARCHAR""" for name, sql in rendered.items()]
-        + [f"""'"Query Parameters":' || {_url_query_object(group(7))}"""]
-        + [f"""'"Fragment":' || to_json({group(8)})::VARCHAR"""]
+        [f"""'"{name}":' || to_json({sql})::VARCHAR""" for name, sql in fields.items()]
+        + [f"""'"Query Parameters":' || {_URL_QUERY_OBJECT}"""]
+        + ["""'"Fragment":' || to_json(_kqlm.frag)::VARCHAR"""]
     )
-    return f"CAST('{{' || {body} || '}}' AS JSON)"
+    return f"(SELECT CAST('{{' || {body} || '}}' AS JSON) FROM ({stage2}))"
 
 
-def _url_query_object(query: str) -> str:
-    """The `Query Parameters` object, as JSON *text*.
-
-    Built as text rather than through `json_object` so the key order is this
-    function's to set: Kusto sorts them, and a repeated key becomes an array
-    rather than the last value winning.
-    """
-    pairs = (
-        f"list_transform(list_filter(str_split({query}, '&'), "
-        f"p -> strpos(p, '=') > 1 AND length(p) > strpos(p, '=')), "
-        f"p -> {{'k': p[1:strpos(p, '=') - 1], 'v': p[strpos(p, '=') + 1:]}})"
-    )
-    values = f"list_transform(list_filter({pairs}, x -> x.k = k), x -> x.v)"
-    entry = (
-        f"to_json(k)::VARCHAR || ':' || CASE WHEN len({values}) = 1 "
-        f"THEN to_json({values}[1])::VARCHAR ELSE to_json({values})::VARCHAR END"
-    )
-    entries = (
-        f"list_transform(list_sort(list_distinct("
-        f"list_transform({pairs}, x -> x.k))), k -> {entry})"
-    )
-    return f"('{{' || coalesce(list_aggregate({entries}, 'string_agg', ','), '') || '}}')"
+#: The `Query Parameters` object, as JSON *text*, over the bound pair list `ps`.
+#:
+#: Built as text rather than through `json_object` so the key order is ours to
+#: set: Kusto sorts the keys, and a repeated key becomes an array rather than
+#: the last value winning.
+_URL_VALUES = "list_transform(list_filter(_kqlps, x -> x.k = k), x -> x.v)"
+_URL_ENTRY = (
+    f"to_json(k)::VARCHAR || ':' || CASE WHEN len({_URL_VALUES}) = 1 "
+    f"THEN to_json({_URL_VALUES}[1])::VARCHAR ELSE to_json({_URL_VALUES})::VARCHAR END"
+)
+_URL_QUERY_OBJECT = (
+    "('{' || coalesce(list_aggregate(list_transform(list_sort(list_distinct("
+    f"list_transform(_kqlps, x -> x.k))), k -> {_URL_ENTRY}), 'string_agg', ','), '') || '}}')"
+).replace("'}}'", "'}'")
 
 
 def _render_coalesce(node: ir.FunctionCall) -> str:
