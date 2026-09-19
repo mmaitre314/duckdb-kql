@@ -1052,6 +1052,48 @@ The rule is therefore order-insensitive.
 Needs the input column list, so it does not fire without a schema — the same
 limit R7's collision check has.
 
+### R22 — A scalar `let` is **substituted**, not evaluated once
+*Trap: `tests/test_let_sharing.py`*
+
+`let` is a macro over the query text, not a binding evaluated one time and
+reused. Measured on the emulator:
+
+```
+let r = rand(); datatable(x:int)[1] | project a = r, b = r, c = r
+                                 ->   three different numbers
+rand() == rand()                 ->   false
+```
+
+So a binding read *n* times is emitted *n* times, and that is the semantics
+rather than an implementation shortcut. `new_guid()` looks like a
+counter-example and is not: two separate calls to it compare **equal** within a
+row, so it says nothing about `let` — the probe that used it answered this
+question backwards.
+
+The consequence is a cost, not a wrong answer: a chain of bindings each read
+twice is 2^n copies of the first, and a reported ten-step chain translated
+13 KB of KQL into 1.39 MB of SQL. The emitter may therefore compute a repeated
+sub-expression **once**, in a derived table under the operator's FROM, and read
+it as a column — but only where doing so is unobservable:
+
+- never for a **volatile** expression, which is the one `rand()` distinguishes;
+- only when the expression is *also* read somewhere the row already evaluates
+  unconditionally, so that binding it adds no evaluation. Hoisting out of an
+  untaken `iff` branch can turn an answer into a DuckDB error — the same trap
+  `parse_ipv4` carries `TRY_CAST` for;
+- only when the **input column names are known**, because the stages carry the
+  input through with `SELECT *` and a column already bearing the generated name
+  would answer in its place, silently. Without a schema nothing is bound.
+
+See `src/duckdb_kql/translate/sharing.py` for the three encodings of "compute it
+once" that were measured, and why the nested derived table is the only one that
+is both small and fast.
+
+Kusto is *stricter* than this translator about where a scalar `let` may be
+written: `let a = tolower(s); T | project a` is SEM0100 there — a top-level
+`let` is a scalar constant and cannot read a table column — and we accept it.
+That is a separate divergence, recorded in §9.
+
 ---
 
 ## 5. Tabular operator conventions
@@ -1142,6 +1184,14 @@ sends every contributor through §4 before they map anything.
 - Whether the emitter builds SQL strings directly or via `sqlglot`
   (`implementation-options.md` Option 2) — deferred; keep the emitter behind a
   narrow interface either way.
+- A **top-level** scalar `let` that reads a table column is accepted here and
+  refused by Kusto. `let a = tolower(s); T | project r = a` answers SEM0100 on
+  the emulator — a top-level `let` is a scalar constant, and `s` is not in scope
+  where it is written — while we resolve `s` against whatever table follows.
+  Measured 2026-09-19. This is R21's failure in a different clothing: a query
+  that runs here and fails in production. Untouched so far because the fix is a
+  scope rule, not a mapping, and the same spelling *inside* a function body —
+  where the column arrives as a parameter — is legal and common.
 - ~~Null-ordering defaults for `sort` (R6).~~ **Settled 2026-08-05:** KQL treats
   null as the **smallest** value — `sort by x asc` returns null first, `desc`
   returns it last. The emitter had this inverted while its comments asserted the

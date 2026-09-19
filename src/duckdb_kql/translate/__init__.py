@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any
 
 from .. import ir
 from ..errors import KqlUnsupportedError
+from . import sharing
 from .functions import (
     _TODATETIME,
     _TOTIMESPAN,
@@ -171,6 +172,12 @@ def render_literal(lit: ir.Literal) -> str:
 
 
 def render_expr(node: ir.Expr) -> str:
+    bound = sharing.slot_for(node)
+    if bound is not None:
+        # This operator computes *node* once, in a derived table under its FROM,
+        # and reads the column here. See translate/sharing.py for when it may.
+        return quote_ident(bound)
+
     if isinstance(node, ir.Literal):
         return render_literal(node)
 
@@ -505,6 +512,11 @@ def render_datatable(dt: ir.DataTable) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _quoted(names: list[str]) -> str:
+    """A comma-separated, double-quoted identifier list."""
+    return ", ".join(quote_ident(n) for n in names)
+
+
 def render_operator(op: ir.Operator, prev: str, cols: list[str] | None = None) -> str:
     """Render one operator as a SELECT over *prev*.
 
@@ -513,14 +525,28 @@ def render_operator(op: ir.Operator, prev: str, cols: list[str] | None = None) -
     `extend` and `mv-expand` need it, both to keep a replaced column in place.
     """
     if isinstance(op, ir.Where):
-        return f"SELECT * FROM {prev} WHERE {render_expr(op.predicate)}"
+        scope = sharing.bind_repeats([op.predicate], prev, cols)
+        try:
+            predicate = render_expr(op.predicate)
+        finally:
+            sharing.release()
+        # `SELECT *` would carry the bound columns into the output, so anything
+        # bound is excluded again here — the binding is an implementation of the
+        # predicate, not a column the query asked for.
+        kept = "*" if not scope.names else f"* EXCLUDE ({_quoted(scope.names)})"
+        return f"SELECT {kept} FROM {scope.source} WHERE {predicate}"
 
     if isinstance(op, ir.Project):
-        cols = [
-            f"{render_expr(e.expr)} AS {quote_ident(output_name(e, i))}"
-            for i, e in enumerate(op.expressions)
-        ]
-        return f"SELECT {', '.join(cols)} FROM {prev}"
+        scope = sharing.bind_repeats([e.expr for e in op.expressions], prev, cols)
+        try:
+            projected = [
+                f"{render_expr(e.expr)} AS {quote_ident(output_name(e, i))}"
+                for i, e in enumerate(op.expressions)
+            ]
+        finally:
+            sharing.release()
+        # No EXCLUDE needed: `project` writes its output columns out in full.
+        return f"SELECT {', '.join(projected)} FROM {scope.source}"
 
     if isinstance(op, ir.Extend):
         # `extend` REPLACES a column whose name already exists, **in its original
@@ -528,10 +554,19 @@ def render_operator(op: ir.Operator, prev: str, cols: list[str] | None = None) -
         # silently wrong on a collision — DuckDB emits two columns named `c`
         # without complaining.
         names = [output_name(e, i) for i, e in enumerate(op.expressions)]
-        rendered = {
-            n: f"{render_expr(e.expr)} AS {quote_ident(n)}"
-            for e, n in zip(op.expressions, names, strict=True)
-        }
+        scope = sharing.bind_repeats(
+            [e.expr for e in op.expressions],
+            prev,
+            None if cols is None else cols + names,
+        )
+        try:
+            rendered = {
+                n: f"{render_expr(e.expr)} AS {quote_ident(n)}"
+                for e, n in zip(op.expressions, names, strict=True)
+            }
+        finally:
+            sharing.release()
+        prev = scope.source
         if cols is not None:
             # Column order is user-visible (TRANSLATION.md §1, §5), so when the
             # incoming columns are known the list is written out explicitly: a
@@ -544,7 +579,7 @@ def render_operator(op: ir.Operator, prev: str, cols: list[str] | None = None) -
         # NOT IN (...))` filters dynamically, so it is correct either way — but
         # it appends, so a *replaced* column moves to the end. That is the one
         # residual divergence, and it is why Layer 1 always passes a schema.
-        excluded = ", ".join(quote_string(n) for n in names)
+        excluded = ", ".join(quote_string(n) for n in names + scope.names)
         added = ", ".join(rendered[n] for n in names)
         return f"SELECT COLUMNS(x -> x NOT IN ({excluded})), {added} FROM {prev}"
 
@@ -652,7 +687,19 @@ def to_sql(query: ir.Query, schema: Schema | None = None) -> TranslationResult:
     *schema* maps table name to column names. It is only consulted for queries
     containing a ``join``, which needs both sides' columns to reproduce KQL's
     column renaming; everything else translates schema-free.
+
+    The barrier is what makes this the entry point rather than a synonym for
+    :func:`_render_query`: a nested query — a tabular `let`, a join's right
+    side, the body of a `toscalar` reached from inside an expression — has its
+    own FROM, and must not read a column the operator *around* it bound. See
+    ``translate/sharing.py``.
     """
+    with sharing.barrier():
+        return _render_query(query, schema)
+
+
+def _render_query(query: ir.Query, schema: Schema | None = None) -> TranslationResult:
+    """:func:`to_sql`'s body, once the enclosing binding scopes are hidden."""
     from ..schema import output_columns
 
     # A tabular `let` becomes a named CTE, so `TableRef(name)` in the body needs
@@ -732,19 +779,32 @@ def _referenced_columns(node: object) -> set[str]:
     notices it was missed. That matters here: a name this misses is a refusal
     that silently does not happen.
     """
-    if isinstance(node, ir.ColumnRef):
-        return {node.name}
-    if isinstance(node, ir.Query):
-        # A subquery (`x in (T | project c)`) has its own column scope.
-        return set()
-    if dataclasses.is_dataclass(node) and not isinstance(node, type):
-        found: set[str] = set()
-        for field in dataclasses.fields(node):
-            found |= _referenced_columns(getattr(node, field.name))
-        return found
-    if isinstance(node, (list, tuple)):
-        return set().union(*(_referenced_columns(x) for x in node)) if node else set()
-    return set()
+    found: set[str] = set()
+    # Iterative, and with `seen`, because the IR is a **DAG**: a scalar `let`
+    # read twice is one node reached twice, so a recursive walk visits it once
+    # per path and a chain of ten such bindings costs 2^10 visits. That is not
+    # hypothetical — it was 15.7 million calls on a twenty-step chain, and it
+    # was the whole cost of translating one, dwarfing the emitting.
+    stack: list[object] = [node]
+    seen: set[int] = set()
+    while stack:
+        current = stack.pop()
+        if isinstance(current, ir.ColumnRef):
+            found.add(current.name)
+            continue
+        if isinstance(current, ir.Query):
+            # A subquery (`x in (T | project c)`) has its own column scope.
+            continue
+        if isinstance(current, (list, tuple)):
+            stack.extend(current)
+            continue
+        if not dataclasses.is_dataclass(current) or isinstance(current, type):
+            continue
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        stack.extend(getattr(current, f.name) for f in dataclasses.fields(current))
+    return found
 
 
 def _refuse_forward_reference(op: ir.Operator, cols: list[str]) -> None:

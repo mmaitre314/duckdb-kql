@@ -33,7 +33,10 @@ from typing import Any
 
 import pytest
 
+import duckdb_kql
 from duckdb_kql.lower import lower
+
+duckdb = pytest.importorskip("duckdb")
 
 
 def chain(depth: int) -> str:
@@ -123,3 +126,242 @@ def test_a_let_is_substituted_not_shared() -> None:
     # the sense that matters: Kusto fixes it for the query, DuckDB for the
     # transaction. Sharing it is sound, and this records that it was checked.
     assert lookup("now") is not None
+
+
+# --------------------------------------------------------------------------
+# Binding the repeat: translate/sharing.py
+# --------------------------------------------------------------------------
+#
+# Keeping the sharing in the IR is only half of it. The emitter still walked the
+# DAG as a tree, so the *SQL* stayed exponential: 1.39 MB for the report's ten
+# steps, 101 MB at twenty. A repeated node now gets a column of its own in a
+# derived table under the operator's FROM, and the references read the column.
+#
+# Three encodings were measured over a million rows before that one was picked
+# (chain depth 20): inline is 101 MB of SQL; one SELECT whose later items read
+# earlier aliases is 2.1 KB and no faster, because DuckDB resolves a lateral
+# alias by substituting it and arrives back where it started; a scalar subquery
+# per binding is 2.2 KB and slower still, being correlated. The nested derived
+# table is 2.1 KB and 0.38s, against 4.3s for inline at depth *14*.
+
+
+ROWS = "datatable(value:string)['EXAMPLE.INVALID', '', 'Mixed.Case']"
+
+#: A table and a function whose local `let` is read twice — the smallest shape
+#: that binds. `tolower(v)` renders to about 240 characters of `typeof` dispatch
+#: (see `render_kql_tostring`), so one saved copy clears the 200-character
+#: threshold on its own.
+T = "datatable(s:string, n:long)['Abc', 1, '', 2, 'ZZ', 3]"
+F = "let f = (v:string) { let a = tolower(v); iff(a == '', 'empty', a) };"
+
+#: What the emulator answers for `chain(d)` over ROWS, at every depth tried.
+CHAIN_ANSWER = [("example.invalid",), ("",), ("mixed.case",)]
+
+
+def sized(depth: int) -> str:
+    return str(duckdb_kql.to_sql(chain(depth).replace("Input", ROWS)))
+
+
+@pytest.mark.parametrize("depth", [2, 6, 10, 20])
+def test_the_sql_grows_linearly_with_the_chain(depth: int) -> None:
+    """The report's number. Before binding this was 2^depth copies of step0.
+
+    The bound SQL is ~120 characters per step. The bound is loose on purpose —
+    pinning the exact size would fail on any unrelated rewording of `tolower` —
+    but no linear bound can be met by a doubling, which is the thing being
+    measured. At depth 20 the unbound form is 101 MB.
+    """
+    assert len(sized(depth)) < 400 * depth + 800
+
+
+def test_the_chain_still_answers_what_the_emulator_answers() -> None:
+    """Measured, at depths 0, 1 and 10 — the answer does not depend on depth."""
+    with duckdb_kql.connect() as con:
+        for depth in (0, 1, 10):
+            rows = duckdb_kql.kql(con, chain(depth).replace("Input", ROWS)).fetchall()
+            assert rows == CHAIN_ANSWER, f"depth {depth}"
+
+
+def test_a_bound_column_does_not_reach_the_output() -> None:
+    """`where` selects `*`, and the binding is not one of the user's columns.
+
+    Measured: `| where f(s) != 'empty' | project s, n` is `Abc, 1` and `ZZ, 3`.
+    Without the EXCLUDE the query still answers those rows — with an extra
+    column bolted on, which `project` then happens to discard. The test asks
+    for the shape *before* the project for that reason.
+    """
+    query = f"{F} {T} | where f(s) != 'empty'"
+    assert '_kqlbind0' in str(duckdb_kql.to_sql(query))  # the binding did happen
+
+    with duckdb_kql.connect() as con:
+        relation = duckdb_kql.kql(con, query)
+        assert relation.columns == ["s", "n"]
+        assert relation.fetchall() == [("Abc", 1), ("ZZ", 3)]
+
+
+def test_extend_keeps_a_replaced_column_in_place() -> None:
+    """The binding goes under the FROM, so the select list is unchanged.
+
+    Measured: `extend s = f(s)` answers columns `s, n` — the replacement stays
+    in position 0 — and `extend r = f(s)` appends, giving `s, n, r`.
+    """
+    with duckdb_kql.connect() as con:
+        replaced = duckdb_kql.kql(con, f"{F} {T} | extend s = f(s)")
+        assert replaced.columns == ["s", "n"]
+        assert replaced.fetchall() == [("abc", 1), ("empty", 2), ("zz", 3)]
+
+        appended = duckdb_kql.kql(con, f"{F} {T} | extend r = f(s)")
+        assert appended.columns == ["s", "n", "r"]
+        assert appended.fetchall() == [
+            ("Abc", 1, "abc"), ("", 2, "empty"), ("ZZ", 3, "zz"),
+        ]
+
+
+def test_a_binding_read_only_inside_branches_is_not_hoisted() -> None:
+    """The guard that stops this being a correctness bug rather than a speedup.
+
+    A binding becomes a column, and a column is computed for every row whether
+    or not the `iff` reading it takes that branch. Hoisting out of an untaken
+    branch can turn an answer into a DuckDB error — not hypothetical: it is why
+    `_render_parse_ipv4` carries `TRY_CAST`, after `parse_ipv4('1.2.3.4/x')`
+    raised ConversionException where Kusto answers null.
+
+    So `a` here, read twice but only in branches, must stay inline; the answer
+    is measured either way and agrees (`abc`, ``, `zz`), which is precisely why
+    this needs a test on the SQL and not only on the rows.
+    """
+    branches = ("let k = (v:string) { let a = tolower(v);"
+                " iff(v startswith 'A', a, a) };")
+    sql = str(duckdb_kql.to_sql(f"{branches} {T} | project r = k(s)"))
+
+    assert "_kqlbind" not in sql
+    with duckdb_kql.connect() as con:
+        assert con.execute(sql).fetchall() == [("abc",), ("",), ("zz",)]
+
+
+def test_one_unconditional_read_is_enough_to_hoist() -> None:
+    """The other half: a read the row already performs costs nothing to hoist.
+
+    `iff(a == '', ...)` reads `a` in the **condition**, which every row
+    evaluates, so computing it in a derived table adds no evaluation that was
+    not already happening. Without this half the guard would refuse every
+    binding the report is about, since `iff` is how the chain is written.
+    """
+    assert "_kqlbind0" in str(duckdb_kql.to_sql(f"{F} {T} | project r = f(s)"))
+
+
+def test_a_volatile_binding_would_not_be_hoisted() -> None:
+    """Pinned on the predicate, because `rand` has no mapping to test through.
+
+    `let r = rand()` read three times is three numbers on the emulator. If that
+    ever renders, it must render three times.
+    """
+    from duckdb_kql import ir
+    from duckdb_kql.translate import sharing
+
+    call = ir.FunctionCall("rand", ())
+    assert not sharing._bindable(call)
+    assert not sharing._bindable(ir.FunctionCall("strcat", (call, call)))
+    assert sharing._bindable(ir.FunctionCall("tolower", (ir.ColumnRef("s"),)))
+
+
+def test_nothing_is_bound_without_a_known_column_scope() -> None:
+    """A column already called `_kqlbind0` answered in place of the binding.
+
+    The stages carry the input through with `SELECT *`, so a column of the slot's
+    name arrives beside it and DuckDB resolves the reference to the first of the
+    two, silently. Measured, over a table with columns `s` and `_kqlbind0`:
+    `project r = f(s)` answered that column's value. Where the columns *are*
+    known the prefix lengthens until it is free, and where they are not, nothing
+    is bound.
+    """
+    with duckdb_kql.connect() as con:
+        con.execute('CREATE TABLE V(s VARCHAR, "_kqlbind0" VARCHAR)')
+        con.execute("INSERT INTO V VALUES ('Ab', 'keep')")
+
+        schemaless = str(duckdb_kql.to_sql(f"{F} V | project r = f(s)"))
+        assert "_kqlbind" not in schemaless
+        assert con.execute(schemaless).fetchall() == [("ab",)]
+
+        # Layer 1 has the schema, so it binds — under a name nothing shadows.
+        with_schema = str(
+            duckdb_kql.to_sql(f"{F} V | project r = f(s)", schema={"V": ["s", "_kqlbind0"]})
+        )
+        assert '"__kqlbind0"' in with_schema
+        assert con.execute(with_schema).fetchall() == [("ab",)]
+        assert duckdb_kql.kql(con, f"{F} V | project r = f(s)").fetchall() == [("ab",)]
+
+
+def test_a_nested_query_does_not_read_the_outer_binding() -> None:
+    """The barrier. A nested query has its own FROM and no `_kqlbind0` in it."""
+    from duckdb_kql.translate import sharing
+
+    assert sharing._ACTIVE == [], "a scope leaked out of an earlier test"
+
+    query = (
+        f"{F} let Other = {T} | project s;\n"
+        f"{T} | where f(s) != 'empty' | project r = f(s)"
+    )
+    with duckdb_kql.connect() as con:
+        assert duckdb_kql.kql(con, query).fetchall() == [("abc",), ("zz",)]
+    assert sharing._ACTIVE == [], "the scope stack is not balanced"
+
+
+def test_the_emitted_shape_is_pinned() -> None:
+    """The frozen corpus does not reach this path, so something has to.
+
+    `tools/sql_snapshot.py` is the gate for everything else the emitter does,
+    and it comes back byte-identical for this change — no corpus query has a
+    repeat large enough to bind. That is the right outcome, and it leaves the
+    new emission with no snapshot coverage at all, so the shape is written out
+    here once, in full: one derived table under the operator's FROM, carrying
+    the input through with `SELECT *`, and the select list reading the column.
+    """
+    fn = "let g = (m:long) { let a = m * 2 + 1; a + a + a + a + a + a };"
+    sql = str(duckdb_kql.to_sql(f"{fn} T | project r = g(n)", schema={"T": ["n"]}))
+
+    assert sql == (
+        'WITH _s0 AS (SELECT * FROM "T"),\n'
+        '     _s1 AS (SELECT ((((("_kqlbind0" + "_kqlbind0") + "_kqlbind0")'
+        ' + "_kqlbind0") + "_kqlbind0") + "_kqlbind0") AS "r"'
+        ' FROM (SELECT *, (("n" * CAST(2 AS BIGINT)) + CAST(1 AS BIGINT))'
+        ' AS "_kqlbind0" FROM _s0))\n'
+        "SELECT * FROM _s1"
+    )
+
+
+def _small_chain(depth: int) -> str:
+    """A doubling chain whose *unit* is far too small to clear the threshold."""
+    lets = ["let s0 = m + 1;"]
+    lets += [f"let s{i} = s{i - 1} + s{i - 1};" for i in range(1, depth + 1)]
+    return (
+        "let f = (m:long) { " + " ".join(lets) + f" s{depth} }};\n"
+        "T | project r = f(n)"
+    )
+
+
+@pytest.mark.parametrize("depth", [5, 10, 20, 40])
+def test_a_threshold_cannot_reintroduce_the_doubling(depth: int) -> None:
+    """The threshold is greedy and per-node, which looks like a hole and is not.
+
+    `a + a` with a short `a` saves too little to be worth a derived table, so
+    nothing binds — and that is the exact shape the report is about. The reason
+    it is still safe: the inlined text **doubles with it**, so after two or
+    three steps one copy is over the threshold on its own and binds. The gap
+    between bindings is therefore bounded by the threshold, and the growth is
+    linear whatever the unit size. Measured: 415 characters at depth 5, 2,939 at
+    depth 40, for a chain that would otherwise be 2^40 copies.
+    """
+    sql = str(duckdb_kql.to_sql(_small_chain(depth), schema={"T": ["n"]}))
+
+    assert len(sql) < 100 * depth + 400
+
+
+def test_the_small_chain_still_computes_the_right_number() -> None:
+    """A size bound proves nothing if the arithmetic stopped being right."""
+    with duckdb_kql.connect() as con:
+        con.execute("CREATE TABLE T(n BIGINT)")
+        con.execute("INSERT INTO T VALUES (1)")
+        rows = duckdb_kql.kql(con, _small_chain(20)).fetchall()
+
+    assert rows == [(2 * 2**20,)]
