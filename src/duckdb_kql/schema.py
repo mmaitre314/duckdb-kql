@@ -257,9 +257,18 @@ def _operator_columns_unchecked(
     if isinstance(op, ir.Distinct):
         return target_names(op.expressions)
     if isinstance(op, ir.Summarize):
+        from .translate import arg_max_names
+
         out = target_names(op.by)
         for agg in op.aggregates:
-            out.append(disambiguate(aggregate_name(agg), out))
+            # `arg_max`/`arg_min` are the only aggregates producing several
+            # output columns from one call. Counting one each left every column
+            # after the first invisible to the next operator, so
+            # `summarize arg_max(stamp, *) by key | project value` was refused
+            # for a column the summarize does produce.
+            several = arg_max_names(agg, list(out), cols)
+            for name in several or [aggregate_name(agg)]:
+                out.append(disambiguate(name, out))
         return out
     if isinstance(op, ir.Join):
         left, right = cols, output_columns(op.right, schema)

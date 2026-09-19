@@ -472,7 +472,12 @@ class LetFunction:
 
     name: str
     parameters: tuple[tuple[str, ir.Expr | None], ...]
-    body: ir.Expr
+    body: ir.Expr | None = None
+    #: The name of the **tabular** parameter, when the function takes one. Such
+    #: a function is a *pipeline*, not an expression: it is reached by `invoke`
+    #: rather than by being called, and `operators` holds its body.
+    tabular: str | None = None
+    operators: tuple[ir.Operator, ...] = ()
 
 
 def _lower_function_call(node: Any) -> ir.Expr:
@@ -505,6 +510,22 @@ def _inline_let_function(
     name**: with a column `s` in scope, `F('xy')` over `let F = (s:string) {
     strlen(s) }` answers 2, the argument's length, not the column's.
     """
+    assert declared.body is not None
+    binding = _bind_let_arguments(node, declared, args)
+    # `_substitute` walks the whole IR and is typed Any for that reason; the
+    # body went in as an Expr and a substitution cannot change that.
+    inlined: ir.Expr = _substitute(declared.body, binding)
+    return inlined
+
+
+def _bind_let_arguments(
+    node: Any, declared: LetFunction, args: tuple[ir.Expr, ...]
+) -> Scalars:
+    """Match call arguments to *declared*'s scalar parameters, defaults included.
+
+    Shared by a scalar call and by `invoke`, whose scalar arguments bind the
+    same way — the tabular parameter is the pipeline and never appears here.
+    """
     required = [name for name, default in declared.parameters if default is None]
     if len(args) > len(declared.parameters) or len(args) < len(required):
         raise KqlUnsupportedError(
@@ -518,10 +539,7 @@ def _inline_let_function(
         value = args[i] if i < len(args) else default
         assert value is not None  # a missing default is a required parameter
         binding[name] = value
-    # `_substitute` walks the whole IR and is typed Any for that reason; the
-    # body went in as an Expr and a substitution cannot change that.
-    inlined: ir.Expr = _substitute(declared.body, binding)
-    return inlined
+    return binding
 
 
 def _lower_named(node: Any) -> ir.NamedExpr:
@@ -745,6 +763,9 @@ def _lower_operator(node: Any) -> ir.Operator | list[ir.Operator] | None:
             names = _find_names(kids[-1])
             return ir.Count(names[0] if names else kids[-1].getText())
         return ir.Count()
+
+    if kind == "InvokeOperator":
+        return _lower_invoke(node, kids)
 
     if kind in ("MvexpandOperator", "MvExpandOperator"):
         return _lower_mv_expand(node, kids)
@@ -992,10 +1013,20 @@ def _declare_let_function(decl: Any, scalars: Scalars) -> None:
     name = names[0] if names else kids[0].getText()
 
     parameters: list[tuple[str, ir.Expr | None]] = []
+    tabular: str | None = None
     body_node = None
     for kid in kids[1:]:
         if _cls(kid) == "LetFunctionParameterList":
             for parameter in _rule_children(kid):
+                if _cls(parameter) == "TabularParameter":
+                    if tabular is not None:
+                        raise KqlUnsupportedError(
+                            f"let function:{name}",
+                            span=_span(parameter),
+                            hint="only one tabular parameter is supported",
+                        )
+                    tabular = _tabular_parameter_name(parameter)
+                    continue
                 if _cls(parameter) != "ScalarParameter":
                     raise _unsupported(parameter, "let function parameter")
                 parameters.append(_lower_let_parameter(parameter))
@@ -1004,31 +1035,197 @@ def _declare_let_function(decl: Any, scalars: Scalars) -> None:
 
     if body_node is None:
         raise _unsupported(decl, "let function")
-    inner = [k for k in _rule_children(body_node) if _cls(k) != "LetStatement"]
+
+    if tabular is not None:
+        _declare_tabular_function(decl, name, parameters, tabular, body_node, scalars)
+        return
+
+    # The parameters count as scalars in scope for the tabular test below and
+    # for a local `let` that reads one. Without them a body that is just a
+    # parameter — `let F = (a:long) { a }` — reads as a bare name bound to
+    # nothing, which `_is_tabular_value` calls a table alias, and the function
+    # was refused as tabular.
+    parameter_names = [p for p, _ in parameters]
+    scope: Scalars = {
+        **scalars,
+        **{p: ir.ColumnRef(p) for p in parameter_names},
+    }
+
+    # A body is zero or more `let`s and then one expression. Each local is
+    # lowered and substituted as it is met, so a later one sees it — measured:
+    # `let a = x + 1; let b = a * 2; b` over `f(3)` is 8. The parameters stay as
+    # `ColumnRef`s throughout, since it is the *call site* that binds them.
+    locals_: Scalars = dict(scalars)
+    declared = set(parameter_names)
+    inner = []
+    for kid in _rule_children(body_node):
+        if _cls(kid) != "LetFunctionBodyStatement":
+            inner.append(kid)
+            continue
+        _declare_body_local(kid, name, locals_, declared, scope)
+
     if len(inner) != 1:
         raise KqlUnsupportedError(
             f"let function:{name}",
             span=_span(decl),
-            hint="only a single-expression body is supported",
+            hint="the body must end in exactly one expression",
         )
     value = _collapse(inner[0])
-    # The parameters count as scalars in scope for this test. Without them a
-    # body that is just a parameter — `let F = (a:long) { a }` — reads as a bare
-    # name bound to nothing, which `_is_tabular_value` calls a table alias, and
-    # the function was refused as tabular.
-    scope: Scalars = {
-        **scalars,
-        **{name: ir.ColumnRef(name) for name, _ in parameters},
-    }
-    if _is_tabular_value(value, scope):
+    # The locals count too: a body ending in a bare local name — `let lowered =
+    # ...; lowered` — is otherwise a name bound to nothing, which reads as a
+    # table alias and refused the whole function as tabular.
+    if _is_tabular_value(value, {**scope, **locals_}):
         raise KqlUnsupportedError(
             f"let function:{name}",
             span=_span(decl),
             hint="a tabular body is not supported; this handles scalar "
             "functions, whose body substitutes into an expression",
         )
-    body = _substitute(_lower_expr(value), scalars)
+    body = _substitute(_lower_expr(value), locals_)
     _LET_FUNCTIONS[name] = LetFunction(name, tuple(parameters), body)
+
+
+def _lower_invoke(node: Any, kids: list[Any]) -> list[ir.Operator]:
+    """``| invoke f(args)`` — splice a tabular function's body in.
+
+    The function's body is already an operator list over its tabular parameter,
+    and `invoke` is applied to a pipeline that *is* that parameter, so the
+    operators simply continue it. Nothing needs renaming, because
+    `_declare_tabular_function` checked that the body starts at the parameter
+    and stored only what follows.
+
+    Scalar arguments bind exactly as they do for a scalar call.
+    """
+    calls = _find_all(node, "NamedFunctionCallExpression")
+    if not calls:
+        raise _unsupported(node, "invoke")
+    parts = _rule_children(calls[0])
+    if not parts:
+        raise _unsupported(node, "invoke")
+    name = parts[0].getText()
+    declared = _LET_FUNCTIONS.get(name)
+    if declared is None or declared.tabular is None:
+        raise KqlUnsupportedError(
+            f"invoke:{name}",
+            span=_span(node),
+            hint="`invoke` takes a function declared with a tabular parameter, "
+            "as `let f = (rows:(...)) { rows | ... }`",
+        )
+    args = tuple(_lower_expr(k) for k in parts[1:])
+    binding = _bind_let_arguments(node, declared, args)
+    return [_substitute_operator(op, binding) for op in declared.operators]
+
+
+def _tabular_parameter_name(node: Any) -> str:
+    """The name of a ``rows:(col:type, ...)`` parameter.
+
+    The declared row schema is not carried. Kusto checks the argument against it
+    (SEM0252) and this does not: a mismatch reaches DuckDB, which refuses the
+    column the body reads. Both refuse; only the message differs.
+    """
+    for kid in _rule_children(node):
+        if _cls(kid) == "ParameterName":
+            found = _find_names(kid)
+            return found[0] if found else kid.getText()
+    raise _unsupported(node, "let function tabular parameter")
+
+
+def _declare_tabular_function(
+    decl: Any,
+    name: str,
+    parameters: list[tuple[str, ir.Expr | None]],
+    tabular: str,
+    body_node: Any,
+    scalars: Scalars,
+) -> None:
+    """Register ``let f = (rows:(...), ...) { rows | ... }`` for `invoke`.
+
+    A tabular function is a **pipeline**, not an expression: measured, `rows`
+    stands for whatever is piped into `invoke`, and the body's operators run on
+    it — `rows | summarize s=sum(v)` over three rows returns one, so the body
+    genuinely replaces the input rather than extending it.
+
+    That is why this is stored as an operator *list* and not a body expression.
+    `invoke` splices the list onto the pipeline already in hand, which is exactly
+    what the operator does, and it requires the body to start **at** the tabular
+    parameter — anything else is a query this cannot splice into.
+    """
+    inner: list[Any] = []
+    locals_: list[Any] = []
+    for kid in _rule_children(body_node):
+        (locals_ if _cls(kid) == "LetFunctionBodyStatement" else inner).append(kid)
+    if locals_:
+        # Dropping them is not an option and was the first thing this did: the
+        # corpus's `clipped_average` binds `low` and `high` with `toscalar(T |
+        # summarize percentiles(...))` and then filters on them, so ignoring the
+        # bindings emitted SQL referencing a column that does not exist. Each one
+        # is a scalar subquery over the *tabular parameter*, which is a different
+        # feature from a scalar function's locals — those close over values, not
+        # over the pipeline being spliced.
+        raise KqlUnsupportedError(
+            f"let function:{name}",
+            span=_span(decl),
+            hint="a `let` inside a tabular function body is not supported; it "
+            "binds a scalar over the tabular parameter, which needs `toscalar`",
+        )
+    if len(inner) != 1:
+        raise KqlUnsupportedError(
+            f"let function:{name}",
+            span=_span(decl),
+            hint="the body must be one pipeline starting at the tabular parameter",
+        )
+    query = _lower_query_node(_collapse(inner[0]))
+    if not isinstance(query.source, ir.TableRef) or query.source.name != tabular:
+        raise KqlUnsupportedError(
+            f"let function:{name}",
+            span=_span(decl),
+            hint=f"the body must start at `{tabular}`, the tabular parameter; a "
+            "body sourced elsewhere is not something `invoke` can splice into",
+        )
+    operators = tuple(
+        _substitute_operator(op, scalars) for op in query.operators
+    )
+    _LET_FUNCTIONS[name] = LetFunction(
+        name, tuple(parameters), None, tabular, operators
+    )
+
+
+def _declare_body_local(
+    node: Any, function: str, locals_: Scalars, declared: set[str], scope: Scalars
+) -> None:
+    """One ``let name = expr;`` inside a function body, bound into *locals_*.
+
+    A local may not take a **parameter's** name: Kusto refuses that with SEM0079
+    ("Let with the same name was already used in current context"), and allowing
+    it here would silently shadow the argument the call site is about to bind.
+    """
+    statements = [k for k in _rule_children(node) if _cls(k) == "LetStatement"]
+    if len(statements) != 1:
+        raise _unsupported(node, "let function body statement")
+    decls = _rule_children(statements[0])
+    if not decls or _cls(decls[0]) != "LetVariableDeclaration":
+        raise KqlUnsupportedError(
+            f"let function:{function}",
+            span=_span(node),
+            hint="a function body takes plain `let name = expression;` bindings",
+        )
+    kids = _rule_children(decls[0])
+    if len(kids) < 2:
+        raise _unsupported(decls[0], "let")
+    found = _find_names(kids[0])
+    local = found[0] if found else kids[0].getText()
+    _refuse_redeclared_let(local, declared)
+    declared.add(local)
+
+    value = _collapse(kids[-1])
+    if _is_tabular_value(value, {**scope, **locals_}):
+        raise KqlUnsupportedError(
+            f"let function:{function}",
+            span=_span(node),
+            hint=f"the local `let {local}` binds a table; a scalar function's "
+            "body is an expression",
+        )
+    locals_[local] = _substitute(_lower_expr(value), locals_)
 
 
 def _lower_let_parameter(node: Any) -> tuple[str, ir.Expr | None]:

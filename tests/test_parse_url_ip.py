@@ -296,3 +296,23 @@ def test_parse_ipv6_binds_its_stages_instead_of_repeating_them() -> None:
         duckdb_kql.to_sql("datatable(s:string)['::1'] | project r = parse_ipv6(s)")
     )
     assert len(sql) < 8000, f"parse_ipv6 emits {len(sql)} characters"
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "192.0.2.1/not-a-prefix", "https://example.invalid/path", "1.2.3.4/",
+        "/24", "a.b.c.d", "1.2.3.4/1x", "...", "1.2.3.4//8", "",
+    ],
+)
+def test_malformed_input_is_null_and_never_raises(con, value: str) -> None:
+    """Regression. Binding the stages moved the prefix conversion into a
+    subquery's select list, which is evaluated whether or not a later CASE uses
+    it — so `parse_ipv4('192.0.2.1/not-a-prefix')` raised a DuckDB
+    ConversionException where Kusto answers null, and every one of these did.
+
+    `TRY_CAST` throughout. The regex still decides validity; it just no longer
+    has to be the thing that stops a conversion running. On input the regex
+    accepts, every conversion here is over digits and TRY_CAST is CAST.
+    """
+    assert _ip4(con, value) is None

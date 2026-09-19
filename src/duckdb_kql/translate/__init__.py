@@ -1272,31 +1272,25 @@ def render_aggregate(named: ir.NamedExpr) -> str:
 _ARG_EXTREMES = {"arg_max": "max", "arg_min": "min"}
 
 
-def _render_arg_max(
+def arg_max_targets(
     agg: ir.NamedExpr, key_names: list[str], cols: list[str] | None
-) -> list[tuple[str, str]] | None:
-    """``arg_max(ExprToMaximize, ExprToReturn, ...)`` -> one column each.
+) -> tuple[str, ir.ColumnRef, list[ir.ColumnRef]] | None:
+    """``arg_max``/``arg_min`` broken into `(extreme, maximised, returned)`.
 
-    None when *agg* is not one of these, so the ordinary single-column path
-    takes it.
+    None when *agg* is not one of these, so every other aggregate takes the
+    ordinary single-column path.
 
-    Two things stop this being DuckDB's `arg_max` directly, both measured:
+    Shared by the emitter and by :func:`duckdb_kql.schema.output_columns`,
+    because these are the only aggregates producing **several** output columns
+    from one call and the two have to agree on which. They did not: the column
+    walker counted one column per aggregate, so `summarize arg_max(stamp, *) by
+    key | project value` was refused for a `value` the summarize really does
+    produce.
 
-    * **DuckDB's skips rows whose returned value is null.** For
-      `[(t=2, v=null), (t=1, v='y')]` it answers `'y'`; Kusto answers the value
-      at the maximum, which is null. Wrapping the value in a struct fixes it —
-      the struct is never null, so no row is skipped, and the field comes back
-      null as it should.
-    * **When every maximised value is null Kusto still returns a row.** DuckDB's
-      `arg_max` answers null there, so `any_value` supplies the fallback. Which
-      row either engine picks is arbitrary, and with more than one such row the
-      answer is nondeterministic on both sides (R10).
-
-    Output names are KQL's: each column is named after its own expression, and
-    an explicit `m = arg_max(...)` renames only the first. A computed operand is
-    refused — Kusto names those `max_ts_arg1` and `max_`, schemes sampled rather
-    than established, and a wrong column name is a divergence like any other
-    (R12).
+    `*` is every input column except the maximised one and the grouping keys —
+    measured; those are already columns of the output and Kusto does not repeat
+    them. Listing one explicitly *does* repeat it under a suffixed name, which
+    is `disambiguate`'s job and not this one.
     """
     if not isinstance(agg.expr, ir.FunctionCall):
         return None
@@ -1318,40 +1312,74 @@ def _render_arg_max(
             "output of a computed one `max_`, which this does not reproduce",
         )
 
-    picked: list[ir.Expr] = []
+    picked: list[ir.ColumnRef] = []
     for expr in returned:
-        if not isinstance(expr, ir.Wildcard):
-            picked.append(expr)
+        if isinstance(expr, ir.Wildcard):
+            if cols is None:
+                raise KqlUnsupportedError(
+                    f"aggregate:{agg.expr.name}",
+                    hint="`*` needs the input columns; pass schema= or use "
+                    "duckdb_kql.kql(con, ...), or list the columns explicitly",
+                )
+            already = {maximised.name, *key_names}
+            picked.extend(ir.ColumnRef(c) for c in cols if c not in already)
             continue
-        if cols is None:
-            raise KqlUnsupportedError(
-                f"aggregate:{agg.expr.name}",
-                hint="`*` needs the input columns; pass schema= or use "
-                "duckdb_kql.kql(con, ...), or list the columns explicitly",
-            )
-        # Measured: `*` is every input column except the maximised one and the
-        # grouping keys — those are already columns of the output, and Kusto
-        # does not repeat them. Listing one explicitly *does* repeat it, under
-        # a suffixed name, which is `disambiguate`'s job and not this one.
-        already = {maximised.name, *key_names}
-        picked.extend(ir.ColumnRef(c) for c in cols if c not in already)
-
-    order = render_expr(maximised)
-    out: list[tuple[str, str]] = [
-        (agg.name or maximised.name, f"{extreme}({order})")
-    ]
-    for expr in picked:
         if not isinstance(expr, ir.ColumnRef):
             raise KqlUnsupportedError(
                 f"aggregate:{agg.expr.name}",
                 hint="each expression to return must be a column; Kusto names a "
                 "computed one `max_<expr>_argN`, which this does not reproduce",
             )
+        picked.append(expr)
+    return extreme, maximised, picked
+
+
+def arg_max_names(
+    agg: ir.NamedExpr, key_names: list[str], cols: list[str] | None
+) -> list[str] | None:
+    """The output column names of an `arg_max`/`arg_min`, or None."""
+    targets = arg_max_targets(agg, key_names, cols)
+    if targets is None:
+        return None
+    _extreme, maximised, picked = targets
+    return [agg.name or maximised.name, *(e.name for e in picked)]
+
+
+def _render_arg_max(
+    agg: ir.NamedExpr, key_names: list[str], cols: list[str] | None
+) -> list[tuple[str, str]] | None:
+    """``arg_max(ExprToMaximize, ExprToReturn, ...)`` -> one column each.
+
+    Two things stop this being DuckDB's `arg_max` directly, both measured:
+
+    * **DuckDB's skips rows whose returned value is null.** For
+      `[(t=2, v=null), (t=1, v='y')]` it answers `'y'`; Kusto answers the value
+      at the maximum, which is null. Wrapping the value in a struct fixes it —
+      the struct is never null, so no row is skipped, and the field comes back
+      null as it should.
+    * **When every maximised value is null Kusto still returns a row.** DuckDB's
+      `arg_max` answers null there, so `any_value` supplies the fallback. Which
+      row either engine picks is arbitrary, and with more than one such row the
+      answer is nondeterministic on both sides (R10).
+
+    Output names are KQL's and come from :func:`arg_max_names`, so the emitted
+    columns and the ones the schema walker predicts cannot drift apart.
+    """
+    targets = arg_max_targets(agg, key_names, cols)
+    if targets is None:
+        return None
+    extreme, maximised, picked = targets
+    names = arg_max_names(agg, key_names, cols)
+    assert names is not None
+
+    order = render_expr(maximised)
+    out: list[tuple[str, str]] = [(names[0], f"{extreme}({order})")]
+    for name, expr in zip(names[1:], picked, strict=True):
         value = render_expr(expr)
         boxed = f"{{'v': {value}}}"
         out.append(
             (
-                expr.name,
+                name,
                 f"COALESCE(arg_{extreme}({boxed}, {order}), any_value({boxed}))['v']",
             )
         )
@@ -2261,6 +2289,29 @@ _REGEX_ARG_POSITIONS: dict[str, tuple[int, ...]] = {
 }
 
 
+def constant_string(node: ir.Expr) -> str | None:
+    """*node*'s value if it is a compile-time constant string, else None.
+
+    Kusto requires a **scalar constant** where a regex goes (SEM0040), which is
+    not the same as a literal: `strcat('(', '[a-z]+', ')')` is constant and was
+    refused here, while `strcat('(', p, ')')` over a column is not and is
+    refused by both.
+
+    Only `strcat` folds, and only over strings. Kusto's notion of constant is
+    wider — any expression it can evaluate at compile time — but each function
+    added here is another place to get a conversion subtly wrong, and `strcat`
+    is how a pattern actually gets assembled. Anything else falls through to the
+    existing refusal, which costs a query rather than an answer.
+    """
+    if isinstance(node, ir.Literal) and node.kind == "string":
+        return str(node.value)
+    if isinstance(node, ir.FunctionCall) and node.name.lower() == "strcat":
+        parts = [constant_string(a) for a in node.args]
+        if parts and all(part is not None for part in parts):
+            return "".join(part for part in parts if part is not None)
+    return None
+
+
 def render_regex(node: ir.Expr) -> str:
     """Render an expression that DuckDB will read as a **regex**.
 
@@ -2270,17 +2321,16 @@ def render_regex(node: ir.Expr) -> str:
     **literal** pattern: a regex arriving in a column cannot be rewritten at
     translation time, and Kusto requires a constant for most of these anyway.
     """
-    if isinstance(node, ir.Literal) and node.kind == "string":
-        lookaround = find_lookaround(str(node.value))
+    pattern = constant_string(node)
+    if pattern is not None:
+        lookaround = find_lookaround(pattern)
         if lookaround is not None:
             raise KqlUnsupportedError(
                 f"regex lookaround:{lookaround}",
                 hint="RE2 cannot execute lookaround and rejects the whole "
                 "pattern; Kusto refuses it too (SEM0420)",
             )
-        rewritten = to_re2_named_groups(str(node.value))
-        if rewritten != node.value:
-            return render_expr(ir.Literal(rewritten, "string"))
+        return render_expr(ir.Literal(to_re2_named_groups(pattern), "string"))
     return render_expr(node)
 
 
@@ -3978,8 +4028,14 @@ def _render_parse_ipv4(node: ir.FunctionCall) -> str:
     subject = render_expr(node.args[0])
     octets = "\\.".join([_IPV4_OCTET] * 4)
     pattern = quote_string(f"^{octets}(/{_IPV4_PREFIX})?$")
+    # `TRY_CAST`, not `CAST`, throughout. The regex decides validity, but it
+    # decides it in a *different* SELECT item from these conversions, and a
+    # subquery's select list is evaluated whether or not a later CASE uses it —
+    # so `parse_ipv4('192.0.2.1/not-a-prefix')` raised a DuckDB
+    # ConversionException where Kusto answers null. On input the regex accepts,
+    # every one of these is digits and TRY_CAST is the same as CAST.
     value = " + ".join(
-        f"CAST(split_part(_kqla, '.', {i}) AS BIGINT) * {256 ** (4 - i)}"
+        f"TRY_CAST(split_part(_kqla, '.', {i}) AS BIGINT) * {256 ** (4 - i)}"
         for i in range(1, 5)
     )
     # 4294967296 - 2^(32-p) is the /p netmask: 0 at /0, 4294967295 at /32.
@@ -3987,7 +4043,7 @@ def _render_parse_ipv4(node: ir.FunctionCall) -> str:
         f"SELECT split_part(_kqlt, '/', 1) AS _kqla, "
         f"regexp_matches(_kqlt, {pattern}) AS _kqlok, "
         "CASE WHEN strpos(_kqlt, '/') > 0 "
-        "THEN CAST(split_part(_kqlt, '/', 2) AS BIGINT) ELSE 32 END AS _kqlp "
+        "THEN TRY_CAST(split_part(_kqlt, '/', 2) AS BIGINT) ELSE 32 END AS _kqlp "
         f"FROM (SELECT trim({subject}) AS _kqlt)"
     )
     return (
@@ -4323,13 +4379,14 @@ def _capture_group_count(node: ir.Expr) -> int:
     `(?<name>...)` is, which the `(?` test alone got wrong. Parentheses inside a
     character class are literal.
     """
-    if not isinstance(node, ir.Literal) or node.kind != "string":
+    pattern = constant_string(node)
+    if pattern is None:
         raise KqlUnsupportedError(
             "extract_all",
-            hint="the regex must be a literal; Kusto requires a scalar constant "
-            "here too (SEM0040), and its capture groups decide the result shape",
+            hint="the regex must be a compile-time constant — a literal, or "
+            "`strcat` of literals; Kusto requires a scalar constant here too "
+            "(SEM0040), and its capture groups decide the result shape",
         )
-    pattern = str(node.value)
     count, i, in_class = 0, 0, False
     while i < len(pattern):
         c = pattern[i]

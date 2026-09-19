@@ -198,3 +198,67 @@ def test_a_later_operator_sees_its_columns(con) -> None:
     assert _shape(
         con, f"{T} | summarize arg_max(ts, value) by key | where value == 'new'"
     ) == (["key", "ts", "value"], [("a", 2, "new")])
+
+
+# ---------------------------------------------------------------------------
+# What the next operator can see
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "tail,expected",
+    [
+        ("| project key, value=toint(value)", [("one", 20)]),
+        ("| project value", [(20,)]),
+        ("| where value > 5 | project key", [("one",)]),
+        ("| project key, stamp, value", [("one", 2, 20)]),
+        ("| extend doubled = value * 2 | project doubled", [(40,)]),
+    ],
+)
+def test_the_extra_columns_are_visible_downstream(con, tail: str, expected) -> None:
+    """Regression. `arg_max` is the only aggregate emitting several columns from
+    one call, and the *column walker* counted one per aggregate — so everything
+    after the first was invisible to the next operator and
+    `summarize arg_max(stamp, *) by key | project value` was refused for a
+    `value` the summarize does produce (R21's check, on a column list that was
+    wrong rather than a query that was).
+
+    The names now come from one function, `arg_max_names`, which the emitter and
+    the walker share, so the columns emitted and the columns predicted cannot
+    drift apart again.
+    """
+    _columns, rows = _shape(
+        con,
+        "datatable(key:string, stamp:long, value:long)['one',1,10,'one',2,20]"
+        f"| summarize arg_max(stamp, *) by key {tail}",
+    )
+    assert rows == expected
+
+
+def test_an_explicit_list_is_visible_downstream_too(con) -> None:
+    assert _shape(
+        con,
+        "datatable(key:string, stamp:long, value:long)['one',1,10,'one',2,20]"
+        "| summarize arg_max(stamp, value) by key | project key, value=toint(value)",
+    ) == (["key", "value"], [("one", 20)])
+
+
+def test_the_walker_and_the_emitter_agree(con) -> None:
+    """Asserted directly, since the two drifting apart is the whole bug."""
+    from duckdb_kql.lower import lower
+    from duckdb_kql.schema import output_columns
+
+    query = lower(
+        "datatable(key:string, stamp:long, value:long)['one',1,10]"
+        "| summarize arg_max(stamp, *) by key"
+    )
+    predicted = output_columns(query)
+    emitted = [
+        d[0]
+        for d in duckdb_kql.kql(
+            con,
+            "datatable(key:string, stamp:long, value:long)['one',1,10]"
+            "| summarize arg_max(stamp, *) by key",
+        ).description
+    ]
+    assert predicted == emitted == ["key", "stamp", "value"]

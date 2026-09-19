@@ -198,3 +198,55 @@ def test_the_single_number_form_is_left_alone(con) -> None:
     epoch — three rules selected by magnitude and digit count, which the six
     samples taken do not establish. It stays null rather than being invented."""
     assert _one(con, "print d = datetime(2025)") is None
+
+
+# ---------------------------------------------------------------------------
+# A `let` inside the body
+# ---------------------------------------------------------------------------
+
+
+def test_the_reported_local_let(con) -> None:
+    assert _one(
+        con,
+        "let normalize=(value:string) {\n"
+        "    let lowered=tolower(value);\n"
+        "    lowered\n"
+        "};\n"
+        "print result=normalize('TEST')",
+    ) == "test"
+
+
+@pytest.mark.parametrize(
+    "query,expected",
+    [
+        # each local sees the ones before it
+        ("let f=(x:long) {\n let a=x+1;\n let b=a*2;\n b\n};\nprint r = f(3)", 8),
+        # and an outer `let`
+        ("let K=5;\nlet f=(x:long) {\n let a=x+K;\n a\n};\nprint r = f(1)", 6),
+        # the final expression may use a local in a larger expression
+        ("let f=(x:long) {\n let a=x*2;\n a+1\n};\nprint r = f(5)", 11),
+    ],
+)
+def test_locals_chain(con, query: str, expected) -> None:
+    assert _one(con, query) == expected
+
+
+def test_a_local_shadows_a_column(con) -> None:
+    """Same rule as a parameter: the binding wins over a column of that name."""
+    assert _one(
+        con,
+        "let f=(v:string) {\n let s=toupper(v);\n s\n};\n"
+        "datatable(s:string)['q'] | project r = f(s)",
+    ) == "Q"
+
+
+def test_a_local_may_not_take_a_parameter_s_name(con) -> None:
+    """Measured SEM0079, "Let with the same name was already used in current
+    context". Allowing it would silently shadow the argument the call site is
+    about to bind."""
+    with pytest.raises(KqlUnsupportedError, match="already bound"):
+        duckdb_kql.kql(con, "let f=(x:long) {\n let x=x+1;\n x\n};\nprint r = f(3)")
+
+
+def test_a_body_with_no_locals_is_unchanged(con) -> None:
+    assert _one(con, "let f=(v:string) { tolower(v) };\nprint r = f('AB')") == "ab"

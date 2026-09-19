@@ -154,3 +154,60 @@ def test_a_non_literal_pattern_is_left_alone(con) -> None:
         "datatable(s:string, p:string)[' test word', '[a-z]+'] "
         "| project r = replace_regex(s, p, 'X')",
     ) == " X X"
+
+
+# ---------------------------------------------------------------------------
+# A constant regex is not the same as a literal one
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "query,expected",
+    [
+        ("let p = strcat('(', '[a-z]+', ')');\nprint r = extract_all(p, 'abc')", '["abc"]'),
+        ("print r = extract_all(strcat('(', '[a-z]+', ')'), 'abc')", '["abc"]'),
+        ("print r = extract_all(strcat('(', strcat('[a-z]', '+'), ')'), 'abc')", '["abc"]'),
+        ("let p = strcat('(','[a-z]+',')');\nprint r = extract(p, 1, 'abc')", "abc"),
+        ("let p = strcat('(','[a-z]+',')');\nprint r = replace_regex('abc', p, 'X')", "X"),
+    ],
+)
+def test_a_strcat_of_literals_is_a_constant_regex(con, query: str, expected) -> None:
+    """Kusto requires a **scalar constant** here (SEM0040), which is wider than
+    a literal: `strcat('(', '[a-z]+', ')')` folds and it accepts it. This
+    refused it, which is a refusal where a cluster answers.
+
+    `extract_all` needs the fold for a second reason — its result *shape* comes
+    from the capture-group count, which cannot be read off an unfolded call.
+    """
+    assert _one(con, query) == expected
+
+
+def test_a_strcat_over_a_column_is_still_refused(con) -> None:
+    """The line Kusto draws: `strcat('(', p, ')')` over a column is not
+    constant, and it is SEM0040 there too. Folding must not quietly widen it."""
+    with pytest.raises(KqlUnsupportedError, match="constant"):
+        duckdb_kql.kql(
+            con,
+            "datatable(p:string,s:string)['[a-z]+','abc'] "
+            "| project r = extract_all(strcat('(', p, ')'), s)",
+        )
+
+
+def test_the_folder_is_deliberately_narrow() -> None:
+    """Only `strcat`, and only over strings. Kusto folds anything it can
+    evaluate; each function added here is another conversion to get subtly
+    wrong, and anything unfolded falls through to the existing refusal — which
+    costs a query rather than an answer."""
+    from duckdb_kql import ir
+    from duckdb_kql.translate import constant_string
+
+    def lit(value: str) -> ir.Literal:
+        return ir.Literal(value, "string")
+
+    assert constant_string(lit("(a)")) == "(a)"
+    assert constant_string(ir.FunctionCall("strcat", (lit("("), lit("a"), lit(")")))) == "(a)"
+    assert constant_string(ir.FunctionCall("strcat", (lit("("), ir.ColumnRef("p")))) is None
+    assert constant_string(ir.ColumnRef("p")) is None
+    assert constant_string(ir.Literal(5, "long")) is None
+    # not folded on purpose, though Kusto would
+    assert constant_string(ir.FunctionCall("toupper", (lit("a"),))) is None
