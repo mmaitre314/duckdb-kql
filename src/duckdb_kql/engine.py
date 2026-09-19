@@ -445,8 +445,28 @@ def df(
     clusters: ClusterMap | None = None,
     entity_groups: EntityGroupMap | None = None,
 ) -> pd.DataFrame:
-    """Execute the KQL *query* and return a pandas DataFrame."""
-    return kql(con, query, parameters, database, allow_write, clusters, entity_groups).df()
+    """Execute the KQL *query* and return a pandas DataFrame.
+
+    Goes through :func:`execute`, not :func:`kql`, and that is the whole point
+    of the function existing rather than callers writing ``kql(...).df()``.
+    Building a relation binds the statement so the relation can report its
+    schema; fetching it binds again. For ordinary SQL that is a rounding error,
+    but the cost is proportional to the *size* of the statement, and a scalar
+    `let` referenced twice per step doubles that size per step — measured at a
+    depth where the SQL reaches 1.4 MB, the relation path spent about half its
+    wall clock binding a statement it was about to bind again. ``execute`` binds
+    once.
+
+    :func:`kql` keeps the relation, because composing further is what it is for.
+    :func:`arrow` deliberately does *not* get the same treatment: in DuckDB 1.5
+    both paths answer a lazy ``RecordBatchReader``, and two readers over one
+    connection do not survive being held at the same time, so the two spellings
+    are not interchangeable there the way they are here.
+    """
+    translated, bound = _prepare(
+        con, query, parameters, database, allow_write, clusters, entity_groups
+    )
+    return (con.execute(translated, bound) if bound else con.execute(translated)).df()
 
 
 def arrow(
