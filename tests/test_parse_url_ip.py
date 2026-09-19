@@ -239,3 +239,28 @@ def test_a_dotted_tail_makes_the_prefix_an_ipv4_one(con, value: str, expected: s
 def test_ipv6_rejects_with_an_empty_string(con, value: str) -> None:
     """Not null — measured. A caller testing `isempty` sees what Kusto shows."""
     assert _ip6(con, value) == ""
+
+
+# ---------------------------------------------------------------------------
+# The emission, not the answer
+# ---------------------------------------------------------------------------
+
+
+def test_parse_ipv6_binds_its_stages_instead_of_repeating_them() -> None:
+    """A size assertion, because the cost was invisible in every other test.
+
+    The address feeds the dotted-quad test, the `::` expansion, the validity
+    check and the mask, each needing it more than once. Spelled inline that
+    nested to about twenty copies and **63 KB of SQL for one call**, which made
+    this the corpus's slowest query at ~450ms — correct, and the kind of correct
+    the budget test exists to catch. Nested scalar subqueries bind each stage
+    once; a correlated subquery is the only binding form a scalar expression
+    has, and DuckDB resolves the outer column through it.
+
+    The bound is generous on purpose: this guards the order of magnitude, not a
+    byte count.
+    """
+    sql = str(
+        duckdb_kql.to_sql("datatable(s:string)['::1'] | project r = parse_ipv6(s)")
+    )
+    assert len(sql) < 8000, f"parse_ipv6 emits {len(sql)} characters"

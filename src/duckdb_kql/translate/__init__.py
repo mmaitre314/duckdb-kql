@@ -25,7 +25,7 @@ from .functions import (
     lookup_aggregate,
     term_match_sql,
 )
-from .regexfrag import neutralise_groups
+from .regexfrag import find_lookaround, neutralise_groups, to_re2_named_groups
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -228,7 +228,13 @@ def render_expr(node: ir.Expr) -> str:
             raise KqlUnsupportedError(
                 f"operator:{node.op}", hint="no DuckDB mapping in this wave"
             )
-        left, right = render_expr(node.left), render_expr(node.right)
+        left = render_expr(node.left)
+        # `matches regex` is the one operator whose right side is a pattern.
+        right = (
+            render_regex(node.right)
+            if node.op == "matches regex"
+            else render_expr(node.right)
+        )
 
         def build(sqls: Sequence[str]) -> str:
             rendered = _render_term_operator(node, sqls) or spec.template.format(*sqls)
@@ -2244,8 +2250,45 @@ _STRING_ARG_POSITIONS: dict[str, tuple[int, ...]] = {
 }
 
 
+#: (function, argument position) that carries a **user regex**. Every one of
+#: these hands the pattern to RE2 verbatim, so each needs the `.NET` named-group
+#: spelling rewritten — see :func:`render_regex`.
+_REGEX_ARG_POSITIONS: dict[str, tuple[int, ...]] = {
+    "extract": (0,),
+    "extract_all": (0,),
+    "replace_regex": (1,),
+    "trim_start": (0,),
+}
+
+
+def render_regex(node: ir.Expr) -> str:
+    """Render an expression that DuckDB will read as a **regex**.
+
+    Kusto accepts `(?<name>…)` for a named capturing group; RE2 accepts only
+    `(?P<name>…)` and rejects the other outright, so a pattern a cluster runs
+    reached the caller as a raw DuckDB exception. Rewritten only for a
+    **literal** pattern: a regex arriving in a column cannot be rewritten at
+    translation time, and Kusto requires a constant for most of these anyway.
+    """
+    if isinstance(node, ir.Literal) and node.kind == "string":
+        lookaround = find_lookaround(str(node.value))
+        if lookaround is not None:
+            raise KqlUnsupportedError(
+                f"regex lookaround:{lookaround}",
+                hint="RE2 cannot execute lookaround and rejects the whole "
+                "pattern; Kusto refuses it too (SEM0420)",
+            )
+        rewritten = to_re2_named_groups(str(node.value))
+        if rewritten != node.value:
+            return render_expr(ir.Literal(rewritten, "string"))
+    return render_expr(node)
+
+
 def _render_arg(name: str, index: int, node: ir.Expr) -> str:
     """Render one function argument, as a string where KQL reads one."""
+    regexes = _REGEX_ARG_POSITIONS.get(name.lower())
+    if regexes and index in regexes:
+        return render_regex(node)
     positions = _STRING_ARG_POSITIONS.get(name.lower())
     if positions and index in positions and (
         _is_dynamic_expr(node) or _may_be_dynamic(node)
@@ -3977,85 +4020,87 @@ def _render_parse_ipv6(node: ir.FunctionCall) -> str:
     * a **bare IPv4** is the IPv4-mapped address — `203.0.113.10` is
       `::ffff:cb00:710a` in full — and an IPv4 tail anywhere becomes the last
       two groups;
-    * a CIDR suffix **masks**, as `parse_ipv4`'s does, but over 128 bits;
+    * a CIDR suffix **masks**, as `parse_ipv4`'s does, but over 128 bits — and
+      when the address has a dotted tail the prefix is an **IPv4** one:
+      measured, `1.2.3.4/24` and `::ffff:1.2.3.4/24` agree, `/0` still keeps the
+      `::ffff:` mapping, and `/120` is refused where it is legal over 128 bits;
     * invalid input is the **empty string**, not null.
 
     The mask is applied group by group rather than to a 128-bit integer, which
-    keeps it inside DuckDB's exact integer range and out of HUGEINT's sign bit:
-    for group *i* the prefix either covers it whole, misses it whole, or cuts it
+    keeps it inside DuckDB's exact integer range and clear of HUGEINT's sign
+    bit. For group *i* the prefix covers it whole, misses it whole, or cuts it
     partway, and only the last needs arithmetic.
+
+    **Written as nested scalar subqueries** so each stage is computed once.
+    Spelled inline, the address feeds the dotted-quad test, the `::` expansion,
+    the validity check and the mask, each of which needs it more than once — the
+    first version repeated it about twenty times and emitted 63 KB of SQL for a
+    single call, making this the corpus's slowest query. A correlated subquery
+    is the only binding form available inside a scalar expression, and DuckDB
+    resolves the outer column through it.
     """
     if len(node.args) != 1:
         raise KqlUnsupportedError("parse_ipv6", hint="expects one string argument")
     subject = render_expr(node.args[0])
 
-    # lower-cased and trimmed, with any `%zone` removed before the prefix.
+    # Stage 1 — lower-cased and trimmed, `%zone` removed, prefix split off.
     text = f"regexp_replace(lower(trim({subject})), '%[^/]*', '')"
-    address = f"split_part({text}, '/', 1)"
-    given = (
+    stage1 = (
+        f"SELECT split_part({text}, '/', 1) AS a, "
         f"CASE WHEN strpos({text}, '/') > 0 "
-        f"THEN TRY_CAST(split_part({text}, '/', 2) AS INTEGER) END"
+        f"THEN TRY_CAST(split_part({text}, '/', 2) AS INTEGER) END AS given"
     )
 
-    quad = r"([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$"
-    def octet(n: int) -> str:
-        return f"TRY_CAST(regexp_extract({address}, {quote_string(quad)}, {n}) AS INTEGER)"
-
-    pair = f"printf('%x:%x', {octet(1)} * 256 + {octet(2)}, {octet(3)} * 256 + {octet(4)})"
+    # Stage 2 — a trailing dotted quad becomes two hex groups, and decides
+    # whether the prefix counts 32 bits or 128.
+    quad = quote_string(r"([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$")
+    octets = [f"TRY_CAST(regexp_extract(a, {quad}, {n}) AS INTEGER)" for n in range(1, 5)]
     tail = quote_string(r"(^|:)([0-9]{1,3}\.){3}[0-9]{1,3}$")
     dotted = (
-        f"regexp_matches({address}, {tail}) "
-        f"AND {octet(1)} < 256 AND {octet(2)} < 256 "
-        f"AND {octet(3)} < 256 AND {octet(4)} < 256"
+        f"regexp_matches(a, {tail}) AND "
+        + " AND ".join(f"{o} < 256" for o in octets)
     )
-    resolved = (
-        f"CASE WHEN {dotted} THEN CASE WHEN strpos({address}, ':') = 0 "
-        f"THEN '::ffff:' || {pair} ELSE regexp_replace({address}, '[0-9.]+$', {pair}) END "
-        f"ELSE {address} END"
+    pair = f"printf('%x:%x', {octets[0]} * 256 + {octets[1]}, {octets[2]} * 256 + {octets[3]})"
+    stage2 = (
+        f"SELECT CASE WHEN d THEN CASE WHEN strpos(a, ':') = 0 "
+        f"THEN '::ffff:' || {pair} ELSE regexp_replace(a, '[0-9.]+$', {pair}) END "
+        f"ELSE a END AS r, "
+        # No suffix means the whole address, which is the limit rather than a
+        # constant 128: for a dotted form that limit is 32, and defaulting to
+        # 128 made every prefix-less `::1.2.3.4` fail its own range check.
+        f"coalesce(given, CASE WHEN d THEN 32 ELSE 128 END) AS p, d "
+        f"FROM (SELECT a, given, {dotted} AS d FROM ({stage1}))"
     )
 
-    # A dotted tail makes the suffix an **IPv4** prefix: measured, `1.2.3.4/24`
-    # and `::ffff:1.2.3.4/24` are the same answer, `/0` still keeps the `::ffff:`
-    # mapping, and `/120` — legal over 128 bits — is refused. So it is 0..32,
-    # applied to the last 32 bits, which is 96 + p of the whole address.
-    limit = f"CASE WHEN {dotted} THEN 32 ELSE 128 END"
-    # No suffix means the whole address, which is the limit rather than a
-    # constant 128 — for a dotted form the limit is 32, and defaulting to 128
-    # made every prefix-less `::1.2.3.4` fail its own range check.
-    prefix = f"coalesce({given}, {limit})"
-    bits = f"CASE WHEN {dotted} THEN 96 + {prefix} ELSE {prefix} END"
-
-    left = f"list_filter(str_split(split_part({resolved}, '::', 1), ':'), x -> x <> '')"
-    right = f"list_filter(str_split(split_part({resolved}, '::', 2), ':'), x -> x <> '')"
-    groups = (
-        f"CASE WHEN strpos({resolved}, '::') > 0 THEN list_concat(list_concat({left}, "
+    # Stage 3 — expand `::` into exactly eight groups.
+    left = "list_filter(str_split(split_part(r, '::', 1), ':'), x -> x <> '')"
+    right = "list_filter(str_split(split_part(r, '::', 2), ':'), x -> x <> '')"
+    stage3 = (
+        f"SELECT CASE WHEN strpos(r, '::') > 0 THEN list_concat(list_concat({left}, "
         f"list_transform(range(8 - len({left}) - len({right})), x -> '0')), {right}) "
-        f"ELSE str_split({resolved}, ':') END"
-    )
-
-    valid = (
-        f"len({groups}) = 8 "
-        f"AND len(list_filter({groups}, g -> regexp_matches(g, '^[0-9a-f]{{1,4}}$'))) = 8 "
-        f"AND {prefix} BETWEEN 0 AND {limit} "
+        f"ELSE str_split(r, ':') END AS g, "
+        f"CASE WHEN d THEN 96 + p ELSE p END AS bits, "
+        f"p BETWEEN 0 AND CASE WHEN d THEN 32 ELSE 128 END "
         # more than one `::` is not an address; the length difference counts them
-        f"AND length({resolved}) - length(replace({resolved}, '::', '')) <= 2"
+        f"AND length(r) - length(replace(r, '::', '')) <= 2 AS shape "
+        f"FROM ({stage2})"
     )
 
-    # `i` is 1-based, so group `i` covers bits [16(i-1), 16i). The prefix either
-    # covers it whole, misses it whole, or cuts it partway — and only the last
-    # needs arithmetic. The first branch used to read `<= prefix - 16`, which is
-    # one group out: it sent a fully-covered group down the partial path, where
-    # `/24` on group 1 asked DuckDB to shift by -8 and raised.
-    value = "CAST(('0x' || g) AS INTEGER)"
+    value = "CAST(('0x' || x) AS INTEGER)"
     kept = (
-        f"CASE WHEN 16 * i <= {bits} THEN {value} "
-        f"WHEN 16 * (i - 1) >= {bits} THEN 0 "
-        f"ELSE {value} & ((65535 << (16 - ({bits} - 16 * (i - 1)))) & 65535) END"
+        f"CASE WHEN 16 * i <= bits THEN {value} "
+        f"WHEN 16 * (i - 1) >= bits THEN 0 "
+        f"ELSE {value} & ((65535 << (16 - (bits - 16 * (i - 1)))) & 65535) END"
     )
-    masked = (
-        f"list_transform({groups}, (g, i) -> lpad(printf('%x', {kept}), 4, '0'))"
+    valid = (
+        "shape AND len(g) = 8 "
+        "AND len(list_filter(g, x -> regexp_matches(x, '^[0-9a-f]{1,4}$'))) = 8"
     )
-    return f"CASE WHEN {valid} THEN list_aggregate({masked}, 'string_agg', ':') ELSE '' END"
+    masked = f"list_transform(g, (x, i) -> lpad(printf('%x', {kept}), 4, '0'))"
+    return (
+        f"(SELECT CASE WHEN {valid} "
+        f"THEN list_aggregate({masked}, 'string_agg', ':') ELSE '' END FROM ({stage3}))"
+    )
 
 
 def _render_parse_url(node: ir.FunctionCall) -> str:
@@ -4215,7 +4260,7 @@ def _render_extract_all(node: ir.FunctionCall) -> str:
 
     groups = _capture_group_count(regex)
     wanted = _extract_all_capture_groups(selection, groups)
-    pattern, subject = render_expr(regex), render_expr(text)
+    pattern, subject = render_regex(regex), render_expr(text)
 
     if len(wanted) == 1:
         # DuckDB's third argument is the group; without it `regexp_extract_all`

@@ -44,7 +44,7 @@ from __future__ import annotations
 
 from ..errors import KqlUnsupportedError
 
-__all__ = ["neutralise_groups"]
+__all__ = ["neutralise_groups", "to_re2_named_groups", "find_lookaround"]
 
 #: `(?` followed by one of these opens a **lookaround**, which RE2 cannot run.
 _LOOKAROUND = ("=", "!", "<=", "<!")
@@ -53,6 +53,86 @@ _LOOKAROUND = ("=", "!", "<=", "<!")
 #: `(?P<n>` and .NET's `(?<n>` and `(?'n'` all exist in the wild; Kusto accepts
 #: the first two, and recognising the third costs nothing.
 _NAMED_OPENERS = ("P<", "<", "'")
+
+
+def find_lookaround(pattern: str) -> str | None:
+    r"""The first lookaround opener in *pattern*, or None.
+
+    RE2 cannot execute `(?=…)`, `(?!…)`, `(?<=…)` or `(?<!…)` and rejects the
+    whole pattern, so without this the caller meets a DuckDB exception quoting a
+    construct rather than a KQL error. Kusto refuses all four too — measured,
+    SEM0420 "Regex pattern is ill-formed", for `extract`, `extract_all`,
+    `matches regex` and `replace_regex` alike — so refusing here loses nothing
+    and `neutralise_groups` has said the same about `parse kind=regex` all
+    along.
+
+    Escapes and character classes are skipped, so an escaped `\(?=` and a `(`
+    inside `[...]` are the literals they are.
+    """
+    scratch: list[_Piece] = []
+    i, n = 0, len(pattern)
+    while i < n:
+        char = pattern[i]
+        if char == "\\":
+            i += 2 if i + 1 < n else 1
+        elif char == "[":
+            scratch.clear()
+            i = _copy_character_class(pattern, i, scratch)
+        elif pattern.startswith("(?", i):
+            rest = pattern[i + 2 :]
+            for opener in _LOOKAROUND:
+                if rest.startswith(opener):
+                    return f"(?{opener}"
+            i += 2
+        else:
+            i += 1
+    return None
+
+
+def to_re2_named_groups(pattern: str) -> str:
+    """`(?<name>…)` -> `(?P<name>…)`, the spelling RE2 understands.
+
+    Kusto accepts both spellings of a named capturing group — measured, `(?<w>…)`
+    and `(?P<w>…)` answer identically for `extract`, `extract_all`,
+    `matches regex` and `replace_regex`. DuckDB's RE2 accepts only the second
+    and rejects the first outright, *"invalid perl operator: (?<"*, so a pattern
+    Kusto runs happily reached the caller as a raw DuckDB exception rather than
+    an answer or a KQL error.
+
+    Only the spelling changes; the group still captures, in the same position,
+    under the same name.
+
+    **Lookbehind is not touched.** `(?<=` and `(?<!` start with the same three
+    characters and are a different construct: RE2 cannot execute either, and
+    Kusto refuses them too (SEM0420), so rewriting one into a named group would
+    turn a shared refusal into a silently different pattern.
+
+    Escapes and character classes are skipped rather than scanned, because both
+    can contain a `(` that opens nothing — the same reason
+    :func:`neutralise_groups` is a scan and not a `str.replace`.
+    """
+    out: list[str] = []
+    scratch: list[_Piece] = []
+    i, n = 0, len(pattern)
+    while i < n:
+        char = pattern[i]
+        if char == "\\":
+            # Copied without `_copy_escape`, which refuses backreferences: that
+            # is `parse kind=regex`'s rule, and this rewrite has no opinion.
+            out.append(pattern[i : i + 2] if i + 1 < n else char)
+            i += 2 if i + 1 < n else 1
+        elif char == "[":
+            scratch.clear()
+            end = _copy_character_class(pattern, i, scratch)
+            out.append(pattern[i:end])
+            i = end
+        elif pattern.startswith("(?<", i) and pattern[i + 3 : i + 4] not in ("=", "!"):
+            out.append("(?P<")
+            i += 3
+        else:
+            out.append(char)
+            i += 1
+    return "".join(out)
 
 
 def neutralise_groups(fragment: str) -> str:
