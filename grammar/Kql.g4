@@ -895,28 +895,35 @@ logicalAndExpression:
 logicalAndOperation:
     AND Right=equalityExpression;
 
+// PATCH duckdb-kql/002 (see grammar/UPSTREAM.md): left-factor the shared
+// `relationalExpression` prefix. Upstream writes four of the five alternatives
+// as `Left=relationalExpression OperatorToken=... ...`, so ALL(*) must parse an
+// entire expression before the operator tells it which alternative it is in.
+// Measured, that one decision was 42% of all prediction time and the single
+// largest contributor to a cold first parse.
+//
+// The alternatives are moved into a tail rule whose *labels* are the names
+// upstream gives the rules, so the generated context classes — and therefore
+// the lowerer's dispatch — are unchanged. `Left` moves to this rule; a tail
+// handler reads it from the parent.
 equalityExpression:
-      relationalExpression
-    | equalsEqualityExpression
-    | listEqualityExpression
-    | betweenEqualityExpression
-    | starEqualityExpression
+      starEqualityExpression
+    | Left=relationalExpression (Tail=equalityExpressionTail)?
     ;
-
-equalsEqualityExpression:
-    Left=relationalExpression OperatorToken=('==' | '<>' | '!=') Right=relationalExpression;
 
 // PATCH duckdb-kql/001 (see grammar/UPSTREAM.md): allow a tabular subquery on
 // the right-hand side of in / !in / in~ / !in~, e.g.
 //     StormEvents | where State in (PopulationData | project State)
-// which is valid, documented KQL that upstream Kql.g4 rejects.
-listEqualityExpression:
-      Left=relationalExpression OperatorToken=(IN | NOT_IN | IN_CI | NOT_IN_CI | HAS_ANY | HAS_ALL) '(' Subquery=pipeExpression ')'
-    | Left=relationalExpression OperatorToken=(IN | NOT_IN | IN_CI | NOT_IN_CI | HAS_ANY | HAS_ALL) '(' Expressions+=invocationExpression (',' Expressions+=invocationExpression)* ')'
+// which is valid, documented KQL that upstream Kql.g4 rejects. It is the
+// `Subquery=pipeExpression` alternative below.
+equalityExpressionTail:
+      OperatorToken=('==' | '<>' | '!=') Right=relationalExpression                            # equalsEqualityExpression
+    | OperatorToken=(IN | NOT_IN | IN_CI | NOT_IN_CI | HAS_ANY | HAS_ALL) '('
+        ( Subquery=pipeExpression
+        | Expressions+=invocationExpression (',' Expressions+=invocationExpression)*
+        ) ')'                                                                                  # listEqualityExpression
+    | OperatorToken=(BETWEEN | NOT_BETWEEN) '(' StartExpression=invocationExpression '..' EndExpression=invocationExpression ')'   # betweenEqualityExpression
     ;
-
-betweenEqualityExpression:
-    Left=relationalExpression OperatorToken=(BETWEEN | NOT_BETWEEN) '(' StartExpression=invocationExpression '..' EndExpression=invocationExpression ')';
 
 starEqualityExpression:
     '*' '==' Expression=relationalExpression;
@@ -992,10 +999,18 @@ stringStarOperatorExpression:
 invocationExpression:
     (OperatorToken=('+' | '-'))? Expression=functionCallOrPathExpression;
 
+// PATCH duckdb-kql/003 (see grammar/UPSTREAM.md): left-factor the shared
+// `functionCallOrPathRoot` prefix, for the same reason as PATCH 002 — upstream
+// spells the first two alternatives as `root` and `root (operation)+`, so the
+// whole root is parsed before the decision can be made. 18% of prediction time.
+//
+// The `(operation)*` loop subsumes the bare-root alternative; with no
+// operations the context has a single child and the lowerer's `_collapse`
+// skips it exactly as it skipped the bare alternative, so nothing downstream
+// changes. The labels keep the upstream context-class names.
 functionCallOrPathExpression:
-      functionCallOrPathRoot
-    | functionCallOrPathPathExpression
-    | toTableExpression
+      toTableExpression                                                              # toTablePathExpression
+    | Expression=functionCallOrPathRoot (Operations+=functionCallOrPathOperation)*   # functionCallOrPathPathExpression
     ;
 
 functionCallOrPathRoot:
@@ -1003,9 +1018,6 @@ functionCallOrPathRoot:
     | primaryExpression 
     | toScalarExpression
     ;
-
-functionCallOrPathPathExpression:
-    Expression=functionCallOrPathRoot (Operations+=functionCallOrPathOperation)+;
 
 functionCallOrPathOperation:
     functionCallOrPathPathOperation 

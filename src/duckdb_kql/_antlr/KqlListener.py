@@ -1898,21 +1898,12 @@ class KqlListener(ParseTreeListener):
         pass
 
 
-    # Enter a parse tree produced by KqlParser#functionCallOrPathExpression.
-    def enterFunctionCallOrPathExpression(self, ctx:KqlParser.FunctionCallOrPathExpressionContext):
+    # Enter a parse tree produced by KqlParser#toTablePathExpression.
+    def enterToTablePathExpression(self, ctx:KqlParser.ToTablePathExpressionContext):
         pass
 
-    # Exit a parse tree produced by KqlParser#functionCallOrPathExpression.
-    def exitFunctionCallOrPathExpression(self, ctx:KqlParser.FunctionCallOrPathExpressionContext):
-        pass
-
-
-    # Enter a parse tree produced by KqlParser#functionCallOrPathRoot.
-    def enterFunctionCallOrPathRoot(self, ctx:KqlParser.FunctionCallOrPathRootContext):
-        pass
-
-    # Exit a parse tree produced by KqlParser#functionCallOrPathRoot.
-    def exitFunctionCallOrPathRoot(self, ctx:KqlParser.FunctionCallOrPathRootContext):
+    # Exit a parse tree produced by KqlParser#toTablePathExpression.
+    def exitToTablePathExpression(self, ctx:KqlParser.ToTablePathExpressionContext):
         pass
 
 
@@ -1922,6 +1913,15 @@ class KqlListener(ParseTreeListener):
 
     # Exit a parse tree produced by KqlParser#functionCallOrPathPathExpression.
     def exitFunctionCallOrPathPathExpression(self, ctx:KqlParser.FunctionCallOrPathPathExpressionContext):
+        pass
+
+
+    # Enter a parse tree produced by KqlParser#functionCallOrPathRoot.
+    def enterFunctionCallOrPathRoot(self, ctx:KqlParser.FunctionCallOrPathRootContext):
+        pass
+
+    # Exit a parse tree produced by KqlParser#functionCallOrPathRoot.
+    def exitFunctionCallOrPathRoot(self, ctx:KqlParser.FunctionCallOrPathRootContext):
         pass
 
 

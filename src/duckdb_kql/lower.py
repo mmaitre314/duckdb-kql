@@ -186,12 +186,14 @@ def _lower_expr(node: Any) -> ir.Expr:
 
     if kind in (
         "AdditiveExpression", "MultiplicativeExpression", "RelationalExpression",
-        "EqualsEqualityExpression", "LogicalAndExpression", "LogicalOrExpression",
-        "EqualityExpression", "StringOperatorExpression",
+        "LogicalAndExpression", "LogicalOrExpression", "StringOperatorExpression",
         "StringBinaryOperatorExpression", "StringBinaryExpression",
         "StringEqualityExpression",
     ):
         return _lower_binary(node)
+
+    if kind == "EqualityExpression":
+        return _lower_equality(node)
 
     if kind == "DynamicLiteralExpression":
         return _lower_dynamic_literal(node)
@@ -199,11 +201,13 @@ def _lower_expr(node: Any) -> ir.Expr:
     if kind == "FunctionCallOrPathPathExpression":
         return _lower_path(node)
 
-    if kind == "ListEqualityExpression":
-        return _lower_in_list(node)
-
-    if kind == "BetweenEqualityExpression":
-        return _lower_between(node)
+    if kind in ("EqualsEqualityExpression", "ListEqualityExpression",
+                "BetweenEqualityExpression"):
+        # PATCH 002 moved the left operand onto the parent, so these carry only
+        # the operator and the right-hand side. Lowering one on its own would
+        # quietly answer the right operand alone — which is how `where s ==
+        # "abc"` once became `where s`. `_lower_equality` is the only way in.
+        raise _unsupported(node, "binary-expression")
 
     if kind == "StarExpression":
         # Legal only as an `arg_max`/`arg_min` argument; `render_expr` refuses
@@ -399,8 +403,45 @@ def _op_text(node: Any) -> str:
     return "matches regex" if text == "matchesregex" else text
 
 
-def _lower_binary(node: Any) -> ir.Expr:
+def _lower_equality(node: Any) -> ir.Expr:
+    """``a == b``, ``a in (...)``, ``a between (x .. y)`` — PATCH 002's shape.
+
+    Upstream writes each of these as its own rule beginning with
+    `Left=relationalExpression`, which costs ALL(*) an entire expression of
+    lookahead before the operator can tell it which rule it is in — 42% of all
+    prediction time, measured. The grammar now parses the left operand once and
+    hangs the operator and its right-hand side off a *tail* whose alternative
+    labels are the names upstream gave the rules, so the context classes the
+    dispatch reads are unchanged and only the position of `Left` moved.
+
+    With no tail there is one child and `_collapse` has already stepped through
+    it, so reaching here with one child means a node that only *looks* like a
+    pass-through; it is lowered rather than refused for the same reason
+    `_collapse` exists.
+    """
+    kids = _rule_children(node)
+    if len(kids) == 1:
+        return _lower_expr(kids[0])
+    if len(kids) != 2:
+        raise _unsupported(node, "binary-expression")
+    left, tail = kids
+    kind = _cls(tail)
+    if kind == "EqualsEqualityExpression":
+        return _lower_binary(tail, left=_lower_expr(left))
+    # `_list_operator_text` and the operator scan read the *token*, which sits
+    # on the tail; only the operand list needs the left putting back in front.
+    if kind == "ListEqualityExpression":
+        return _lower_in_list(tail, [left, *_rule_children(tail)])
+    if kind == "BetweenEqualityExpression":
+        return _lower_between(tail, [left, *_rule_children(tail)])
+    raise _unsupported(tail, "binary-expression")
+
+
+def _lower_binary(node: Any, left: ir.Expr | None = None) -> ir.Expr:
     """Fold a binary chain left-associatively.
+
+    *left* seeds the fold for a node whose left operand lives on its **parent**
+    — the shape PATCH 002 gives `a == b`, where this node holds `== b` alone.
 
     The grammar uses two different shapes for binary expressions, and both
     occur in Wave 1:
@@ -438,7 +479,7 @@ def _lower_binary(node: Any) -> ir.Expr:
         return result
 
     # Flat shape: operand (token operand)*
-    folded: ir.Expr | None = None
+    folded: ir.Expr | None = left
     pending_op: str | None = None
     for child in kids:
         if type(child).__name__.endswith("Context"):
@@ -2331,7 +2372,7 @@ _IN_OPERATORS = {
 _HAS_LIST_OPERATORS = {"has_any": False, "has_all": True}
 
 
-def _lower_in_list(node: Any) -> ir.Expr:
+def _lower_in_list(node: Any, rules: list[Any]) -> ir.Expr:
     """Lower ``x in (a, b, ...)``, its ``!in`` / ``in~`` variants, and the
     ``has_any`` / ``has_all`` forms that share the same grammar rule.
 
@@ -2352,7 +2393,6 @@ def _lower_in_list(node: Any) -> ir.Expr:
         # at the wrong half of the expression.
         raise _unsupported(node, _list_operator_text(node) or "in")
 
-    rules = _rule_children(node)
     if len(rules) < 2:
         raise _unsupported(node, op)
 
@@ -2381,7 +2421,7 @@ def _lower_in_list(node: Any) -> ir.Expr:
     return ir.InList(value, tuple(items), negated, case_insensitive)
 
 
-def _lower_between(node: Any) -> ir.Expr:
+def _lower_between(node: Any, rules: list[Any]) -> ir.Expr:
     """Lower ``x between (low .. high)`` / ``x !between (low .. high)``.
 
     Three operand rules and one operator token; `..` and the brackets are
@@ -2389,7 +2429,6 @@ def _lower_between(node: Any) -> ir.Expr:
     text, which would also match a `!between` occurring inside a string literal
     on the left.
     """
-    rules = _rule_children(node)
     if len(rules) != 3:
         raise _unsupported(node, "between")
     negated = (_list_operator_text(node) or "between").startswith("!")

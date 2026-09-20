@@ -25,8 +25,14 @@ occasionally lags the real language. The M0 spike
 against 1,427 real queries from the product documentation: **~97.8% of in-scope
 queries parse unpatched**, and the gaps are a short, enumerable list.
 
-Each local patch below fixes one documented, valid KQL construct that upstream
-rejects. Patches are marked in-file with `PATCH duckdb-kql/NNN`.
+Each local patch below is one of two kinds, and the distinction matters when
+re-syncing. `001` fixes a documented, valid KQL construct that upstream rejects
+— a short, mechanical re-apply. `002` and `003` **restructure** rules that
+upstream writes with shared prefixes, for parsing speed; they change no
+accepted language and no emitted SQL, but they are a standing rewrite rather
+than an addition, so an upstream bump means redoing them against the new text
+rather than pasting a block back. Patches are marked in-file with
+`PATCH duckdb-kql/NNN`.
 
 ## Local patches
 
@@ -52,6 +58,47 @@ the original list form as the second alternative.
 
 **Why first.** It was the only genuine gap touching Wave 1.
 
+### `002` — left-factor `equalityExpression`
+
+**File:** `Kql.g4`, rules `equalityExpression`, `equalityExpressionTail`
+
+**Problem.** Four of the five alternatives begin with `Left=relationalExpression`,
+so ALL(*) parses an entire expression before the operator token can tell it
+which alternative it is in — and builds a large DFA doing so. Measured over the
+frozen corpus, this one decision was **42% of all prediction time** and the
+largest single contributor to a cold first parse. A tester reported 10.8s for a
+first parse on Windows; ~81% of it was this rule and `003`.
+
+**Fix.** Parse `relationalExpression` once and hang the operator and its
+right-hand side off a tail rule. The tail's **alternative labels are the names
+upstream gives the rules**, so the generated context classes — `Equals…`,
+`List…`, `Between…EqualityExpression` — are unchanged and the lowerer's dispatch
+still matches. PATCH `001` lives inside it as the `Subquery=pipeExpression`
+alternative.
+
+**Effect.** Generation clean (exit 0, no warnings). Corpus parse stays at
+**1,285** blocks and `tools/sql_snapshot.py` is **byte-identical**. First parse
+0.808s → 0.138s; corpus warm-up ~16.6s → 1.81s.
+
+**Cost.** `Left` now sits on the parent, so a tail handler reads it from there
+— see `_lower_equality` in `lower.py`, and `tests/test_grammar_left_factoring.py`
+for why losing it is silent rather than loud.
+
+### `003` — left-factor `functionCallOrPathExpression`
+
+**File:** `Kql.g4`, rule `functionCallOrPathExpression`
+
+**Problem.** The same shape: upstream spells the first two alternatives as
+`functionCallOrPathRoot` and `functionCallOrPathRoot (operation)+`. **18% of
+prediction time.**
+
+**Fix.** One alternative, `root (operation)*`, which subsumes the bare root.
+Labelled so the context-class name survives.
+
+**Effect.** No lowerer change at all. With zero operations the context holds a
+single child, and `_collapse` steps through it exactly as it stepped through the
+bare alternative.
+
 ## Known gaps *not* yet patched
 
 Deliberately left failing — they raise `KqlUnsupportedError` until their wave:
@@ -74,4 +121,8 @@ Out of scope entirely, and therefore never to be patched: graph semantics
 2. Re-apply each `PATCH duckdb-kql/NNN` block (search for that marker).
 3. Run `tools/regen_parser.sh`.
 4. Run the L1 corpus test — the parsed-block count must not go **down**.
-5. Note any patch that upstream has since fixed, and delete it.
+5. Run `tools/sql_snapshot.py --compare` against the pre-sync snapshot. For a
+   re-sync that only re-applies these patches it must come back
+   **byte-identical**; `002` moves the left operand onto the parent rule, and a
+   mis-applied version answers the right operand alone rather than failing.
+6. Note any patch that upstream has since fixed, and delete it.

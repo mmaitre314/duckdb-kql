@@ -1059,18 +1059,18 @@ class KqlVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
-    # Visit a parse tree produced by KqlParser#functionCallOrPathExpression.
-    def visitFunctionCallOrPathExpression(self, ctx:KqlParser.FunctionCallOrPathExpressionContext):
-        return self.visitChildren(ctx)
-
-
-    # Visit a parse tree produced by KqlParser#functionCallOrPathRoot.
-    def visitFunctionCallOrPathRoot(self, ctx:KqlParser.FunctionCallOrPathRootContext):
+    # Visit a parse tree produced by KqlParser#toTablePathExpression.
+    def visitToTablePathExpression(self, ctx:KqlParser.ToTablePathExpressionContext):
         return self.visitChildren(ctx)
 
 
     # Visit a parse tree produced by KqlParser#functionCallOrPathPathExpression.
     def visitFunctionCallOrPathPathExpression(self, ctx:KqlParser.FunctionCallOrPathPathExpressionContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by KqlParser#functionCallOrPathRoot.
+    def visitFunctionCallOrPathRoot(self, ctx:KqlParser.FunctionCallOrPathRootContext):
         return self.visitChildren(ctx)
 
 
