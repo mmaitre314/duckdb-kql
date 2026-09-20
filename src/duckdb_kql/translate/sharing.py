@@ -40,9 +40,24 @@ at depth 14 took 4.3s), and it is flat at depth 5 where the others already lose.
   branch. Hoisting an expression out of an untaken branch can turn an answer
   into a DuckDB error — that is not a hypothetical, it is the bug
   :func:`~duckdb_kql.translate._render_parse_ipv4` carries a ``TRY_CAST`` to
-  avoid. So a node is bound only if it is *also* read somewhere the row already
-  evaluates unconditionally, which means binding it adds no evaluation that was
-  not happening.
+  avoid.
+
+  The first version answered that by **refusing** to bind anything read only
+  inside a branch, and a tester found the hole in a day: wrapping the result of
+  a ten-step chain in one `iff` puts every step behind a branch, and the whole
+  2^n expansion came back — 1,024 copies, 366 KB, on a query one `iff` away
+  from the shape that was fixed. So the branch is **rebuilt around the
+  binding** instead::
+
+      iff(c, x, BIG)  ->  CASE WHEN c THEN NULL ELSE BIG END AS "_kqlbind0"
+
+  `BIG` runs on exactly the rows it ran on before, and the protection is the
+  same one. Which branch a node sits behind is the longest common prefix of the
+  paths that reach it, so a node read in a condition *and* in a branch is
+  unconditional, and one read in both arms of the same `iff` is too — it is
+  needed either way. `iff`, `iif` and `case` are rebuilt; `coalesce` and
+  `and`/`or` are not, and a node reachable only through one of those stays
+  inlined (see :data:`_OPAQUE_FROM`).
 """
 
 from __future__ import annotations
@@ -66,12 +81,34 @@ VOLATILE: frozenset[str] = frozenset(
     {"rand", "new_guid", "ingestion_time", "current_principal", "guid"}
 )
 
-#: Function name -> the argument positions that are **not** evaluated for every
-#: row. `iff(c, a, b)` renders as `CASE WHEN c THEN a ELSE b END`, so `c` is
-#: evaluated and `a`/`b` are not. For `case` and `coalesce` only the first
-#: argument is unconditional; the rest are reached only if the ones before them
-#: decline. A name absent from here evaluates all of its arguments.
-_LAZY_FROM: dict[str, int] = {"iff": 1, "iif": 1, "case": 1, "coalesce": 1}
+#: Function name -> the first argument position that is **not** evaluated for
+#: every row. `iff(c, a, b)` renders as `CASE WHEN c THEN a ELSE b END`, so `c`
+#: is evaluated and `a`/`b` are not; for `case` only the first predicate is
+#: unconditional. A name absent from here evaluates all of its arguments.
+#:
+#: These two are *reconstructible*: given the branch a node sits in, the CASE
+#: that selects it can be rebuilt around the binding, which is what lets a
+#: repeat inside a branch be bound at all (see :func:`_under_guard`).
+_LAZY_FROM: dict[str, int] = {"iff": 1, "iif": 1, "case": 1}
+
+#: Lazy positions whose selecting condition this module does **not** rebuild.
+#: `coalesce` renders as a chain over each argument's *emptiness* rather than
+#: over a predicate the IR holds, and `and`/`or` are wrapped by KQL's
+#: three-valued null semantics; reproducing either here would be a second
+#: implementation of a rule that already lives in the emitter, free to drift.
+#: A repeat reachable only through one of these stays inlined, as everything
+#: did before guards existed.
+_OPAQUE_FROM: dict[str, int] = {"coalesce": 1}
+
+#: A path step: the node whose branch was taken, and which argument of it. The
+#: id travels alongside because the IR is frozen and compares by value, and two
+#: *equal* `iff`s in one expression are two different branches.
+Step = tuple[int, Any, int]
+Path = tuple[Step, ...]
+
+#: The step that stands for "reached through a lazy position this module will
+#: not rebuild". Any path containing it is unbindable.
+_OPAQUE: Step = (0, None, -1)
 
 #: The duplication a binding must remove to be worth a derived table, in
 #: characters of SQL. A stage costs about forty characters plus a reference per
@@ -147,7 +184,7 @@ def bind_repeats(
         _ACTIVE.append(scope)
         return scope
 
-    counts, unconditional, order = _survey(exprs)
+    counts, guards = _reach(exprs)
     reserved = set(taken)
     for expr in exprs:
         reserved |= _column_names(expr)
@@ -155,22 +192,110 @@ def bind_repeats(
 
     _ACTIVE.append(scope)
     try:
-        for node in order:  # post-order: a node is planned after what it reads
-            if counts[id(node)] < 2 or id(node) not in unconditional:
+        for node in _postorder(exprs):  # a node is planned after what it reads
+            if counts[id(node)] < 2 or not _bindable(node):
                 continue
-            if not _bindable(node):
+            guard = guards[id(node)]
+            if not _rebuildable(node, guard):
                 continue
             sql = render_expr(node)  # already reading the slots planned above
             if (counts[id(node)] - 1) * len(sql) < MIN_SAVING:
                 continue
             name = f"{prefix}{len(scope.names)}"
+            bound = _under_guard(sql, guard, render_expr)
             scope.slots[id(node)] = name
             scope.names.append(name)
-            scope.source = f'(SELECT *, {sql} AS "{name}" FROM {scope.source})'
+            scope.source = f'(SELECT *, {bound} AS "{name}" FROM {scope.source})'
     except Exception:
         _ACTIVE.pop()
         raise
     return scope
+
+
+def _rebuildable(node: object, guard: Path) -> bool:
+    """Whether *node*'s selecting branch can be put back around its binding.
+
+    Two ways it cannot. The path may run through a lazy position this module
+    does not reconstruct (`_OPAQUE_FROM`, `and`/`or`). Or the node may appear
+    **inside one of the conditions that select it** — rendering the guard would
+    then expand the very expression being bound, trading one duplication for
+    another. The common-prefix rule makes that nearly unreachable, since an
+    occurrence in a condition contributes a path that stops short of the step
+    below it; the check is here because "nearly" is not a guarantee and the
+    failure would be silent bloat rather than a wrong answer.
+    """
+    for _, owner, index in guard:
+        if owner is None:
+            return False
+        for condition in _conditions_before(owner, index):
+            if any(child is node for child in _descend(condition)):
+                return False
+    return True
+
+
+def _conditions_before(owner: ir.FunctionCall, index: int) -> list[object]:
+    """The predicates that must be evaluated to reach ``owner.args[index]``.
+
+    `iff(c, a, b)` reaches either branch through `c` alone. `case(p1, v1, p2,
+    v2, …, else)` reaches argument *i* through every predicate at an even
+    position before it — `p2` is itself only evaluated once `p1` has declined,
+    which is why the conditions nest below rather than being ANDed together.
+    """
+    if owner.name.lower() in ("iff", "iif"):
+        return [owner.args[0]]
+    return [owner.args[i] for i in range(0, index, 2)]
+
+
+def _under_guard(sql: str, guard: Path, render: Any) -> str:
+    """Wrap *sql* in the CASE that selects the branch it was read from.
+
+    This is what lets a repeat inside a branch be bound at all. The binding is a
+    column, and a column is computed for every row — so hoisting an expression
+    out of an untaken branch can raise a DuckDB error on a row that used to
+    return an answer, which is the bug `parse_ipv4` carries `TRY_CAST` for.
+    Rebuilding the branch keeps the evaluation exactly where it was::
+
+        iff(c, x, BIG)  ->  CASE WHEN c THEN NULL ELSE BIG END AS "_kqlbind0"
+
+    `BIG` runs on precisely the rows it ran on before, and on the others the
+    column is null — which nothing reads, because the reference sits in the
+    branch that was not taken.
+
+    The **NULL arm is not decoration**: `CASE WHEN NOT c THEN BIG END` looks
+    equivalent and is not, because `c` may be null. KQL's `iff` takes the ELSE
+    for a null predicate, `NOT null` is null, and the binding would then skip an
+    evaluation the query performs. Mirroring the original CASE arm for arm is
+    the only version that cannot get the three-valued case wrong.
+
+    The conditions are rendered the same way the expression renders them, so
+    the null handling around a comparison comes along and the arm chosen here
+    is the arm chosen there.
+    """
+    for _, owner, index in reversed(guard):
+        rendered = [render(c) for c in _conditions_before(owner, index)]
+        if _selects_on_match(owner, index):
+            # The arm is taken when the last predicate holds; the ones before
+            # it had to decline to get here.
+            arms = [f"WHEN {c} THEN NULL" for c in rendered[:-1]]
+            arms.append(f"WHEN {rendered[-1]} THEN {sql}")
+            sql = f"CASE {' '.join(arms)} END"
+        else:
+            # Reached by falling through every predicate above it.
+            arms = [f"WHEN {c} THEN NULL" for c in rendered]
+            sql = f"CASE {' '.join(arms)} ELSE {sql} END"
+    return sql
+
+
+def _selects_on_match(owner: ir.FunctionCall, index: int) -> bool:
+    """Whether ``owner.args[index]`` is taken when the last predicate **holds**.
+
+    True for a value branch — `iff`'s THEN, and `case`'s odd positions. False
+    for the arms reached by falling through: `iff`'s ELSE, `case`'s later
+    predicates and its final default.
+    """
+    if owner.name.lower() in ("iff", "iif"):
+        return index == 1
+    return index % 2 == 1
 
 
 def release() -> None:
@@ -256,53 +381,107 @@ def _column_names(node: object) -> set[str]:
     return {n.name for n in _descend(node) if isinstance(n, ir.ColumnRef)}
 
 
-def _survey(
-    exprs: Sequence[object],
-) -> tuple[dict[int, int], set[int], list[Any]]:
-    """How often each node is reached, whether ever unconditionally, post-order.
+def _reach(exprs: Sequence[object]) -> tuple[dict[int, int], dict[int, Path]]:
+    """How often each node is reached, and the branch it is reached *behind*.
 
     The counts are by identity. Two nodes that are *equal* but were written
     separately are two expressions, and merging them would be this module
     deciding something it has no business deciding — the sharing it acts on is
     the sharing the lowerer put there.
+
+    The guard is the **longest common prefix** of every path that reaches the
+    node, which is the branch selection all its occurrences agree on. A node
+    read once in an `iff`'s condition and once in its ELSE has the empty prefix
+    and is unconditional; one read only inside the ELSE keeps that step. Taking
+    the common prefix over-approximates — it can name a branch under which some
+    occurrence would not in fact have been evaluated — and it over-approximates
+    in the safe direction, because binding at a *shallower* point than the
+    reads never skips an evaluation that used to happen.
+
+    A node is re-walked when its prefix **shrinks**, since its children's
+    guards are derived from it. The prefix can only ever get shorter, so this
+    terminates, and in the shapes that reach here at all it fires once or twice.
     """
     counts: dict[int, int] = {}
-    unconditional: set[int] = set()
-    order: list[Any] = []
+    guards: dict[int, Path] = {}
 
-    def walk(node: object, conditional: bool) -> None:
+    def walk(node: object, path: Path) -> None:
         if isinstance(node, (list, tuple)):
             for item in node:
-                walk(item, conditional)
+                walk(item, path)
             return
         if not dataclasses.is_dataclass(node):
             return
         counts[id(node)] = counts.get(id(node), 0) + 1
-        if not conditional:
-            unconditional.add(id(node))
-        if counts[id(node)] > 1:
-            return  # its children were surveyed the first time through
-        for child, lazy in _children(node):
-            walk(child, conditional or lazy)
+        known = guards.get(id(node))
+        merged = path if known is None else _common(known, path)
+        if known is not None and merged == known:
+            return  # nothing below it can change
+        guards[id(node)] = merged
+        for child, step in _children(node):
+            walk(child, merged if step is None else (*merged, step))
+
+    for expr in exprs:
+        walk(expr, ())
+    return counts, guards
+
+
+def _common(left: Path, right: Path) -> Path:
+    """The longest prefix the two paths share, compared by branch identity."""
+    shared = 0
+    for one, two in zip(left, right, strict=False):
+        if one[0] != two[0] or one[2] != two[2]:
+            break
+        shared += 1
+    return left[:shared]
+
+
+def _postorder(exprs: Sequence[object]) -> list[Any]:
+    """Every node once, children before parents.
+
+    Separate from :func:`_reach` because that one re-walks, and a node appended
+    on a re-walk would land after the parent that reads it — which is exactly
+    the order the binding loop must not have.
+    """
+    order: list[Any] = []
+    seen: set[int] = set()
+
+    def walk(node: object) -> None:
+        if isinstance(node, (list, tuple)):
+            for item in node:
+                walk(item)
+            return
+        if not dataclasses.is_dataclass(node) or id(node) in seen:
+            return
+        seen.add(id(node))
+        for child, _ in _children(node):
+            walk(child)
         order.append(node)
 
     for expr in exprs:
-        walk(expr, False)
-    return counts, unconditional, order
+        walk(expr)
+    return order
 
 
-def _children(node: Any) -> Iterable[tuple[object, bool]]:
-    """*node*'s children, each flagged if it is evaluated only conditionally."""
+def _children(node: Any) -> Iterable[tuple[object, Step | None]]:
+    """*node*'s children, each with the branch step that reaches it, if any."""
     if isinstance(node, ir.FunctionCall):
-        lazy_from = _LAZY_FROM.get(node.name.lower())
+        name = node.name.lower()
+        opaque = _OPAQUE_FROM.get(name)
+        lazy = _LAZY_FROM.get(name)
         for index, arg in enumerate(node.args):
-            yield arg, lazy_from is not None and index >= lazy_from
+            if opaque is not None and index >= opaque:
+                yield arg, _OPAQUE
+            elif lazy is not None and index >= lazy:
+                yield arg, (id(node), node, index)
+            else:
+                yield arg, None
         return
     if isinstance(node, ir.BinaryOp) and node.op.lower() in ("and", "or"):
         # DuckDB may evaluate either side, so this is the cautious reading, not
-        # a claim about short-circuiting. It only ever *withholds* a binding.
-        yield node.left, False
-        yield node.right, True
+        # a claim about short-circuiting. It only ever withholds a binding.
+        yield node.left, None
+        yield node.right, _OPAQUE
         return
     for field in dataclasses.fields(node):
-        yield getattr(node, field.name), False
+        yield getattr(node, field.name), None

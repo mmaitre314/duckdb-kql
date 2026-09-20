@@ -1077,10 +1077,15 @@ sub-expression **once**, in a derived table under the operator's FROM, and read
 it as a column — but only where doing so is unobservable:
 
 - never for a **volatile** expression, which is the one `rand()` distinguishes;
-- only when the expression is *also* read somewhere the row already evaluates
-  unconditionally, so that binding it adds no evaluation. Hoisting out of an
-  untaken `iff` branch can turn an answer into a DuckDB error — the same trap
-  `parse_ipv4` carries `TRY_CAST` for;
+- never in a way that adds an evaluation. A column is computed for every row
+  whether or not the `iff` reading it takes that branch, and hoisting out of an
+  untaken branch can turn an answer into a DuckDB error — the same trap
+  `parse_ipv4` carries `TRY_CAST` for. So the branch is **rebuilt around the
+  binding**, arm for arm: `iff(c, x, BIG)` binds `CASE WHEN c THEN NULL ELSE
+  BIG END`. The NULL arm is load-bearing — `WHEN NOT c` reads the same and is
+  not, because a null predicate takes KQL's ELSE while `NOT null` is null.
+  `iff`, `iif` and `case` are rebuilt; `coalesce` and `and`/`or` are not, and a
+  repeat reachable only through those stays inlined;
 - only when the **input column names are known**, because the stages carry the
   input through with `SELECT *` and a column already bearing the generated name
   would answer in its place, silently. Without a schema nothing is bound.

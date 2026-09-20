@@ -217,26 +217,48 @@ def test_extend_keeps_a_replaced_column_in_place() -> None:
         ]
 
 
-def test_a_binding_read_only_inside_branches_is_not_hoisted() -> None:
-    """The guard that stops this being a correctness bug rather than a speedup.
+def test_a_read_in_every_branch_is_needed_on_every_row() -> None:
+    """`iff(c, a, a)` reads `a` exactly once per row, whichever way `c` goes.
 
-    A binding becomes a column, and a column is computed for every row whether
-    or not the `iff` reading it takes that branch. Hoisting out of an untaken
+    The guard is the *longest common prefix* of the paths that reach a node,
+    and these two paths diverge at the first step, so the prefix is empty and
+    the binding is unguarded. Getting this wrong in the safe direction — a
+    guard per branch — would emit two bindings where one is needed; getting it
+    wrong in the other direction is what the next test is about.
+    """
+    both = ("let k = (v:string) { let a = tolower(v);"
+            " iff(v startswith 'A', a, a) };")
+    sql = str(duckdb_kql.to_sql(f"{both} {T} | project r = k(s)", schema={}))
+
+    assert sql.count('AS "_kqlbind') == 1
+    assert "THEN NULL" not in sql, "bound behind a branch it does not need"
+    with duckdb_kql.connect() as con:
+        assert con.execute(sql).fetchall() == [("abc",), ("",), ("zz",)]
+
+
+def test_a_read_only_inside_one_branch_is_bound_behind_that_branch() -> None:
+    """The guard that keeps this a speedup rather than a correctness bug.
+
+    A binding is a column, and a column is computed for every row whether or
+    not the `iff` reading it takes that branch. Hoisting out of an untaken
     branch can turn an answer into a DuckDB error — not hypothetical: it is why
     `_render_parse_ipv4` carries `TRY_CAST`, after `parse_ipv4('1.2.3.4/x')`
     raised ConversionException where Kusto answers null.
 
-    So `a` here, read twice but only in branches, must stay inline; the answer
-    is measured either way and agrees (`abc`, ``, `zz`), which is precisely why
-    this needs a test on the SQL and not only on the rows.
+    The first version of this module answered that by **refusing** to bind, and
+    a tester found the hole immediately: wrapping the result of a ten-step
+    chain in one `iff` put every step behind a branch and restored the full 2^n
+    expansion — 1,024 copies and 366 KB. Rebuilding the branch around the
+    binding keeps the protection and the sharing both.
     """
-    branches = ("let k = (v:string) { let a = tolower(v);"
-                " iff(v startswith 'A', a, a) };")
-    sql = str(duckdb_kql.to_sql(f"{branches} {T} | project r = k(s)"))
+    one = ("let k = (v:string) { let a = tolower(v);"
+           " iff(v startswith 'A', 'x', strcat(a, a)) };")
+    sql = str(duckdb_kql.to_sql(f"{one} {T} | project r = k(s)", schema={}))
 
-    assert "_kqlbind" not in sql
+    assert sql.count('AS "_kqlbind') == 1
+    assert "THEN NULL ELSE" in sql, "bound without the branch that selects it"
     with duckdb_kql.connect() as con:
-        assert con.execute(sql).fetchall() == [("abc",), ("",), ("zz",)]
+        assert con.execute(sql).fetchall() == [("x",), ("",), ("zzzz",)]
 
 
 def test_one_unconditional_read_is_enough_to_hoist() -> None:
@@ -365,3 +387,102 @@ def test_the_small_chain_still_computes_the_right_number() -> None:
         rows = duckdb_kql.kql(con, _small_chain(20)).fetchall()
 
     assert rows == [(2 * 2**20,)]
+
+
+def test_the_guard_keeps_an_untaken_branch_from_raising() -> None:
+    """The mechanism, on an expression that *does* raise, since KQL's do not.
+
+    Almost everything this translator emits is total by construction (R1), so
+    a KQL query cannot easily demonstrate the hazard the guard exists for —
+    which is exactly how `parse_ipv4` shipped broken. DuckDB's `error()` makes
+    it visible: it raises when evaluated and is skipped inside an untaken CASE
+    arm. Hoisting it into a select list evaluates it; hoisting it *under the
+    rebuilt branch* does not.
+
+    The NULL arm is the part that looks redundant. `CASE WHEN NOT c THEN …`
+    reads the same and is not: a null predicate takes KQL's ELSE, `NOT null`
+    is null, and the binding would then skip an evaluation the query performs.
+    The third case below is that difference.
+    """
+    with duckdb_kql.connect() as con:
+        con.execute("CREATE TABLE T(n BIGINT)")
+        con.execute("INSERT INTO T VALUES (1), (2)")
+
+        # A row-dependent predicate on a real table, because `WHEN TRUE` lets
+        # DuckDB fold the arm away and prune the column — which makes the
+        # unguarded version pass and proves nothing.
+        assert con.execute(
+            "SELECT CASE WHEN n > 0 THEN 'safe' ELSE error('boom') END FROM T"
+        ).fetchall() == [("safe",), ("safe",)]
+
+        # hoisted without a guard — the bug the guard prevents
+        with pytest.raises(duckdb.Error, match="boom"):
+            con.execute(
+                "SELECT CASE WHEN n > 0 THEN 'safe' ELSE b END"
+                " FROM (SELECT *, error('boom') AS b FROM T)"
+            ).fetchall()
+
+        # hoisted under the rebuilt branch — evaluated on exactly the old rows
+        assert con.execute(
+            "SELECT CASE WHEN n > 0 THEN 'safe' ELSE b END FROM (SELECT *,"
+            " CASE WHEN n > 0 THEN NULL ELSE error('boom') END AS b FROM T)"
+        ).fetchall() == [("safe",), ("safe",)]
+
+        # and a NULL predicate still reaches the ELSE, as KQL's `iff` does
+        assert con.execute(
+            "SELECT CASE WHEN NULLIF(n, n)::BOOLEAN THEN 'no' ELSE b END"
+            " FROM (SELECT *, CASE WHEN NULLIF(n, n)::BOOLEAN THEN NULL"
+            " ELSE 'reached' END AS b FROM T)"
+        ).fetchall() == [("reached",), ("reached",)]
+
+
+def wrapped(depth: int, conditional: bool) -> str:
+    """The tester's shape: the chain, optionally behind one final `iff`."""
+    lets = ["let step0 = tolower(value);"]
+    for index in range(1, depth + 1):
+        previous = f"step{index - 1}"
+        lets.append(f"let step{index} = iff({previous} == '', '', {previous});")
+    result = f"step{depth}"
+    if conditional:
+        result = f"iff(value == 'skip', '', {result})"
+    return (
+        "let normalize = (value:string) {\n" + "\n".join(lets) + f"\n{result}\n}};\n"
+        "Input | project result = normalize(value)"
+    )
+
+
+@pytest.mark.parametrize("depth", [4, 8, 10, 20])
+@pytest.mark.parametrize("conditional", [False, True])
+def test_a_conditional_result_does_not_restore_the_doubling(
+    depth: int, conditional: bool
+) -> None:
+    """The regression the tester reported, in both shapes.
+
+    Before the guard: depth 8 was 91,607 characters and depth 10 was 365,783,
+    with 256 and 1,024 copies of `lower(...)`. The unconditional form was
+    already 1,334 and 1,567 with one copy — the wrapper was the whole
+    difference. A count of `lower(` is the stable signal; the character bound
+    is loose enough to survive an unrelated rewording.
+    """
+    sql = str(duckdb_kql.to_sql(wrapped(depth, conditional), schema={"Input": ["value"]}))
+
+    assert sql.lower().count("lower(") == 1
+    assert len(sql) < 400 * depth + 1200
+
+
+@pytest.mark.parametrize("value", ["skip", "", "EXAMPLE.INVALID"])
+def test_the_conditional_shape_answers_what_the_emulator_answers(value: str) -> None:
+    """Measured on the emulator for all three inputs, at depths 0, 1 and 10.
+
+    `skip` takes the wrapper's THEN, so the whole chain is behind the branch
+    that is *not* taken — the row where a wrongly-hoisted binding would show.
+    """
+    expected = {"skip": "", "": "", "EXAMPLE.INVALID": "example.invalid"}[value]
+    rows = f"datatable(value:string)['{value}']"
+
+    with duckdb_kql.connect() as con:
+        for depth in (0, 1, 10):
+            query = wrapped(depth, conditional=True).replace("Input", rows)
+            assert duckdb_kql.kql(con, query).fetchall() == [(expected,)], (
+                f"value={value!r} depth={depth}"
+            )
