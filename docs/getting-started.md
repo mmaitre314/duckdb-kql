@@ -27,6 +27,18 @@ pip install 'duckdb-kql[all]'       # everything, plus Arrow output
 
 Python 3.10 or newer.
 
+`[duckdb]` also installs **pytz**, which is DuckDB's requirement rather than
+this package's: its Python wheel declares no dependencies, but converting a
+`TIMESTAMP WITH TIME ZONE` result to a Python datetime imports pytz and
+otherwise fails with *Required module 'pytz' failed to import*. It is in the
+extra because that is the difference between running a query and reading its
+answer. If you install `duckdb` yourself instead of through the extra, and a
+table of yours has such a column, install pytz too.
+
+Nothing duckdb-kql generates is affected either way — every datetime it builds
+is a naive `TIMESTAMP` in UTC (R8) — so this only matters for a column that was
+already in your database.
+
 ## Your first query
 
 ```python

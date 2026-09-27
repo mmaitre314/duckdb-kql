@@ -37,7 +37,7 @@ APIs are split into 3 layers to control features and dependencies. Select based 
 Layer | Install | Scenario | Dependencies
 --|--|--|--
 0 | `pip install duckdb-kql` | Translate KQL queries to SQL | antlr4 only
-1 | `pip install duckdb-kql[duckdb]` | Run KQL queries | adds duckdb
+1 | `pip install duckdb-kql[duckdb]` | Run KQL queries | adds duckdb, pytz
 2 | `pip install duckdb-kql[kusto]` | Run KQL queries via Kusto SDK APIs | adds pandas
 
 See [Getting started](https://github.com/mmaitre314/duckdb-kql/blob/main/docs/getting-started.md).

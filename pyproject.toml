@@ -54,7 +54,24 @@ dependencies = [
 
 [project.optional-dependencies]
 # Layer 1 — running the translated SQL.
-duckdb = ["duckdb>=0.10"]
+#
+# `pytz` is **DuckDB's** requirement, not ours. Its Python package declares no
+# dependencies at all, yet converting a `TIMESTAMP WITH TIME ZONE` result to a
+# Python datetime imports pytz and fails with "Required module 'pytz' failed to
+# import" without it. Reproduced on a bare `duckdb.connect()`, with nothing of
+# this package involved and whatever the session time zone is; only TIMESTAMPTZ
+# is affected, and naive TIMESTAMP is fine.
+#
+# It is listed here because this extra's whole promise is "now you can run
+# queries and read the answers", and that was untrue for any table holding such
+# a column. duckdb-kql never *emits* TIMESTAMPTZ — R8 lands every datetime it
+# builds on a naive TIMESTAMP — so this only ever arrives from the caller's own
+# schema, which is exactly the case the extra has to cover.
+#
+# It went unnoticed because pandas <3 required pytz and dragged it in; pandas 3
+# dropped it. Drop this line when DuckDB either declares pytz itself or moves to
+# `zoneinfo`.
+duckdb = ["duckdb>=0.10", "pytz"]
 # Layer 2 — the azure-kusto-data-shaped client. dataframe_from_result_table is
 # the reason pandas is here; the client itself works without it.
 kusto = ["duckdb-kql[duckdb]", "pandas"]
