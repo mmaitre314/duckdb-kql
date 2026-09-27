@@ -37,6 +37,7 @@ from .errors import KqlSchemaError
 
 __all__ = [
     "Entity",
+    "EntityGroupArg",
     "EntityGroupMap",
     "ResolvedGroups",
     "effective_entity_groups",
@@ -66,8 +67,13 @@ EntityGroupMap = dict[str, list[str]]
 #: Group name -> parsed entities.
 ResolvedGroups = dict[str, tuple[Entity, ...]]
 
+#: What the ``entity_groups=`` parameters accept: a caller's map, **or** an
+#: already-parsed one. The mirror of :data:`~duckdb_kql.clusters.ClusterArg`,
+#: and the reason :func:`parse_entity_groups` accepts an :class:`Entity`.
+EntityGroupArg = EntityGroupMap | ResolvedGroups
 
-def parse_entity_groups(groups: EntityGroupMap | None) -> ResolvedGroups | None:
+
+def parse_entity_groups(groups: EntityGroupArg | None) -> ResolvedGroups | None:
     """Validate and parse a mapping, or ``None``.
 
     Parsing happens here rather than at query time so a malformed entry fails
@@ -97,7 +103,17 @@ def parse_entity_groups(groups: EntityGroupMap | None) -> ResolvedGroups | None:
 
 
 def _parse_entity(group: str, text: object) -> Entity:
-    """One ``database('d')`` / ``cluster('c').database('d')`` reference."""
+    """One ``database('d')`` / ``cluster('c').database('d')`` reference.
+
+    An already-parsed :class:`Entity` passes straight through, which makes
+    :func:`parse_entity_groups` **idempotent** — as `parse_cluster_map` already
+    was. That is what lets a component hold a parsed mapping and still forward it
+    to anything taking an ``entity_groups=`` argument. Without it, a caller had
+    to keep the raw map beside the parsed one, and `KustoClient` kept only the
+    parsed one and silently forwarded nothing at all.
+    """
+    if isinstance(text, Entity):
+        return text
     if not isinstance(text, str):
         raise TypeError(
             f"entity group {group!r}: entity must be a str like \"database('d')\", "
@@ -159,7 +175,7 @@ def resolve_group(name: str, groups: ResolvedGroups | None) -> tuple[Entity, ...
 _DEFAULT: ResolvedGroups | None = None
 
 
-def set_entity_groups(groups: EntityGroupMap | None) -> None:
+def set_entity_groups(groups: EntityGroupArg | None) -> None:
     """Set the mapping every later call uses when it passes no ``entity_groups=``.
 
     Meant for a test fixture or start-up, so a suite full of `macro-expand`
@@ -186,7 +202,7 @@ def get_entity_groups() -> ResolvedGroups | None:
 
 
 def effective_entity_groups(
-    groups: EntityGroupMap | None,
+    groups: EntityGroupArg | None,
 ) -> ResolvedGroups | None:
     """What a call resolves against: its own map, or the default.
 

@@ -29,7 +29,8 @@ import threading
 import uuid
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
-from ..entity_groups import EntityGroupMap
+from ..clusters import ClusterArg
+from ..entity_groups import EntityGroupArg
 from ..errors import KqlError
 from ..translate import quote_ident
 from ._models import WellKnownDataSet, kusto_type, to_wire, widen_out_of_range
@@ -211,7 +212,8 @@ class KustoClient:
         database: str | None = None,
         *,
         allow_write: bool = True,
-        entity_groups: EntityGroupMap | None = None,
+        clusters: ClusterArg | None = None,
+        entity_groups: EntityGroupArg | None = None,
     ) -> None:
         self._is_closed = False
         self._lock = threading.Lock()
@@ -225,9 +227,20 @@ class KustoClient:
         self.allow_write = allow_write
         #: Entities each **named** entity group stands for, for `macro-expand`.
         #: Parsed once here so a malformed entry fails at construction.
+        #:
+        #: Both this and :attr:`clusters` are forwarded to every translation this
+        #: client performs. They are kept *parsed* and forwarded as-is, which
+        #: works because both `parse_entity_groups` and `parse_cluster_map` are
+        #: idempotent; holding the raw map beside the parsed one is how the two
+        #: drift apart.
+        from ..clusters import parse_cluster_map
         from ..entity_groups import parse_entity_groups
 
         self.entity_groups = parse_entity_groups(entity_groups)
+        #: Local stand-ins for Kusto clusters, for `cluster('c').database('d')`.
+        #: Per-client rather than only process-global, matching `serve` and
+        #: :func:`duckdb_kql.query`.
+        self.clusters = parse_cluster_map(clusters)
         self._connection: DuckDBPyConnection
 
         if hasattr(kcsb, "execute") and hasattr(kcsb, "sql"):
@@ -307,7 +320,19 @@ class KustoClient:
         from ..engine import schema
 
         try:
-            translated = to_sql(query, schema=schema(con), parameters=parameters)
+            # This client's own mappings, not the process-global ones. Leaving
+            # them off is how a `macro-expand` over a named group failed here
+            # while the same query through `duckdb_kql.query(entity_groups=…)`
+            # on the same connection answered — the translation silently fell
+            # back to whatever `set_entity_groups` had been given, which for a
+            # per-client configuration is nothing.
+            translated = to_sql(
+                query,
+                schema=schema(con),
+                parameters=parameters,
+                clusters=self.clusters,
+                entity_groups=self.entity_groups,
+            )
         except KqlError as exc:
             raise _semantic_error(exc) from exc
 
@@ -437,8 +462,16 @@ class KustoClient:
             )
 
         try:
+            # Same forwarding as the query path. An ingestion command's source is
+            # a whole KQL query, so it too can name an entity group or a cluster.
             sql = str(
-                to_sql(query, schema=schema(con), database=self._attached(database))
+                to_sql(
+                    query,
+                    schema=schema(con),
+                    database=self._attached(database),
+                    clusters=self.clusters,
+                    entity_groups=self.entity_groups,
+                )
             )
         except KqlUnsupportedError as exc:
             raise KustoUnsupportedError(

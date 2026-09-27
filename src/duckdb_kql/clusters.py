@@ -63,6 +63,7 @@ from __future__ import annotations
 from .errors import KqlSchemaError
 
 __all__ = [
+    "ClusterArg",
     "ClusterMap",
     "cluster_fqdn",
     "normalize_cluster",
@@ -83,6 +84,12 @@ ClusterMap = dict[tuple[str, str] | str, str | dict[str, str]]
 
 #: The normalized form: ``(host, database) -> DuckDB database name``.
 Resolved = dict[tuple[str, str], str]
+
+#: What the ``clusters=`` parameters actually accept: a caller's map, **or** an
+#: already-normalized one. :func:`parse_cluster_map` has always been idempotent,
+#: but the signatures said otherwise, so a component holding a parsed map could
+#: not be typed as forwarding it — and `KustoClient` forwarded nothing at all.
+ClusterArg = ClusterMap | Resolved
 
 #: The suffix a public-cloud cluster completes a bare name with. Sovereign
 #: clouds use their own; see the module docstring for why guessing this one is
@@ -163,7 +170,7 @@ def _spellings(host: str) -> tuple[str, ...]:
     return (host,)
 
 
-def parse_cluster_map(clusters: ClusterMap | None) -> Resolved | None:
+def parse_cluster_map(clusters: ClusterArg | None) -> Resolved | None:
     """Normalize either accepted shape into ``(host, database) -> name``.
 
     Raises rather than ignoring a malformed entry: a mapping that silently
@@ -277,7 +284,7 @@ def resolve(cluster: str, database: str, clusters: Resolved | None) -> str:
 _DEFAULT: Resolved | None = None
 
 
-def set_clusters(clusters: ClusterMap | None) -> None:
+def set_clusters(clusters: ClusterArg | None) -> None:
     """Set the mapping every later call uses when it passes no ``clusters=``.
 
     Meant for a test fixture or an application's start-up, so a suite full of
@@ -309,7 +316,7 @@ def get_clusters() -> Resolved | None:
     return None if _DEFAULT is None else dict(_DEFAULT)
 
 
-def effective_clusters(clusters: ClusterMap | None) -> Resolved | None:
+def effective_clusters(clusters: ClusterArg | None) -> Resolved | None:
     """What a call should resolve against: its own map, or the default.
 
     A call's ``clusters=`` **replaces** the default rather than merging with it.

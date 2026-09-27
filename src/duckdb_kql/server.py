@@ -43,9 +43,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
 from . import __version__
-from .clusters import ClusterMap
+from .clusters import ClusterArg
 from .control import SCHEMA, CommandColumn, is_control_command, split_command
-from .entity_groups import EntityGroupMap
+from .entity_groups import EntityGroupArg
 from .errors import KqlError, KqlUnsupportedError
 from .types import kusto_type, rest_datatype
 
@@ -567,8 +567,8 @@ class KustoRestServer(ThreadingHTTPServer):
         source: str = ":memory:",
         quiet: bool = False,
         allow_write: bool = False,
-        clusters: ClusterMap | None = None,
-        entity_groups: EntityGroupMap | None = None,
+        clusters: ClusterArg | None = None,
+        entity_groups: EntityGroupArg | None = None,
     ) -> None:
         super().__init__((host, port), _Handler)
         self._con = con
@@ -792,8 +792,8 @@ def build_server(
     init: str | Path | None = None,
     quiet: bool = False,
     allow_write: bool = False,
-    clusters: ClusterMap | None = None,
-    entity_groups: EntityGroupMap | None = None,
+    clusters: ClusterArg | None = None,
+    entity_groups: EntityGroupArg | None = None,
 ) -> KustoRestServer:
     """A server ready to `serve_forever()`, with its own DuckDB connection.
 
@@ -826,8 +826,8 @@ def serve(
     allowed_origins: tuple[str, ...] = ADX_ORIGINS,
     init: str | Path | None = None,
     allow_write: bool = False,
-    clusters: ClusterMap | None = None,
-    entity_groups: EntityGroupMap | None = None,
+    clusters: ClusterArg | None = None,
+    entity_groups: EntityGroupArg | None = None,
 ) -> None:
     """Run until interrupted. This is what the CLI's ``serve`` calls."""
     server = build_server(

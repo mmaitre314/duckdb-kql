@@ -338,7 +338,7 @@ Requires `duckdb`; `pandas` for the DataFrame helper. A drop-in for
 option and why it is implemented, a no-op, or refused — is in
 [Kusto SDK compatibility](kusto-client.md); this is the surface.
 
-### `KustoClient(kcsb, database=None, *, allow_write=True, entity_groups=None)`
+### `KustoClient(kcsb, database=None, *, allow_write=True, clusters=None, entity_groups=None)`
 
 *kcsb* may be a DuckDB database path, a `KustoConnectionStringBuilder`, or an
 existing `duckdb` connection. A connection the client opened is closed with the
@@ -348,6 +348,15 @@ client; one you passed in is left alone.
 defaults to allowing them because this client runs in your own process against
 your own connection; `duckdb-kql serve` defaults the other way because it is
 reachable over a socket.
+
+`clusters` and `entity_groups` are this client's own mappings, with the same
+meaning and the same replace-not-merge policy they have on
+[`to_sql`](#to_sqlkql-schemanone-parametersnone-databasenone-allow_writetrue-clustersnone-entity_groupsnone).
+They apply to **every** translation the client performs, queries and ingestion
+alike, so two clients on one connection can be configured independently — which
+is the point of them being per-client rather than only
+`set_clusters` / `set_entity_groups`. Both are validated at construction, so a
+malformed entry fails where it was written.
 
 | Method | Behaviour |
 |---|---|

@@ -36,8 +36,8 @@ if TYPE_CHECKING:
     import pyarrow as pa
     from duckdb import DuckDBPyConnection, DuckDBPyRelation
 
-    from .clusters import ClusterMap
-    from .entity_groups import EntityGroupMap
+    from .clusters import ClusterArg
+    from .entity_groups import EntityGroupArg
     from .translate import TranslationResult
 
 #: Values a caller may supply for a query's declared parameters. Deliberately
@@ -91,8 +91,8 @@ def kql(
     parameters: Parameters | None = None,
     database: str | None = None,
     allow_write: bool = True,
-    clusters: ClusterMap | None = None,
-    entity_groups: EntityGroupMap | None = None,
+    clusters: ClusterArg | None = None,
+    entity_groups: EntityGroupArg | None = None,
 ) -> DuckDBPyRelation:
     """Execute the KQL *query* against a DuckDB connection, returning a relation.
 
@@ -144,8 +144,8 @@ def execute(
     parameters: Parameters | None = None,
     database: str | None = None,
     allow_write: bool = True,
-    clusters: ClusterMap | None = None,
-    entity_groups: EntityGroupMap | None = None,
+    clusters: ClusterArg | None = None,
+    entity_groups: EntityGroupArg | None = None,
 ) -> DuckDBPyConnection:
     """Execute the KQL *query* and return the connection, mirroring ``con.execute``.
 
@@ -265,8 +265,8 @@ def script(
     script: str,
     database: str | None = None,
     allow_write: bool = True,
-    clusters: ClusterMap | None = None,
-    entity_groups: EntityGroupMap | None = None,
+    clusters: ClusterArg | None = None,
+    entity_groups: EntityGroupArg | None = None,
     continue_on_errors: bool = False,
 ) -> list[ScriptResult]:
     """Run a KQL **script** — several statements, in order, against one connection.
@@ -349,8 +349,8 @@ def _run_statement(
     statement: str,
     database: str | None,
     allow_write: bool,
-    clusters: ClusterMap | None,
-    entity_groups: EntityGroupMap | None,
+    clusters: ClusterArg | None,
+    entity_groups: EntityGroupArg | None,
 ) -> tuple[list[str], list[tuple[Any, ...]]]:
     """Execute one statement eagerly and read back what it produced."""
     translated, bound = _prepare(
@@ -372,8 +372,8 @@ def _prepare(
     parameters: Parameters | None,
     database: str | None = None,
     allow_write: bool = True,
-    clusters: ClusterMap | None = None,
-    entity_groups: EntityGroupMap | None = None,
+    clusters: ClusterArg | None = None,
+    entity_groups: EntityGroupArg | None = None,
 ) -> tuple[str, Parameters]:
     """Translate the KQL *query* and get *con* into the state the SQL assumes."""
     from . import to_sql
@@ -442,8 +442,8 @@ def df(
     parameters: Parameters | None = None,
     database: str | None = None,
     allow_write: bool = True,
-    clusters: ClusterMap | None = None,
-    entity_groups: EntityGroupMap | None = None,
+    clusters: ClusterArg | None = None,
+    entity_groups: EntityGroupArg | None = None,
 ) -> pd.DataFrame:
     """Execute the KQL *query* and return a pandas DataFrame.
 
@@ -475,8 +475,8 @@ def arrow(
     parameters: Parameters | None = None,
     database: str | None = None,
     allow_write: bool = True,
-    clusters: ClusterMap | None = None,
-    entity_groups: EntityGroupMap | None = None,
+    clusters: ClusterArg | None = None,
+    entity_groups: EntityGroupArg | None = None,
 ) -> pa.Table:
     """Execute the KQL *query* and return a pyarrow Table."""
     return kql(con, query, parameters, database, allow_write, clusters, entity_groups).arrow()

@@ -53,8 +53,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from .clusters import ClusterMap, get_clusters, set_clusters
-from .entity_groups import EntityGroupMap, get_entity_groups, set_entity_groups
+from .clusters import ClusterArg, get_clusters, set_clusters
+from .entity_groups import EntityGroupArg, get_entity_groups, set_entity_groups
 from .errors import (
     Diagnostic,
     KqlError,
@@ -186,8 +186,8 @@ def to_sql(
     parameters: Parameters | None = None,
     database: str | None = None,
     allow_write: bool = True,
-    clusters: ClusterMap | None = None,
-    entity_groups: EntityGroupMap | None = None,
+    clusters: ClusterArg | None = None,
+    entity_groups: EntityGroupArg | None = None,
 ) -> TranslationResult:
     """Translate *kql* to DuckDB SQL. Requires no connection and no database.
 
@@ -279,8 +279,18 @@ def to_sql(
             )
         ingestion = parse_ingestion(head)
         resolved = effective_clusters(clusters)
+        # `entity_groups` reaches `lower` here for the same reason it does on
+        # every other branch: an ingestion command's source is a whole KQL query,
+        # so it may be a `macro-expand` over a named group. This branch was the
+        # one that dropped it, which made `.set-or-replace T <| macro-expand G …`
+        # fail with "unknown entity group" however the mapping was supplied.
         rows_sql = _emit(
-            qualify(lower(ingestion.source), database, resolved), schema
+            qualify(
+                lower(ingestion.source, effective_entity_groups(entity_groups)),
+                database,
+                resolved,
+            ),
+            schema,
         )
         return _Result(render_ingestion(ingestion, str(rows_sql), database))
 
