@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import datetime as _dt
 import re
 from collections.abc import Callable, Iterator
 from typing import Any
@@ -1776,9 +1777,8 @@ def lower(kql: str, entity_groups: ResolvedGroups | None = None) -> ir.Query:
 
     # These are NOT QueryStatements, so counting query statements alone would
     # silently DROP them. Refuse loudly instead. (`let` used to be in this list
-    # for exactly that reason; it is now implemented below.)
+    # for exactly that reason, and `set` followed it.)
     for stmt_kind, label in (
-        ("SetStatement", "set"),
         ("AliasDatabaseStatement", "alias database"),
         ("DeclarePatternStatement", "declare pattern"),
         ("RestrictAccessStatement", "restrict"),
@@ -1787,6 +1787,12 @@ def lower(kql: str, entity_groups: ResolvedGroups | None = None) -> ir.Query:
             raise KqlUnsupportedError(
                 label, hint="statements other than a single query are Wave 1+"
             )
+
+    # `set` statements are request options written into the query text, so they
+    # are classified by the same table the client's `set_option` uses. Applied
+    # before the query is lowered, since `set query_now` changes what `now()`
+    # means everywhere below.
+    _apply_set_statements(tree)
 
     # Only the statements at the **top level** count. Searching the tree for
     # `QueryStatement` is not the same question: a `macro-expand` body is itself
@@ -1958,6 +1964,100 @@ _ = KqlParser
 # ---------------------------------------------------------------------------
 # declare query_parameters
 # ---------------------------------------------------------------------------
+
+
+def _apply_set_statements(tree: Any) -> None:
+    """Honour, ignore or refuse each ``set NAME [= VALUE]`` at the top level.
+
+    Kusto's `set` statement sets a **request option** for the duration of the
+    query — the same options `ClientRequestProperties.set_option` sends beside
+    it — so the classification comes from one table (`duckdb_kql.options`) rather
+    than a second list that can drift from the client's.
+
+    Three outcomes, and the middle one is the reason this is not simply a
+    refusal: an option classified as a no-op there is a no-op here too, so
+    accepting it silently *is* honouring it. Refusing would reject a query Kusto
+    runs, over an option that changes nothing either way.
+
+    Measured on the emulator: a later `set` of the same option wins, `set`
+    composes with `declare query_parameters` and `let`, and Kusto accepts an
+    **unknown** option silently. We refuse an unknown one — see
+    `duckdb_kql.options` for why.
+    """
+    from .options import OPTION_SUPPORT, SET_STATEMENT_ONLY_AT_EXECUTION, OptionSupport
+    from .translate import pin
+
+    for statement in _find_all(tree, "SetStatement"):
+        name, value = _read_set_statement(statement)
+        # The fallback wording matters. Kusto has more request options than this
+        # table lists, so "no such option" would be a claim about Kusto rather
+        # than about us — and a caller who wrote a real one would be told it does
+        # not exist.
+        support, reason = OPTION_SUPPORT.get(
+            name,
+            (
+                OptionSupport.REFUSED,
+                "not one of the request options this translator implements; see "
+                "duckdb_kql.options.OPTION_SUPPORT for the ones it does",
+            ),
+        )
+        if name in SET_STATEMENT_ONLY_AT_EXECUTION:
+            raise KqlUnsupportedError(
+                f"set {name}",
+                span=_span(statement),
+                hint=SET_STATEMENT_ONLY_AT_EXECUTION[name],
+            )
+        if support == OptionSupport.NO_OP:
+            continue
+        if name == "query_now":
+            pin(_read_query_now(statement, value))
+            continue
+        raise KqlUnsupportedError(
+            f"set {name}", span=_span(statement), hint=reason
+        )
+
+
+def _read_set_statement(statement: Any) -> tuple[str, Any | None]:
+    """The option's name, lower-cased, and its value node if it has one.
+
+    ``set notruncation`` carries no value, which the grammar allows; only the
+    options that need one complain about its absence.
+    """
+    kids = _rule_children(statement)
+    if not kids:
+        raise _unsupported(statement, "set")
+    found = _find_names(kids[0])
+    name = (found[0] if found else kids[0].getText()).lower()
+    return name, kids[1] if len(kids) > 1 else None
+
+
+def _read_query_now(statement: Any, value: Any | None) -> _dt.datetime:
+    """The datetime a ``set query_now = datetime(...)`` names.
+
+    Kusto requires a **datetime literal** here, measured: a string, a timespan, a
+    long, a bare name and a missing value are each rejected with
+    General_BadRequest, and `datetime(2020-01-02 03:04:05.678)` is accepted. So
+    this refuses the same set rather than accepting a string it would have to
+    guess the meaning of — the Python `query_now=` argument is the surface that
+    takes an ISO string, where the caller can see the coercion.
+    """
+    if value is None:
+        raise KqlUnsupportedError(
+            "set query_now",
+            span=_span(statement),
+            hint="needs a value, as `set query_now = datetime(2020-01-02 12:00)`",
+        )
+    lowered = _lower_expr(_collapse(value))
+    if not (isinstance(lowered, ir.Literal) and lowered.kind == "datetime"):
+        raise KqlUnsupportedError(
+            "set query_now",
+            span=_span(statement),
+            hint="takes a datetime literal, as `datetime(2020-01-02 12:00)`; "
+            "Kusto refuses anything else here too",
+        )
+    from .params import as_datetime
+
+    return as_datetime(lowered.value, "query_now")
 
 
 def _lower_query_parameters(tree: Any) -> list[ParameterDeclaration]:

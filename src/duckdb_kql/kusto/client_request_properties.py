@@ -12,8 +12,10 @@ out when a report is wrong rather than when the code runs. So every option is
 classified: implemented, accepted-as-a-no-op *because it cannot change this
 client's answers*, or refused outright at execution time.
 
-The classification lives in :data:`OPTION_SUPPORT` and is checked by a test that
-walks it, so an option cannot quietly join the "stored and ignored" set.
+The classification lives in :data:`~duckdb_kql.options.OPTION_SUPPORT` — Layer 0,
+because a ``set`` statement in the query text means the same thing and `lower`
+has to read the same table — and is checked by a test that walks it, so an option
+cannot quietly join the "stored and ignored" set.
 """
 
 from __future__ import annotations
@@ -26,131 +28,7 @@ from .exceptions import KustoUnsupportedError
 __all__ = ["ClientRequestProperties", "OPTION_SUPPORT", "OptionSupport"]
 
 
-class OptionSupport:
-    """How this client treats one request option."""
-
-    #: We act on it.
-    IMPLEMENTED = "implemented"
-    #: We accept it and do nothing, because doing nothing *is* the behaviour it
-    #: asks for here — not because we cannot be bothered.
-    NO_OP = "no-op"
-    #: We refuse it: honouring it is impossible or would need to be faked.
-    REFUSED = "refused"
-
-
-#: Every Kusto request option this client has an opinion about, and why.
-#: Anything not listed is refused too — an unknown option is not a safe one.
-OPTION_SUPPORT: dict[str, tuple[str, str]] = {
-    # -- implemented ------------------------------------------------------
-    "servertimeout": (
-        OptionSupport.IMPLEMENTED,
-        "Enforced by interrupting the DuckDB query when the deadline passes.",
-    ),
-    "norequesttimeout": (
-        OptionSupport.IMPLEMENTED,
-        "Disables the timeout above.",
-    ),
-    "query_now": (
-        OptionSupport.IMPLEMENTED,
-        "Pins the query clock: `now()` and `ago()` resolve against the supplied "
-        "instant instead of the wall clock, through one binding shared by the "
-        "whole statement. The point is deterministic tests of queries written "
-        "against `now()`, unchanged.",
-    ),
-    # -- accepted as a no-op ----------------------------------------------
-    "deferpartialqueryfailures": (
-        OptionSupport.NO_OP,
-        "This client never returns partial results: a query either completes or "
-        "raises. There is no partial failure to defer or to surface.",
-    ),
-    "results_progressive_enabled": (
-        OptionSupport.NO_OP,
-        "Progressive framing is a streaming-transport concern. There is no "
-        "transport here, and the full result is already materialised.",
-    ),
-    "request_readonly": (
-        OptionSupport.NO_OP,
-        "Translated KQL only ever reads: no operator in the supported surface "
-        "writes. The guarantee the option asks for already holds.",
-    ),
-    "request_app_name": (OptionSupport.NO_OP, "Recorded for tracing only."),
-    "request_user": (OptionSupport.NO_OP, "Recorded for tracing only."),
-    "request_description": (OptionSupport.NO_OP, "Recorded for tracing only."),
-    "client_max_redirect_count": (
-        OptionSupport.NO_OP,
-        "There is no HTTP request to redirect.",
-    ),
-}
-
-#: Options a caller is most likely to reach for that we deliberately refuse,
-#: with the reason. Kept separate from the table above so the refusal has an
-#: explanation rather than falling through to the generic "unknown option".
-_REFUSED_WITH_REASON = {
-    "queryconsistency": (
-        "A single local database has one consistency level. Accepting "
-        "'weakconsistency' would suggest a choice that does not exist."
-    ),
-    "truncationmaxrecords": (
-        "Kusto truncates a result and *tells you* it did, via "
-        "QueryCompletionInformation. Silently returning fewer rows without that "
-        "signal would look like a complete answer."
-    ),
-    "truncationmaxsize": (
-        "Same as truncationmaxrecords: a truncated result that does not "
-        "announce itself is indistinguishable from a short one."
-    ),
-    "notruncation": (
-        "Nothing truncates here, so this is not the no-op it looks like: a "
-        "caller setting it believes truncation was otherwise in play."
-    ),
-    "query_datetime_scope_column": (
-        "Datetime scoping rewrites the query's time filter server-side. Ignoring "
-        "it would silently widen the window the caller asked for."
-    ),
-    "query_datetime_scope_from": (
-        "Half of a datetime scope; see query_datetime_scope_column. Ignoring it "
-        "would silently widen the window the caller asked for."
-    ),
-    "query_datetime_scope_to": (
-        "The other half; see query_datetime_scope_column. Ignoring it would "
-        "silently widen the window the caller asked for."
-    ),
-    "query_language": (
-        "This client speaks KQL. Accepting 'sql' or 'csl' would promise a "
-        "dialect it does not translate."
-    ),
-    "query_bin_auto_size": (
-        "bin_auto() is not in the supported surface, so the setting would "
-        "configure nothing."
-    ),
-    "query_bin_auto_at": (
-        "The alignment point for bin_auto(), which is not in the supported "
-        "surface either; the setting would configure nothing."
-    ),
-    "maxmemoryconsumptionperiterator": (
-        "DuckDB's memory limit is a connection setting with different units and "
-        "different scope; mapping one to the other would be a guess."
-    ),
-    "max_memory_consumption_per_query_per_node": (
-        "Same as maxmemoryconsumptionperiterator: DuckDB's memory limit has "
-        "different units and different scope, so mapping one to the other "
-        "would be a guess dressed up as a limit."
-    ),
-    "query_fanout_nodes_percent": (
-        "Fanout spreads a query over a cluster's nodes. There is one process "
-        "here, so the setting would describe a topology that does not exist."
-    ),
-    "query_fanout_threads_percent": (
-        "DuckDB's threading is a connection setting, not a per-query one."
-    ),
-    "query_results_cache_max_age": (
-        "There is no results cache, so a max age would govern nothing."
-    ),
-}
-
-for _name, _reason in _REFUSED_WITH_REASON.items():
-    OPTION_SUPPORT[_name] = (OptionSupport.REFUSED, _reason)
-del _name, _reason
+from ..options import OPTION_SUPPORT, OptionSupport
 
 
 class ClientRequestProperties:

@@ -76,6 +76,8 @@ Neither ever accepts an option and ignores it.
 | `query_fanout_nodes_percent` | Refused | Fanout spreads a query over a cluster's nodes. There is one process here. |
 | `query_fanout_threads_percent` | Refused | DuckDB's threading is a connection setting, not a per-query one. |
 | `query_results_cache_max_age` | Refused | There is no results cache, so a max age would govern nothing. |
+| `query_results_cache_per_shard` | Refused | Follows `query_results_cache_max_age`: there is no results cache, so there are no shards of one to enable it for. |
+| `query_take_max_records` | Refused | Same as `truncationmaxrecords`: a result capped without saying so is indistinguishable from a short one. |
 
 `servertimeout` is real, not advisory: the deadline interrupts the running
 DuckDB query, and the connection stays usable afterwards.
@@ -143,10 +145,27 @@ For boundary tests, remember which comparisons are inclusive: with the clock
 pinned to `FIXED`, a row at exactly `ago(1d)` passes `t >= ago(1d)` and fails
 `t > ago(1d)`. Both endpoints are now exactly expressible, which is the point.
 
-`query_now` does **not** work as a `set` statement inside the query text —
-`set query_now = datetime(...)` still raises. Real Kusto accepts that spelling;
-here the statement form is not implemented, and refusing is better than a `set`
-that looks honoured and is not.
+It also works as a `set` statement in the query text, which is Kusto's other
+spelling for the same request option:
+
+```kusto
+set query_now = datetime(2020-01-02 12:00);
+Events | where Occurred > ago(1d) | count
+```
+
+The value must be a **datetime literal** — measured, Kusto answers SEM0020 for a
+string, a timespan, a number, a bare name or no value at all, and so does this.
+A later `set` of the same option wins, and if a request also passes
+`query_now=`, the statement in the text wins: a `set` statement *sets the
+request property*, so the text is the later word.
+
+`set` statements more generally are classified by the same table as the request
+options, in `duckdb_kql.options` — one classification, two spellings. An option
+that is a no-op here is accepted silently, because doing nothing is what it asks
+for; one that would change an answer is refused with its reason; and
+`servertimeout` / `norequesttimeout` are refused *as statements* and point at the
+request option, because the deadline is enforced while the query runs and a
+`set` statement is read when it is translated.
 
 ## Query parameters
 

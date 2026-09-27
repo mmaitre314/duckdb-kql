@@ -247,16 +247,20 @@ def to_sql(
     from .translate import CLOCK_SLOT, clock
 
     moment = None if query_now is None else as_datetime(query_now, "query_now")
-    with clock(moment) as clock_was_read:
+    # Opened even when *moment* is None: a `set query_now = ...` in the query text
+    # pins the same clock from inside, and overrides this argument when both are
+    # given — Kusto's own model, where a `set` statement sets the request
+    # property. `active.moment` is therefore read *after* translating, not before.
+    with clock(moment) as active:
         result = _to_sql(
             kql, schema, parameters, database, allow_write, clusters, entity_groups
         )
-        if moment is None or not clock_was_read():
+        if not active.used:
             # Nothing asked for the clock, so no placeholder mentions it and
             # binding the value would hand DuckDB a parameter with no home.
             return result
         return result.with_parameters(
-            {**result.parameters, CLOCK_SLOT: moment},
+            {**result.parameters, CLOCK_SLOT: active.moment},
             result.unbound,
             result.declarations,
         )

@@ -529,34 +529,57 @@ CLOCK_SLOT = "kqlnow"
 #: two references inside one statement already agree without any help.
 WALL_CLOCK = "(now() AT TIME ZONE 'UTC')"
 
-#: Set while a pinned clock is in force. A module global rather than an argument
-#: threaded through every renderer, for the same reason `_NAMED_GROUPS` is one in
-#: `lower`: `now()` can appear anywhere an expression can, including inside a
-#: nested query, and every one of them has to see the same value.
-_PINNED: dt.datetime | None = None
-_USED_CLOCK = False
+@dataclasses.dataclass
+class Clock:
+    """The instant `now()` resolves to for one translation, and whether it was read.
+
+    Mutable because the value can arrive two ways and the later one wins: a
+    ``query_now=`` argument opens the context, and a ``set query_now = ...``
+    statement in the query text overrides it once lowering finds one — which is
+    Kusto's own model, where a `set` statement *sets the request property*.
+    """
+
+    moment: dt.datetime | None = None
+    #: True once something rendered the clock. Binding the value regardless would
+    #: hand DuckDB a parameter no placeholder mentions, which it rejects.
+    used: bool = False
+
+
+#: The clock in force. A module global rather than an argument threaded through
+#: every renderer, for the same reason `_NAMED_GROUPS` is one in `lower`: `now()`
+#: can appear anywhere an expression can, including inside a nested query, and
+#: every one of them has to see the same value.
+_ACTIVE_CLOCK: Clock | None = None
 
 
 @contextlib.contextmanager
-def clock(moment: dt.datetime | None) -> Iterator[Callable[[], bool]]:
+def clock(moment: dt.datetime | None) -> Iterator[Clock]:
     """Pin `now()` to *moment* for the duration, or leave the wall clock alone.
 
-    Yields a predicate saying whether anything actually asked for the clock, so
-    the caller knows whether to bind the value. Binding it unconditionally would
-    hand DuckDB a parameter no placeholder mentions.
+    Opened for **every** translation, even with no *moment*, so a `set` statement
+    found during lowering has somewhere to put its value.
 
-    Reentrant, and deliberately **inherited** by nested translations: a `now()`
-    on a join's right side or inside a `toscalar` is the same instant as one in
-    the outer query, which is the whole point of pinning it.
+    Deliberately **inherited** by nested translations: a `now()` on a join's
+    right side or inside a `toscalar` is the same instant as one in the outer
+    query, which is the whole point of pinning it.
     """
-    global _PINNED, _USED_CLOCK
-    outer, outer_used = _PINNED, _USED_CLOCK
-    if moment is not None:
-        _PINNED, _USED_CLOCK = moment, False
+    global _ACTIVE_CLOCK
+    outer = _ACTIVE_CLOCK
+    _ACTIVE_CLOCK = Clock(moment)
     try:
-        yield lambda: _USED_CLOCK
+        yield _ACTIVE_CLOCK
     finally:
-        _PINNED, _USED_CLOCK = outer, outer_used
+        _ACTIVE_CLOCK = outer
+
+
+def pin(moment: dt.datetime) -> None:
+    """Point the active clock at *moment* — what ``set query_now`` does.
+
+    A no-op with no clock context open, which cannot happen through `to_sql` but
+    keeps a direct caller of the emitter from having to care.
+    """
+    if _ACTIVE_CLOCK is not None:
+        _ACTIVE_CLOCK.moment = moment
 
 
 def render_clock() -> str:
@@ -568,10 +591,9 @@ def render_clock() -> str:
     reference is then visibly the same value rather than several literals a
     reader has to compare.
     """
-    global _USED_CLOCK
-    if _PINNED is None:
+    if _ACTIVE_CLOCK is None or _ACTIVE_CLOCK.moment is None:
         return WALL_CLOCK
-    _USED_CLOCK = True
+    _ACTIVE_CLOCK.used = True
     return f"CAST(${CLOCK_SLOT} AS {TYPE_MAP['datetime']})"
 
 

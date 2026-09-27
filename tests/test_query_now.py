@@ -209,3 +209,152 @@ def test_text_that_looks_like_the_function_is_left_alone(con) -> None:
         ("now()", "ago(1d)!")
     ]
     assert pinned(con, "datatable(now:long)[5] | project now") == [(5,)]
+
+
+# --------------------------------------------------------------------------
+# `set query_now = datetime(...)` — the same option, written into the query
+# --------------------------------------------------------------------------
+#
+# Kusto lets a caller send a request option beside the query *or* write it into
+# the text as a `set` statement, and they mean the same thing. So the statement
+# form is classified by the same table `set_option` uses — `duckdb_kql.options`,
+# moved to Layer 0 for this, because a `set` statement is translation and cannot
+# depend on the Layer 2 client.
+#
+# Measured on the emulator, 17 probes: the pinned clock reaches `now()`, `ago`,
+# `now(offset)`, a `let`, both `iff` arms, `bin()`, a row set and a `where`
+# window; a later `set` of the same option wins; it composes with `declare` and
+# `let`; and a value that is not a datetime literal is refused — Kusto answers
+# SEM0020 for a string, a timespan, a long, a bare name, and no value at all.
+
+PINNED = "set query_now = datetime(2020-01-02 12:00);"
+
+
+@pytest.mark.parametrize(
+    ("kql", "expected"),
+    [
+        (f"{PINNED} print t = now()", NAIVE),
+        (f"{PINNED} print t = ago(1d)", NAIVE - dt.timedelta(days=1)),
+        (f"{PINNED} print t = now(1h)", NAIVE + dt.timedelta(hours=1)),
+        (f"{PINNED} let n = now(); print t = n", NAIVE),
+        (f"{PINNED} print t = bin(now(), 1h)", NAIVE),
+    ],
+)
+def test_the_set_statement_pins_the_clock(con, kql: str, expected) -> None:
+    assert duckdb_kql.kql(con, kql).fetchall() == [(expected,)]
+
+
+def test_a_later_set_of_the_same_option_wins(con) -> None:
+    """Measured: Kusto answers 2021, so the last one is the request property."""
+    kql = (
+        "set query_now = datetime(2020-01-02);"
+        " set query_now = datetime(2021-01-02); print t = now()"
+    )
+    assert duckdb_kql.kql(con, kql).fetchall() == [(dt.datetime(2021, 1, 2),)]
+
+
+def test_the_statement_overrides_the_argument(con) -> None:
+    """Both given: the text wins, because a `set` *sets the request property*.
+
+    The reverse would mean a query that says what clock it wants and silently
+    gets another. It is also why `to_sql` opens the clock context before
+    translating and reads the value back out afterwards, rather than deciding up
+    front.
+    """
+    rows = duckdb_kql.kql(
+        con, f"{PINNED} print t = now()", query_now=dt.datetime(2015, 5, 5)
+    ).fetchall()
+
+    assert rows == [(NAIVE,)]
+
+
+@pytest.mark.parametrize("value", ["'2020-01-02 12:00'", "1d", "5", "foo"])
+def test_a_value_that_is_not_a_datetime_literal_is_refused(value: str) -> None:
+    """Kusto answers SEM0020 for every one of these, measured."""
+    with pytest.raises(Exception, match="set query_now"):
+        duckdb_kql.to_sql(f"set query_now = {value}; print t = now()")
+
+
+def test_a_value_the_grammar_will_not_even_take_is_still_refused() -> None:
+    """`set query_now = now()` is a *syntax* error, not our refusal.
+
+    The grammar's value position is `identifierOrKeywordName | literalExpression`,
+    so a function call cannot be written there at all. Kusto refuses it too — with
+    SEM0020 rather than a parse error — so both engines say no and only the error
+    class differs. Recorded because the two refusals arrive from different places
+    and a future change might route one of them into an accept.
+    """
+    from duckdb_kql.errors import KqlError
+
+    with pytest.raises(KqlError):
+        duckdb_kql.to_sql("set query_now = now(); print t = now()")
+
+
+def test_set_query_now_with_no_value_is_refused() -> None:
+    """The grammar allows a valueless `set`; this option is not one of those."""
+    with pytest.raises(Exception, match="needs a value"):
+        duckdb_kql.to_sql("set query_now; print t = now()")
+
+
+def test_an_option_that_is_a_no_op_here_is_accepted_silently(con) -> None:
+    """Not a refusal, on purpose.
+
+    An option the table classifies as a no-op does nothing here *because doing
+    nothing is the behaviour it asks for*. Refusing it would reject a query Kusto
+    runs, over something that changes no answer either way.
+    """
+    assert duckdb_kql.kql(con, "set request_app_name = 'tests'; print x = 1").fetchall() == [
+        (1,)
+    ]
+    assert duckdb_kql.kql(con, "set deferpartialqueryfailures; print x = 1").fetchall() == [
+        (1,)
+    ]
+
+
+@pytest.mark.parametrize(
+    ("option", "expected"),
+    [
+        ("truncationmaxrecords = 5", "complete answer"),
+        ("notruncation", "truncation"),
+        ("query_language = sql", "(?i)language"),
+        ("query_datetime_scope_column = 'T'", "widen"),
+    ],
+)
+def test_an_option_that_would_change_the_answer_is_refused(option, expected) -> None:
+    """These reach the same reasons the client's `set_option` gives."""
+    with pytest.raises(Exception, match=expected):
+        duckdb_kql.to_sql(f"set {option}; print x = 1")
+
+
+@pytest.mark.parametrize("option", ["servertimeout = 30s", "norequesttimeout"])
+def test_an_execution_time_option_says_where_the_working_spelling_is(option) -> None:
+    """Implemented as a request option, impossible as a statement.
+
+    The deadline interrupts DuckDB while the query runs; a `set` statement is
+    read when it is translated, where there is nothing running to interrupt.
+    Accepting it there would look honoured and do nothing.
+    """
+    with pytest.raises(Exception, match="request option"):
+        duckdb_kql.to_sql(f"set {option}; print x = 1")
+
+
+def test_an_unrecognised_option_does_not_claim_kusto_lacks_it() -> None:
+    """Wording, and it is a correctness question about what we are asserting.
+
+    Kusto has more request options than the table lists, and accepts an unknown
+    one silently — measured, `set not_a_real_option = 5` runs there. We refuse,
+    which is the safe direction for a misspelled `truncationmaxrecords`. But the
+    message must be about *this translator*, not about Kusto: `query_datascope`
+    is a real option we do not implement, and saying "no such option" would be a
+    false claim.
+    """
+    with pytest.raises(Exception, match="options this translator implements"):
+        duckdb_kql.to_sql("set query_datascope = 1; print x = 1")
+
+
+def test_the_two_spellings_read_one_table() -> None:
+    """The client and `lower` must not drift into two classifications."""
+    from duckdb_kql.kusto import OPTION_SUPPORT as via_client
+    from duckdb_kql.options import OPTION_SUPPORT as via_layer_0
+
+    assert via_client is via_layer_0
