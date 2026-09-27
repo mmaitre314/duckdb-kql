@@ -201,6 +201,20 @@ def is_control_command(text: str) -> bool:
     return text.lstrip().startswith(".")
 
 
+def is_write_command(text: str) -> bool:
+    """Whether *text* is a command that writes: ingestion or a database one.
+
+    Looks past leading comments, exactly as `to_sql` does when it decides what
+    to run. A leading-dot check that does not is how `// note` above a
+    `.set-or-replace` slipped past a gate and was written anyway.
+    """
+    from .databases import is_database_command
+    from .ingest import is_ingestion_command
+
+    head = strip_leading_comments(text)
+    return is_ingestion_command(head) or is_database_command(head)
+
+
 def strip_leading_comments(text: str) -> str:
     """Drop ``//`` comment lines from the front of *text*.
 

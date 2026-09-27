@@ -317,7 +317,19 @@ class KustoClient:
         parameters = dict(getattr(properties, "_parameters", {}) or {})
 
         from .. import to_sql
+        from ..control import is_write_command
         from ..engine import schema
+
+        if is_write_command(query):
+            # Kusto's refusal, word for word (measured on both query endpoints).
+            # This path handed the text to `to_sql` with its default
+            # allow_write=True, so a client constructed with allow_write=False
+            # wrote through `execute_query` — and through `execute` too, when a
+            # `//` comment above the command hid the leading dot it dispatches on.
+            raise KustoServiceError(
+                "Control commands (starting with a dot '.') cannot be served from "
+                "the query endpoint unless they are .show control commands."
+            )
 
         try:
             # This client's own mappings, not the process-global ones. Leaving
@@ -330,6 +342,7 @@ class KustoClient:
                 query,
                 schema=schema(con),
                 parameters=parameters,
+                allow_write=False,
                 clusters=self.clusters,
                 entity_groups=self.entity_groups,
                 query_now=_query_now(properties),
@@ -455,11 +468,20 @@ class KustoClient:
         from .. import to_sql
         from ..engine import schema
         from ..errors import KqlUnsupportedError
+        from ..options import read_only_requested
 
         if not self.allow_write:
             raise KustoUnsupportedError(
                 f"{kind} command {query.strip().split()[0]}",
                 hint="this client was constructed with allow_write=False",
+            )
+        if properties is not None and read_only_requested(properties._options):
+            # Kusto's own refusal, and its type: a 400 BadRequest the SDK raises
+            # as a service error (measured). This option was a no-op on the
+            # grounds that translated KQL only reads, and the write went through.
+            raise KustoServiceError(
+                f"Cannot invoke {kind} command {query.strip().split()[0]!r} as "
+                f"this request is read-only (request_readonly is set)"
             )
 
         try:

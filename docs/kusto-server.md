@@ -310,6 +310,13 @@ change the line that sets them. On the wire the caller is a web UI that sends
 them on every single query, and refusing a request that asks for exactly what it
 is going to get would break the product while telling the truth about nothing.
 
+"Implemented" means the same thing here as there. `query_now` pins the clock,
+`servertimeout` interrupts the query when it runs over — the web UI sends four
+minutes on every request — and `request_readonly` / `request_readonly_hardline`
+refuse a write even under `--allow-write`, as Kusto does. The first two used to
+be accepted by the check and never reach the query, so a pinned clock was
+answered from the wall clock.
+
 `properties.Parameters` is bound as values, never substituted into the query
 text — the same guarantee [query parameters](getting-started.md) carry
 everywhere else.

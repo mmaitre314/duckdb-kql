@@ -44,9 +44,10 @@ from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
 from . import __version__
 from .clusters import ClusterArg
-from .control import SCHEMA, CommandColumn, is_control_command, split_command
+from .control import SCHEMA, CommandColumn, is_control_command, is_write_command, split_command
 from .entity_groups import EntityGroupArg
 from .errors import KqlError, KqlUnsupportedError
+from .options import read_only_requested
 from .types import kusto_type, rest_datatype
 
 if TYPE_CHECKING:
@@ -293,13 +294,6 @@ VALUE_CONDITIONAL: dict[str, tuple[frozenset[str], str]] = {
     ),
 }
 
-#: Accepted because doing nothing is what they ask for. `request_readonly` is
-#: already a no-op in Layer 2 for the same reason — translated KQL only reads —
-#: and the hardline variant asks for that guarantee to be enforced rather than
-#: assumed, which it is: nothing here can write.
-_WIRE_NO_OP = frozenset({"request_readonly_hardline"})
-
-
 def check_options(options: dict[str, Any]) -> list[str]:
     """Refusals for the options in a request, one message each.
 
@@ -313,8 +307,6 @@ def check_options(options: dict[str, Any]) -> list[str]:
     refusals = []
     for raw, value in options.items():
         name = raw.lower()
-        if name in _WIRE_NO_OP:
-            continue
         conditional = VALUE_CONDITIONAL.get(name)
         if conditional is not None:
             accepted, reason = conditional
@@ -515,9 +507,24 @@ class _Handler(BaseHTTPRequestHandler):
 
         properties = request.get("properties") or {}
         options = properties.get("Options") or {} if isinstance(properties, dict) else {}
-        refusals = check_options(options if isinstance(options, dict) else {})
+        if not isinstance(options, dict):
+            options = {}
+        options = {str(k).lower(): v for k, v in options.items()}
+        refusals = check_options(options)
         if refusals:
             self._send(400, error_response("; ".join(refusals)))
+            return
+        if read_only_requested(options) and is_write_command(csl):
+            # Kusto's refusal (measured, for both flavours). `--allow-write` is
+            # the operator's permission; this is the request declining it, and
+            # the write used to go through regardless.
+            self._send(
+                400,
+                error_response(
+                    "Cannot invoke a control command that writes as this request "
+                    "is read-only (request_readonly is set)"
+                ),
+            )
             return
         parameters = properties.get("Parameters") if isinstance(properties, dict) else None
 
@@ -526,6 +533,7 @@ class _Handler(BaseHTTPRequestHandler):
                 csl,
                 parameters if isinstance(parameters, dict) else None,
                 database if isinstance(database, str) and database else None,
+                options,
             )
         except KqlUnsupportedError as exc:
             # A refused write is a policy answer, not a bad query: say so with
@@ -647,8 +655,14 @@ class KustoRestServer(ThreadingHTTPServer):
         csl: str,
         parameters: dict[str, Any] | None = None,
         database: str | None = None,
+        options: dict[str, Any] | None = None,
     ) -> Result:
         """Translate and execute *csl*, described the way Kusto describes it.
+
+        *options* are the request's, names lower-cased, already through
+        `check_options`. Those two sides have to agree: `check_options` accepted
+        `query_now` and `servertimeout` as implemented while this method never
+        saw them, so a pinned clock was answered from the wall clock.
 
         *database* is the one the client selected, and it is honoured rather
         than merely validated. Before this the request's `db` was checked
@@ -664,12 +678,21 @@ class KustoRestServer(ThreadingHTTPServer):
         at once, and ThreadingHTTPServer will happily try.
         """
         from .engine import kql
+        from .kusto.client import _Deadline, _seconds
 
+        options = options or {}
         # `default` is the placeholder name the ADX UI shows before a database
         # has been chosen; it is not a database this process can qualify with.
         target = database if database and database != "default" else None
+        timeout = (
+            None
+            if str(options.get("norequesttimeout", "")).lower() == "true"
+            else _seconds(options.get("servertimeout"))
+        )
 
-        with self._lock:
+        # The deadline inside the lock: it interrupts the connection, and only
+        # this request's statement may be running on it when it fires.
+        with self._lock, _Deadline(self._con, timeout):
             rel = kql(
                 self._con,
                 csl,
@@ -678,6 +701,7 @@ class KustoRestServer(ThreadingHTTPServer):
                 self.allow_write,
                 self.clusters,
                 self.entity_groups,
+                options.get("query_now"),
             )
             names = list(rel.columns)
             kinds = [kusto_type(t) for t in rel.types]

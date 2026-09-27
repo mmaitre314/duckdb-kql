@@ -317,7 +317,7 @@ def test_an_option_that_is_a_no_op_here_is_accepted_silently(con) -> None:
         ("truncationmaxrecords = 5", "complete answer"),
         ("notruncation", "truncation"),
         ("query_language = sql", "(?i)language"),
-        ("query_datetime_scope_column = 'T'", "widen"),
+        ("query_datetimescope_column = 'T'", "widen"),
     ],
 )
 def test_an_option_that_would_change_the_answer_is_refused(option, expected) -> None:
@@ -344,12 +344,15 @@ def test_an_unrecognised_option_does_not_claim_kusto_lacks_it() -> None:
     Kusto has more request options than the table lists, and accepts an unknown
     one silently — measured, `set not_a_real_option = 5` runs there. We refuse,
     which is the safe direction for a misspelled `truncationmaxrecords`. But the
-    message must be about *this translator*, not about Kusto: `query_datascope`
-    is a real option we do not implement, and saying "no such option" would be a
-    false claim.
+    message must be about *this translator*, not about Kusto: "no such option"
+    would be a claim about a service this code cannot see.
+
+    The example was `query_datascope` until every option on the documentation
+    page was classified by name (tests/test_request_options.py), so the one
+    left to reach the fallback is an option nobody has documented.
     """
     with pytest.raises(Exception, match="options this translator implements"):
-        duckdb_kql.to_sql("set query_datascope = 1; print x = 1")
+        duckdb_kql.to_sql("set not_a_real_option = 5; print x = 1")
 
 
 def test_the_two_spellings_read_one_table() -> None:

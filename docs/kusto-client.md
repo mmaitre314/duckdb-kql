@@ -40,7 +40,8 @@ safe one.
 
 ## Request options
 
-Generated from `OPTION_SUPPORT`, which is the source of truth.
+`OPTION_SUPPORT` is the source of truth, and `tests/test_docs.py` holds this
+table to it. It covers every option on the product's request-properties page.
 
 This table is the *Python API's* policy: `set_option` raises at the line that
 asks for something impossible, which is the right answer for a caller who can
@@ -56,18 +57,37 @@ Neither ever accepts an option and ignores it.
 | `query_now` | **Implemented** | Pins the query clock: `now()` and `ago()` resolve against the supplied instant instead of the wall clock, through one binding shared by the whole statement. Request-scoped, so two requests on one client may pin different instants and a request that sets nothing gets the real clock. See [Deterministic tests](#deterministic-tests). |
 | `deferpartialqueryfailures` | No-op | This client never returns partial results: a query either completes or raises. There is no partial failure to defer or to surface. |
 | `results_progressive_enabled` | No-op | Progressive framing is a streaming-transport concern. There is no transport here, and the full result is already materialised. |
-| `request_readonly` | No-op | Translated KQL only ever reads: no operator in the supported surface writes. The guarantee the option asks for already holds. |
+| `request_readonly` | **Implemented** | A write — ingestion or a database command — is refused under it, as Kusto refuses one (measured). It was a no-op here on the grounds that translated KQL only reads, and the write went through. |
+| `request_readonly_hardline` | **Implemented** | Same: a write is refused under it. The plugins it also disables are refused here anyway. |
 | `request_app_name` | No-op | Recorded for tracing only. |
 | `request_user` | No-op | Recorded for tracing only. |
 | `request_description` | No-op | Recorded for tracing only. |
 | `client_max_redirect_count` | No-op | There is no HTTP request to redirect. |
+| `query_log_query_parameters` | No-op | There is no query journal to log parameters to: `.show queries` is refused here. |
+| `query_weakconsistency_session_id` | No-op | Takes effect only under queryconsistency=weakconsistency_by_session_id, which is refused. On its own it selects nothing. |
+| `results_error_reporting_placement` | No-op | Where errors go among partial results. There are none here: a query completes or raises. |
+| `results_v2_fragment_primary_tables` | No-op | Response framing: the rows are the same rows, in one fragment or many. |
+| `results_v2_newlines_between_frames` | No-op | Response framing, whitespace between frames. |
+| `client_results_reader_allow_varying_row_widths` | No-op | A tolerance in the reader. Every row here has the result's width. |
+| `query_results_progressive_row_count` | No-op | Tunes the progressive stream, which is a no-op above for the same reason. |
+| `query_results_progressive_update_period` | No-op | Tunes the progressive stream, which is a no-op above for the same reason. |
+| `push_selection_through_aggregation` | No-op | A plan hint for Kusto's engine. It cannot change a result, and DuckDB plans the query itself. |
+| `query_optimize_fts_at_relop` | No-op | A plan hint for Kusto's free-text search. It cannot change a result. |
+| `query_distribution_nodes_span` | No-op | Shapes the node hierarchy of a distributed query. There is one process here and no hierarchy; it cannot change a result. |
+| `materialized_view_shuffle_query` | No-op | A shuffle-strategy hint for materialized views, which are refused here; a hint cannot change a result in any case. |
+| `query_results_cache_force_refresh` | No-op | There is no results cache: every result is computed fresh, which is what a forced refresh asks for. |
+| `request_callout_disabled` | No-op | Nothing here calls out: `evaluate` (http_request, sql_request and every other plugin) is refused. The restriction already holds. |
+| `request_sandboxed_execution_disabled` | No-op | Nothing here runs in a sandbox: `evaluate python` and `evaluate r` are refused. The restriction already holds. |
+| `request_external_data_disabled` | No-op | `externaldata` and `external_table()` are refused. The restriction already holds. |
+| `request_external_table_disabled` | No-op | `external_table()` is refused. The restriction already holds. |
+| `query_cursor_disabled` | No-op | The cursor functions are refused. The restriction already holds. |
 | `queryconsistency` | Refused | A single local database has one consistency level. Accepting `weakconsistency` would suggest a choice that does not exist. |
 | `truncationmaxrecords` | Refused | Kusto truncates a result and *tells you* it did, via `QueryCompletionInformation`. Silently returning fewer rows without that signal would look like a complete answer. |
 | `truncationmaxsize` | Refused | Same: a truncated result that does not announce itself is indistinguishable from a short one. |
 | `notruncation` | Refused | Nothing truncates here, so this is not the no-op it looks like — a caller setting it believes truncation was otherwise in play. |
-| `query_datetime_scope_column` | Refused | Datetime scoping rewrites the query's time filter server-side. Ignoring it would silently widen the window the caller asked for. |
-| `query_datetime_scope_from` | Refused | Half of a datetime scope; same reason. |
-| `query_datetime_scope_to` | Refused | The other half; same reason. |
+| `query_datetimescope_column` | Refused | Datetime scoping rewrites the query's time filter server-side. Ignoring it would silently widen the window the caller asked for. |
+| `query_datetimescope_from` | Refused | Half of a datetime scope; same reason. |
+| `query_datetimescope_to` | Refused | The other half; same reason. |
 | `query_language` | Refused | This client speaks KQL. Accepting `sql` or `csl` would promise a dialect it does not translate. |
 | `query_bin_auto_size` | Refused | `bin_auto()` is not in the supported surface, so the setting would configure nothing. |
 | `query_bin_auto_at` | Refused | The alignment point for `bin_auto()`; same reason. |
@@ -78,6 +98,21 @@ Neither ever accepts an option and ignores it.
 | `query_results_cache_max_age` | Refused | There is no results cache, so a max age would govern nothing. |
 | `query_results_cache_per_shard` | Refused | Follows `query_results_cache_max_age`: there is no results cache, so there are no shards of one to enable it for. |
 | `query_take_max_records` | Refused | Same as `truncationmaxrecords`: a result capped without saying so is indistinguishable from a short one. |
+| `maxoutputcolumns` | Refused | A limit Kusto enforces by refusing the query (measured: SEM0004 past it). Ignoring it would answer a query Kusto refuses. |
+| `query_max_entities_in_union` | Refused | A limit Kusto enforces by refusing the query; ignoring it would answer a query Kusto refuses. |
+| `query_results_apply_getschema` | Refused | Replaces the result with its schema (measured). Ignoring it would return rows where the caller asked for columns; write `| getschema` instead. |
+| `validatepermissions` | Refused | Returns a permissions verdict instead of running the query. There are no permissions here to validate, and running the query would answer a different question. |
+| `best_effort` | Refused | Changes which tables a union resolves to. This translator refuses an unresolvable table rather than tolerating it, and that tolerance is what the option asks for. |
+| `query_datascope` | Refused | 'hotcache' restricts a query to cached data, and nothing here is cached or not; answering from all of it would silently widen the scope. |
+| `query_force_row_level_security` | Refused | Row level security policies are not modelled here, so there are no rules to enforce; ignoring the request would return rows a policy hides. |
+| `request_block_row_level_security` | Refused | Row level security policies are not modelled here, so no table is known to have one to block. |
+| `request_remote_entities_disabled` | Refused | `cluster()` and `database()` references are answered from local stand-ins. Ignoring this would answer a query Kusto refuses. |
+| `request_impersonation_disabled` | Refused | It stops cross-cluster queries in Kusto, and `cluster()` is answered here from a local stand-in. Ignoring it would answer a query Kusto refuses. |
+| `query_cursor_after_default` | Refused | Database cursors are not modelled, and the cursor functions are refused; the setting would configure nothing. |
+| `query_cursor_before_or_at_default` | Refused | Database cursors are not modelled; see query_cursor_after_default. |
+| `query_cursor_current` | Refused | Database cursors are not modelled; see query_cursor_after_default. |
+| `query_cursor_scoped_tables` | Refused | Scopes tables to a cursor range, and there are no cursors here. Ignoring it would silently widen the rows the caller asked for. |
+| `query_python_debug` | Refused | `evaluate python` is refused, so the setting would configure nothing. |
 
 `servertimeout` is real, not advisory: the deadline interrupts the running
 DuckDB query, and the connection stays usable afterwards.
@@ -165,7 +200,16 @@ that is a no-op here is accepted silently, because doing nothing is what it asks
 for; one that would change an answer is refused with its reason; and
 `servertimeout` / `norequesttimeout` are refused *as statements* and point at the
 request option, because the deadline is enforced while the query runs and a
-`set` statement is read when it is translated.
+`set` statement is read when it is translated. `request_readonly` and
+`request_readonly_hardline` are the reverse — implemented as request options,
+no-ops as statements — because a `set` statement heads a query, and a query
+does not write.
+
+The product documentation lists thirteen options that "can't be set with a set
+statement". Measured, that is not what it means: Kusto accepts every one of
+them as a statement, and it *honours* `servertimeout` and `truncationmaxsize`
+(`set servertimeout = 10ms` times the query out). So none of them is refused
+here merely for being on that list; each is classified by what it does.
 
 ## Query parameters
 

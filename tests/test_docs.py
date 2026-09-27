@@ -104,7 +104,9 @@ def test_option_table_matches_the_code() -> None:
     pytest.importorskip("duckdb")
     from duckdb_kql.kusto import OPTION_SUPPORT
 
-    documented = set(re.findall(r"^\| `([a-z_]+)` \|", _option_table(), re.MULTILINE))
+    # Digits included: `results_v2_fragment_primary_tables` is a real option,
+    # and a name pattern without them reported its row as missing.
+    documented = set(re.findall(r"^\| `([a-z0-9_]+)` \|", _option_table(), re.MULTILINE))
 
     undocumented = sorted(set(OPTION_SUPPORT) - documented)
     assert not undocumented, (
@@ -131,7 +133,7 @@ def test_documented_support_level_matches_the_code() -> None:
 
     wrong = []
     for name, label in re.findall(
-        r"^\| `([a-z_]+)` \| (\*\*Implemented\*\*|No-op|Refused) \|",
+        r"^\| `([a-z0-9_]+)` \| (\*\*Implemented\*\*|No-op|Refused) \|",
         _option_table(),
         re.MULTILINE,
     ):

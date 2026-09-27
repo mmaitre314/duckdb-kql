@@ -1984,7 +1984,12 @@ def _apply_set_statements(tree: Any) -> None:
     **unknown** option silently. We refuse an unknown one — see
     `duckdb_kql.options` for why.
     """
-    from .options import OPTION_SUPPORT, SET_STATEMENT_ONLY_AT_EXECUTION, OptionSupport
+    from .options import (
+        OPTION_SUPPORT,
+        SET_STATEMENT_NO_OP,
+        SET_STATEMENT_ONLY_AT_EXECUTION,
+        OptionSupport,
+    )
     from .translate import pin
 
     for statement in _find_all(tree, "SetStatement"):
@@ -2007,7 +2012,7 @@ def _apply_set_statements(tree: Any) -> None:
                 span=_span(statement),
                 hint=SET_STATEMENT_ONLY_AT_EXECUTION[name],
             )
-        if support == OptionSupport.NO_OP:
+        if support == OptionSupport.NO_OP or name in SET_STATEMENT_NO_OP:
             continue
         if name == "query_now":
             pin(_read_query_now(statement, value))
