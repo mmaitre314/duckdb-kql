@@ -31,7 +31,7 @@ from typing import Any
 
 from .errors import KqlSchemaError, KqlUnsupportedError
 
-__all__ = ["ParameterDeclaration", "bind"]
+__all__ = ["ParameterDeclaration", "as_datetime", "bind"]
 
 #: KQL scalar types a parameter may be declared as, and their aliases.
 #: Anything outside this is refused rather than guessed at. ``int8`` is the
@@ -232,6 +232,19 @@ def _mismatch(name: str, kind: str, value: Any) -> KqlSchemaError:
             f"({value!r:.60}) — pass a value of the declared type"
         ),
     )
+
+
+def as_datetime(value: Any, name: str) -> _dt.datetime:
+    """Read *value* as a KQL datetime, or raise saying what it was instead.
+
+    The public spelling of the coercion a declared ``datetime`` parameter gets,
+    so ``query_now=`` accepts exactly what ``set_parameter`` does — a datetime, a
+    date, or an ISO-8601 string — and normalizes it the same way: aware values
+    are converted to UTC and the zone dropped, naive ones are taken as already
+    UTC (R8). Sharing the function is the point; a second datetime reader is a
+    second set of edge cases to get subtly different.
+    """
+    return _to_datetime(value, name)
 
 
 def _to_datetime(value: Any, name: str) -> _dt.datetime:

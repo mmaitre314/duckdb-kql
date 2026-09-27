@@ -50,6 +50,13 @@ OPTION_SUPPORT: dict[str, tuple[str, str]] = {
         OptionSupport.IMPLEMENTED,
         "Disables the timeout above.",
     ),
+    "query_now": (
+        OptionSupport.IMPLEMENTED,
+        "Pins the query clock: `now()` and `ago()` resolve against the supplied "
+        "instant instead of the wall clock, through one binding shared by the "
+        "whole statement. The point is deterministic tests of queries written "
+        "against `now()`, unchanged.",
+    ),
     # -- accepted as a no-op ----------------------------------------------
     "deferpartialqueryfailures": (
         OptionSupport.NO_OP,
@@ -79,11 +86,6 @@ OPTION_SUPPORT: dict[str, tuple[str, str]] = {
 #: with the reason. Kept separate from the table above so the refusal has an
 #: explanation rather than falling through to the generic "unknown option".
 _REFUSED_WITH_REASON = {
-    "query_now": (
-        "Overriding now() means threading a clock through every datetime "
-        "function. Until that exists, a query using now() with this option set "
-        "would silently use the real clock."
-    ),
     "queryconsistency": (
         "A single local database has one consistency level. Accepting "
         "'weakconsistency' would suggest a choice that does not exist."

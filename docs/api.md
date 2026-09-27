@@ -102,7 +102,7 @@ Every syntax diagnostic, empty when the query is valid. Does not raise.
 `Diagnostic` has `.span` (a `SourceSpan` with 1-based `line`, 0-based `column`)
 and `.message`.
 
-### `to_sql(kql, schema=None, parameters=None, database=None, allow_write=True, clusters=None, entity_groups=None)`
+### `to_sql(kql, schema=None, parameters=None, database=None, allow_write=True, clusters=None, entity_groups=None, query_now=None)`
 
 `database` gives unqualified table names a database: `T` renders as
 `"sales"."T"`. It needs no connection, so Layer 0 can target a database too.
@@ -123,7 +123,7 @@ so `join` works without you supplying one.
 the zone yourself. Raises `ImportError` with an install hint if `duckdb` is not
 installed.
 
-### `kql(con, query, parameters=None, database=None, allow_write=True, clusters=None, entity_groups=None) -> DuckDBPyRelation`
+### `kql(con, query, parameters=None, database=None, allow_write=True, clusters=None, entity_groups=None, query_now=None) -> DuckDBPyRelation`
 
 Execute and return a relation, so you can keep composing with DuckDB's API.
 
@@ -212,6 +212,14 @@ the ones that are.
 > that a second thread's `execute` invalidates. Serialize access to a shared
 > connection, or give each thread its own. `duckdb-kql serve` holds a lock for
 > exactly this reason.
+
+`query_now` pins the query clock: `now()` and `ago()` resolve against the value
+given rather than the wall clock, through a single binding shared by the whole
+statement. It takes a `datetime` (aware values are converted to UTC and the zone
+dropped, per R8), a `date`, or an ISO-8601 string — the same coercion a declared
+`datetime` parameter gets. Omitted, nothing changes. It exists for testing
+queries that use `now()` without editing them; see
+[Deterministic tests](kusto-client.md#deterministic-tests).
 
 `entity_groups` maps each **named** entity group to its entities, for
 `macro-expand MyGroup as s (...)`: `{"MyGroup": ["database('d1')",

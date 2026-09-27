@@ -332,6 +332,7 @@ class KustoClient:
                 parameters=parameters,
                 clusters=self.clusters,
                 entity_groups=self.entity_groups,
+                query_now=_query_now(properties),
             )
         except KqlError as exc:
             raise _semantic_error(exc) from exc
@@ -471,6 +472,7 @@ class KustoClient:
                     database=self._attached(database),
                     clusters=self.clusters,
                     entity_groups=self.entity_groups,
+                    query_now=_query_now(properties),
                 )
             )
         except KqlUnsupportedError as exc:
@@ -691,6 +693,19 @@ class _Deadline:
             raise KustoServiceError(
                 f"query timed out after {self._seconds}s (servertimeout)"
             ) from exc_val
+
+
+def _query_now(properties: ClientRequestProperties | None) -> Any:
+    """The ``query_now`` option, or None for the wall clock.
+
+    Request-scoped on purpose, not client-scoped: two requests on one client may
+    pin different instants, and a request that sets nothing gets the real clock
+    even if an earlier one pinned it. `to_sql` does the validating, so a value
+    that is not a datetime is refused there with the name in the message.
+    """
+    if properties is None:
+        return None
+    return properties.get_option("query_now", None)
 
 
 def _semantic_error(exc: KqlError) -> KustoServiceError:

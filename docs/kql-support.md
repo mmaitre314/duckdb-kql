@@ -122,7 +122,7 @@ returns an approximate answer.
 
 | Statement | Notes |
 |---|---|
-| `set` | Request options as a statement. Silently ignoring one — `query_now`, `truncationmaxrecords` — would change what the caller believes happened, so it raises instead. Same reasoning as [the client's option table](kusto-client.md#request-options). |
+| `set` | Request options as a **statement** are refused: silently ignoring one — `truncationmaxrecords`, say — would change what the caller believes happened. Same reasoning as [the client's option table](kusto-client.md#request-options). `query_now` is honoured as a *request option* and as a `query_now=` argument, which is where a caller can see it; `set query_now = ...` in the query text still raises, because the statement form is not implemented. |
 | `alias database` | Names a remote database. There is no cluster, and resolving it locally would answer a question about somewhere else with data from here. |
 | `declare pattern` | A query-time macro expansion mechanism. Rare, and expanding it wrongly would be invisible. |
 | `restrict` | Narrows the visible entity set for the rest of the query. Ignoring it would **widen** access — the failure direction that matters. |

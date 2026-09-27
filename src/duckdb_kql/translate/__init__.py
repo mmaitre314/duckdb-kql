@@ -10,9 +10,12 @@ Every rule marked ``Rn`` below is a semantic invariant from ``TRANSLATION.md``
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
+import datetime as dt
 import json
 import re
+from collections.abc import Callable, Iterator
 from typing import TYPE_CHECKING, Any
 
 from .. import ir
@@ -510,6 +513,96 @@ def render_datatable(dt: ir.DataTable) -> str:
 # ---------------------------------------------------------------------------
 # Operators
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# The query clock
+# ---------------------------------------------------------------------------
+
+#: The placeholder a pinned clock renders as. Reserved: declared parameters are
+#: numbered `kqlp0`, `kqlp1`, … so this cannot collide with one.
+CLOCK_SLOT = "kqlnow"
+
+#: The wall-clock expression, used when no clock is pinned. DuckDB's `now()` is
+#: fixed for the transaction, which is the property Kusto has too — measured,
+#: `now() == now()` is true there in both the folder and the row engine — so
+#: two references inside one statement already agree without any help.
+WALL_CLOCK = "(now() AT TIME ZONE 'UTC')"
+
+#: Set while a pinned clock is in force. A module global rather than an argument
+#: threaded through every renderer, for the same reason `_NAMED_GROUPS` is one in
+#: `lower`: `now()` can appear anywhere an expression can, including inside a
+#: nested query, and every one of them has to see the same value.
+_PINNED: dt.datetime | None = None
+_USED_CLOCK = False
+
+
+@contextlib.contextmanager
+def clock(moment: dt.datetime | None) -> Iterator[Callable[[], bool]]:
+    """Pin `now()` to *moment* for the duration, or leave the wall clock alone.
+
+    Yields a predicate saying whether anything actually asked for the clock, so
+    the caller knows whether to bind the value. Binding it unconditionally would
+    hand DuckDB a parameter no placeholder mentions.
+
+    Reentrant, and deliberately **inherited** by nested translations: a `now()`
+    on a join's right side or inside a `toscalar` is the same instant as one in
+    the outer query, which is the whole point of pinning it.
+    """
+    global _PINNED, _USED_CLOCK
+    outer, outer_used = _PINNED, _USED_CLOCK
+    if moment is not None:
+        _PINNED, _USED_CLOCK = moment, False
+    try:
+        yield lambda: _USED_CLOCK
+    finally:
+        _PINNED, _USED_CLOCK = outer, outer_used
+
+
+def render_clock() -> str:
+    """The SQL for "now", pinned or not.
+
+    A pinned clock renders as the **one** bound placeholder, not as a formatted
+    literal repeated per reference. Two reasons, and neither is tidiness: a
+    binding cannot be mistaken for caller text that needed escaping, and every
+    reference is then visibly the same value rather than several literals a
+    reader has to compare.
+    """
+    global _USED_CLOCK
+    if _PINNED is None:
+        return WALL_CLOCK
+    _USED_CLOCK = True
+    return f"CAST(${CLOCK_SLOT} AS {TYPE_MAP['datetime']})"
+
+
+def _render_now(node: ir.FunctionCall) -> str:
+    """``now()`` / ``now(offset)`` — the query clock, plus an optional offset.
+
+    **The offset used to be dropped.** The registry declared arities ``(0, 1)``
+    against the template ``(now() AT TIME ZONE 'UTC')``, which has no ``{0}``,
+    and `str.format` discards an argument a template does not mention — so
+    `now(1h)` rendered exactly like `now()` and answered an hour early, silently.
+    Measured on the emulator: `now(1h) - now()` is 3600 seconds and `now(-2h)` is
+    -7200, so the offset is added.
+    """
+    if len(node.args) == 0:
+        return render_clock()
+    if len(node.args) != 1:
+        raise KqlUnsupportedError(
+            "now", hint="takes no arguments, or one timespan offset"
+        )
+    return f"({render_clock()} + {render_expr(node.args[0])})"
+
+
+def _render_ago(node: ir.FunctionCall) -> str:
+    """``ago(span)`` — the query clock minus *span*.
+
+    A special form rather than a template because the clock is not a constant
+    string once it can be pinned.
+    """
+    if len(node.args) != 1:
+        raise KqlUnsupportedError("ago", hint="takes one timespan")
+    return f"({render_clock()} - {render_expr(node.args[0])})"
 
 
 def _quoted(names: list[str]) -> str:
@@ -3981,6 +4074,8 @@ def _render_totimespan(node: ir.FunctionCall) -> str | None:
 #: (`Callable` is a TYPE_CHECKING-only import; the annotation is never
 #: evaluated, because this module has `from __future__ import annotations`.)
 _SPECIAL_FORMS: dict[str, Callable[[ir.FunctionCall], str | None]] = {
+    "now": _render_now,
+    "ago": _render_ago,
     "bin": _render_bin_or_floor,
     "floor": _render_bin_or_floor,
     "tostring": _render_tostring,

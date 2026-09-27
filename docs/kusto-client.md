@@ -53,6 +53,7 @@ Neither ever accepts an option and ignores it.
 |---|---|---|
 | `servertimeout` | **Implemented** | Enforced by interrupting the DuckDB query when the deadline passes. |
 | `norequesttimeout` | **Implemented** | Disables the timeout above. |
+| `query_now` | **Implemented** | Pins the query clock: `now()` and `ago()` resolve against the supplied instant instead of the wall clock, through one binding shared by the whole statement. Request-scoped, so two requests on one client may pin different instants and a request that sets nothing gets the real clock. See [Deterministic tests](#deterministic-tests). |
 | `deferpartialqueryfailures` | No-op | This client never returns partial results: a query either completes or raises. There is no partial failure to defer or to surface. |
 | `results_progressive_enabled` | No-op | Progressive framing is a streaming-transport concern. There is no transport here, and the full result is already materialised. |
 | `request_readonly` | No-op | Translated KQL only ever reads: no operator in the supported surface writes. The guarantee the option asks for already holds. |
@@ -60,7 +61,6 @@ Neither ever accepts an option and ignores it.
 | `request_user` | No-op | Recorded for tracing only. |
 | `request_description` | No-op | Recorded for tracing only. |
 | `client_max_redirect_count` | No-op | There is no HTTP request to redirect. |
-| `query_now` | Refused | Overriding `now()` means threading a clock through every datetime function. Until that exists, a query using `now()` with this option set would silently use the real clock. |
 | `queryconsistency` | Refused | A single local database has one consistency level. Accepting `weakconsistency` would suggest a choice that does not exist. |
 | `truncationmaxrecords` | Refused | Kusto truncates a result and *tells you* it did, via `QueryCompletionInformation`. Silently returning fewer rows without that signal would look like a complete answer. |
 | `truncationmaxsize` | Refused | Same: a truncated result that does not announce itself is indistinguishable from a short one. |
@@ -85,6 +85,68 @@ props = ClientRequestProperties()
 props.set_option(props.request_timeout_option_name, timedelta(seconds=30))
 # a timedelta, a number of seconds, or a KQL timespan string ("30s", "5m")
 ```
+
+## Deterministic tests
+
+A query written against `now()` or `ago()` cannot be asserted on while the clock
+moves under it. Generating fixtures relative to wall-clock time works until a
+window boundary lands on the wrong side of a second, and then it fails once a
+week for reasons nobody can reproduce.
+
+`query_now` pins the clock for one request, so the query under test runs
+**unchanged**:
+
+```python
+from datetime import datetime, timedelta, timezone
+from duckdb_kql.kusto import ClientRequestProperties, KustoClient
+
+FIXED = datetime(2020, 1, 2, 12, tzinfo=timezone.utc)
+
+properties = ClientRequestProperties()
+properties.set_option("query_now", FIXED)
+
+with KustoClient(connection) as client:
+    response = client.execute(None, "Events | where Occurred > ago(1d) | count", properties)
+```
+
+Every `now()` and `ago()` in the request — in a `let`, in either branch of an
+`iff`, on a join's right side, in a nested query — resolves against that one
+instant, because they all render as the same bound placeholder. `now(1h)` and
+`ago(-1h)` offset from it.
+
+The same argument exists on the layers below, so a test does not have to reach
+for the SDK shape to get a fixed clock:
+
+```python
+duckdb_kql.query(connection, "Events | where Occurred > ago(1d)", query_now=FIXED)
+duckdb_kql.to_sql("print t = now()", query_now=FIXED)   # no connection needed
+```
+
+What the value may be, and what it becomes: a `datetime` (aware values are
+converted to UTC and the zone dropped), a `date`, or an ISO-8601 string —
+exactly what `set_parameter` accepts for a declared `datetime`, because it is the
+same coercion. Anything else raises naming `query_now` rather than being
+quietly ignored.
+
+Three properties worth relying on in a test:
+
+- **It is request-scoped.** Two requests on one client may pin different
+  instants, and a request that sets nothing gets the real clock even if an
+  earlier one pinned it. Nothing is stored on the client.
+- **Omitting it changes nothing.** The generated SQL is byte-for-byte what it
+  was, with DuckDB's own `now()`, and no parameter is bound.
+- **Only the function is affected.** The override acts on the parsed query, not
+  on its text, so a string literal `'now()'` or a column named `now` is left
+  alone. Pinning the clock is not a find-and-replace.
+
+For boundary tests, remember which comparisons are inclusive: with the clock
+pinned to `FIXED`, a row at exactly `ago(1d)` passes `t >= ago(1d)` and fails
+`t > ago(1d)`. Both endpoints are now exactly expressible, which is the point.
+
+`query_now` does **not** work as a `set` statement inside the query text —
+`set query_now = datetime(...)` still raises. Real Kusto accepts that spelling;
+here the statement form is not implemented, and refusing is better than a `set`
+that looks honoured and is not.
 
 ## Query parameters
 

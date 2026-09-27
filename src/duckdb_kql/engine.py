@@ -93,6 +93,7 @@ def kql(
     allow_write: bool = True,
     clusters: ClusterArg | None = None,
     entity_groups: EntityGroupArg | None = None,
+    query_now: Any = None,
 ) -> DuckDBPyRelation:
     """Execute the KQL *query* against a DuckDB connection, returning a relation.
 
@@ -121,7 +122,7 @@ def kql(
         )
     """
     translated, bound = _prepare(
-        con, query, parameters, database, allow_write, clusters, entity_groups
+        con, query, parameters, database, allow_write, clusters, entity_groups, query_now
     )
     return con.sql(translated, params=bound) if bound else con.sql(translated)
 
@@ -146,6 +147,7 @@ def execute(
     allow_write: bool = True,
     clusters: ClusterArg | None = None,
     entity_groups: EntityGroupArg | None = None,
+    query_now: Any = None,
 ) -> DuckDBPyConnection:
     """Execute the KQL *query* and return the connection, mirroring ``con.execute``.
 
@@ -153,7 +155,7 @@ def execute(
     relation to keep composing.
     """
     translated, bound = _prepare(
-        con, query, parameters, database, allow_write, clusters, entity_groups
+        con, query, parameters, database, allow_write, clusters, entity_groups, query_now
     )
     return con.execute(translated, bound) if bound else con.execute(translated)
 
@@ -267,6 +269,7 @@ def script(
     allow_write: bool = True,
     clusters: ClusterArg | None = None,
     entity_groups: EntityGroupArg | None = None,
+    query_now: Any = None,
     continue_on_errors: bool = False,
 ) -> list[ScriptResult]:
     """Run a KQL **script** — several statements, in order, against one connection.
@@ -333,7 +336,7 @@ def script(
     for index, (line, statement) in enumerate(split_script(script), start=1):
         try:
             columns, rows = _run_statement(
-                con, statement, database, allow_write, clusters, entity_groups
+                con, statement, database, allow_write, clusters, entity_groups, query_now
             )
         except Exception as exc:
             if not continue_on_errors:
@@ -351,10 +354,11 @@ def _run_statement(
     allow_write: bool,
     clusters: ClusterArg | None,
     entity_groups: EntityGroupArg | None,
+    query_now: Any,
 ) -> tuple[list[str], list[tuple[Any, ...]]]:
     """Execute one statement eagerly and read back what it produced."""
     translated, bound = _prepare(
-        con, statement, None, database, allow_write, clusters, entity_groups
+        con, statement, None, database, allow_write, clusters, entity_groups, query_now
     )
     cursor = con.execute(translated, bound) if bound else con.execute(translated)
     # `description` is None for a statement that returns no result set. Every
@@ -374,6 +378,7 @@ def _prepare(
     allow_write: bool = True,
     clusters: ClusterArg | None = None,
     entity_groups: EntityGroupArg | None = None,
+    query_now: Any = None,
 ) -> tuple[str, Parameters]:
     """Translate the KQL *query* and get *con* into the state the SQL assumes."""
     from . import to_sql
@@ -389,6 +394,7 @@ def _prepare(
         database=database,
         allow_write=allow_write,
         entity_groups=entity_groups,
+        query_now=query_now,
         clusters=clusters,
     )
 
@@ -444,6 +450,7 @@ def df(
     allow_write: bool = True,
     clusters: ClusterArg | None = None,
     entity_groups: EntityGroupArg | None = None,
+    query_now: Any = None,
 ) -> pd.DataFrame:
     """Execute the KQL *query* and return a pandas DataFrame.
 
@@ -464,7 +471,7 @@ def df(
     are not interchangeable there the way they are here.
     """
     translated, bound = _prepare(
-        con, query, parameters, database, allow_write, clusters, entity_groups
+        con, query, parameters, database, allow_write, clusters, entity_groups, query_now
     )
     return (con.execute(translated, bound) if bound else con.execute(translated)).df()
 
@@ -477,9 +484,12 @@ def arrow(
     allow_write: bool = True,
     clusters: ClusterArg | None = None,
     entity_groups: EntityGroupArg | None = None,
+    query_now: Any = None,
 ) -> pa.Table:
     """Execute the KQL *query* and return a pyarrow Table."""
-    return kql(con, query, parameters, database, allow_write, clusters, entity_groups).arrow()
+    return kql(
+        con, query, parameters, database, allow_write, clusters, entity_groups, query_now
+    ).arrow()
 
 
 def schema(con: DuckDBPyConnection) -> Schema:

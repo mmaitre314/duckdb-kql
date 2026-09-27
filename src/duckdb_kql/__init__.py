@@ -188,6 +188,7 @@ def to_sql(
     allow_write: bool = True,
     clusters: ClusterArg | None = None,
     entity_groups: EntityGroupArg | None = None,
+    query_now: Any = None,
 ) -> TranslationResult:
     """Translate *kql* to DuckDB SQL. Requires no connection and no database.
 
@@ -242,6 +243,35 @@ def to_sql(
     worth reading on its own. The names still missing are listed in
     ``.unbound``, and executing is what turns them into an error.
     """
+    from .params import as_datetime
+    from .translate import CLOCK_SLOT, clock
+
+    moment = None if query_now is None else as_datetime(query_now, "query_now")
+    with clock(moment) as clock_was_read:
+        result = _to_sql(
+            kql, schema, parameters, database, allow_write, clusters, entity_groups
+        )
+        if moment is None or not clock_was_read():
+            # Nothing asked for the clock, so no placeholder mentions it and
+            # binding the value would hand DuckDB a parameter with no home.
+            return result
+        return result.with_parameters(
+            {**result.parameters, CLOCK_SLOT: moment},
+            result.unbound,
+            result.declarations,
+        )
+
+
+def _to_sql(
+    kql: str,
+    schema: Schema | None,
+    parameters: Parameters | None,
+    database: str | None,
+    allow_write: bool,
+    clusters: ClusterArg | None,
+    entity_groups: EntityGroupArg | None,
+) -> TranslationResult:
+    """:func:`to_sql`'s body, with the clock already pinned if it was asked for."""
     from . import ir
     from .clusters import effective_clusters
     from .control import COLUMNS, is_control_command, split_command
