@@ -346,6 +346,48 @@ def test_the_server_pins_the_clock_it_was_asked_to(serve) -> None:
     assert value.startswith("2020-01-02T03:04:05"), value
 
 
+#: Four copies of StormEvents joined on State: about 30 s. Long enough that a
+#: lost interrupt is unmistakable, rather than a timing the test has to guess at.
+_VERY_SLOW = (
+    "SELECT count(*) FROM StormEvents a JOIN StormEvents b USING (State) "
+    "JOIN StormEvents c USING (State) JOIN StormEvents d USING (State)"
+)
+
+
+def test_a_deadline_that_passes_before_the_query_starts_still_stops_it() -> None:
+    """The CI failure behind this: on a cold process the *translation* of the
+    server test's query took longer than its 50 ms deadline, the single
+    `interrupt()` landed on an idle connection and did nothing, and the query
+    then ran unbounded and answered 200. Reproduced locally 3/3 by running that
+    test alone. Here the gap is a sleep, so it does not depend on parse speed."""
+    import time
+
+    duckdb = pytest.importorskip("duckdb")
+    from duckdb_kql import fixtures
+    from duckdb_kql.kusto import KustoServiceError
+    from duckdb_kql.kusto.client import _Deadline
+
+    con = duckdb.connect()
+    fixtures.load_duckdb(con)
+    started = time.monotonic()
+    with pytest.raises(KustoServiceError, match="timed out"):
+        with _Deadline(con, 0.01):
+            time.sleep(0.1)  # the deadline passes with nothing running
+            con.execute(_VERY_SLOW).fetchall()
+    assert time.monotonic() - started < 5, "the late query ran instead of being stopped"
+    # No interrupt outlives the block: the next statement on the connection runs.
+    assert con.execute("SELECT 1").fetchall() == [(1,)]
+
+
+def test_a_deadline_that_never_fires_reports_nothing() -> None:
+    duckdb = pytest.importorskip("duckdb")
+    from duckdb_kql.kusto.client import _Deadline
+
+    con = duckdb.connect()
+    with _Deadline(con, 30):
+        assert con.execute("SELECT 1").fetchall() == [(1,)]
+
+
 def test_the_server_enforces_servertimeout(serve) -> None:
     server = serve()
     slow = (

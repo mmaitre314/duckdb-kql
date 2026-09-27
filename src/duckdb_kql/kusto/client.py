@@ -681,27 +681,52 @@ def _seconds(timeout: Any) -> float | None:
 
 
 class _Deadline:
-    """Interrupt a connection's running query once *seconds* have passed."""
+    """Interrupt a connection's running query once *seconds* have passed.
+
+    The deadline covers the whole block, translation included — Kusto counts
+    planning against ``servertimeout`` too (measured: "Query timed out during the
+    query planning phase"). That is what makes a single interrupt insufficient.
+    ``interrupt()`` on a connection with nothing running does nothing, so a
+    deadline that passed while the query was still being *translated* was lost:
+    the query then started, ran with no limit at all, and answered. A cold parse
+    is slower than a 50 ms deadline, which is how CI found it.
+
+    So once fired it keeps interrupting until the block exits, and it reports the
+    timeout even if the query somehow finished — the request did run past its
+    deadline. The guard makes exit and interrupt mutually exclusive, so no
+    interrupt can land after the block has handed the connection back and the
+    next request's query is running on it.
+    """
+
+    #: How often a fired deadline repeats its interrupt.
+    _REPEAT = 0.01
 
     def __init__(self, connection: Any, seconds: float | None):
         self._connection = connection
         self._seconds = seconds
-        self._timer: threading.Timer | None = None
+        self._done = threading.Event()
+        self._guard = threading.Lock()
         self._fired = False
 
     def __enter__(self) -> _Deadline:
         if self._seconds is not None:
-            self._timer = threading.Timer(self._seconds, self._interrupt)
-            self._timer.daemon = True
-            self._timer.start()
+            threading.Thread(target=self._watch, daemon=True).start()
         return self
 
-    def _interrupt(self) -> None:
+    def _watch(self) -> None:
+        if self._done.wait(self._seconds):
+            return
         self._fired = True
-        try:
-            self._connection.interrupt()
-        except Exception:  # noqa: BLE001 - nothing useful to do from a timer thread
-            pass
+        while True:
+            with self._guard:
+                if self._done.is_set():
+                    return
+                try:
+                    self._connection.interrupt()
+                except Exception:  # noqa: BLE001 - nothing useful to do from a timer thread
+                    pass
+            if self._done.wait(self._REPEAT):
+                return
 
     def __exit__(
         self,
@@ -709,9 +734,9 @@ class _Deadline:
         exc_val: BaseException | None,
         exc_tb: TracebackType | None,
     ) -> None:
-        if self._timer is not None:
-            self._timer.cancel()
-        if self._fired and exc_type is not None:
+        with self._guard:
+            self._done.set()
+        if self._fired:
             raise KustoServiceError(
                 f"query timed out after {self._seconds}s (servertimeout)"
             ) from exc_val
