@@ -102,7 +102,7 @@ Every syntax diagnostic, empty when the query is valid. Does not raise.
 `Diagnostic` has `.span` (a `SourceSpan` with 1-based `line`, 0-based `column`)
 and `.message`.
 
-### `to_sql(kql, schema=None, parameters=None, database=None, allow_write=True, clusters=None, entity_groups=None, query_now=None)`
+### `to_sql(kql, schema=None, parameters=None, database=None, allow_write=True, clusters=None, entity_groups=None, query_now=None, functions=None)`
 
 `database` gives unqualified table names a database: `T` renders as
 `"sales"."T"`. It needs no connection, so Layer 0 can target a database too.
@@ -123,7 +123,7 @@ so `join` works without you supplying one.
 the zone yourself. Raises `ImportError` with an install hint if `duckdb` is not
 installed.
 
-### `kql(con, query, parameters=None, database=None, allow_write=True, clusters=None, entity_groups=None, query_now=None) -> DuckDBPyRelation`
+### `kql(con, query, parameters=None, database=None, allow_write=True, clusters=None, entity_groups=None, query_now=None, functions=None) -> DuckDBPyRelation`
 
 Execute and return a relation, so you can keep composing with DuckDB's API.
 
@@ -228,6 +228,38 @@ Set it once with `duckdb_kql.set_entity_groups(...)`; a per-call argument
 replaces the global rather than merging, exactly as `clusters=` does. A
 `cluster(...)` entity resolves through `clusters=`, so the two compose.
 
+`functions` registers **stored functions**, so a query calling
+`ReadEvents()` runs unchanged against local tables. A stored function is
+database-side state and there is no database here to hold it, so it is
+supplied — in the form Kusto exports it, which `.show database D schema as csl
+script` prints one per line:
+
+```python
+duckdb_kql.kql(
+    con,
+    "ReadEvents() | summarize Total = sum(Value)",
+    functions=".create-or-alter function ReadEvents() { Events }",
+)
+```
+
+It takes one command, a string of several (one per command line, so the
+function lines of an exported script paste across as they are), a list, or a
+mapping of database name to those — `{None: ..., "Sales": ...}`, where `None`
+is the database the query runs in and `database('Sales').F()` calls Sales's
+`F` against Sales's tables. Set it once with `duckdb_kql.set_functions(...)`;
+as with the others, a per-call argument replaces it, and `{}` means none.
+Definitions are checked when registered, so a bad one fails at that line.
+
+A call is expanded where it is written, as Kusto expands it (TRANSLATION.md
+R24): a caller's `let` of a name the body reads is the one the body sees, and a
+column beats a parameter of the same name. A bare `F` calls a function with no
+required parameter, a function beats a table of the same name, and an
+unregistered call is refused — never read as a table. Supported: tabular
+functions with scalar parameters and defaults, called by position. Not yet:
+named arguments, tabular parameters, scalar stored functions, `view = true`.
+The management commands (`.create-or-alter function`, …) are refused and say
+to use this instead; see `docs/stored-functions-proposal.md`.
+
 Also accepts the control commands `.show version`, `.show databases` and
 `.show tables` — a separate Kusto dialect, with the column shapes Kusto returns
 — and pipelines built on them, such as
@@ -245,7 +277,7 @@ of the name is that the argument is not SQL.
 
 Mirrors `con.execute` — for the cursor, or the side effect.
 
-### `script(con, text, database=None, allow_write=True, clusters=None, entity_groups=None, continue_on_errors=False) -> list[ScriptResult]`
+### `script(con, text, database=None, allow_write=True, clusters=None, entity_groups=None, continue_on_errors=False, functions=None) -> list[ScriptResult]`
 
 Run several statements in order against one connection — the shape Azure Data
 Explorer calls a [database
@@ -346,7 +378,7 @@ Requires `duckdb`; `pandas` for the DataFrame helper. A drop-in for
 option and why it is implemented, a no-op, or refused — is in
 [Kusto SDK compatibility](kusto-client.md); this is the surface.
 
-### `KustoClient(kcsb, database=None, *, allow_write=True, clusters=None, entity_groups=None)`
+### `KustoClient(kcsb, database=None, *, allow_write=True, clusters=None, entity_groups=None, functions=None)`
 
 *kcsb* may be a DuckDB database path, a `KustoConnectionStringBuilder`, or an
 existing `duckdb` connection. A connection the client opened is closed with the
@@ -357,14 +389,14 @@ defaults to allowing them because this client runs in your own process against
 your own connection; `duckdb-kql serve` defaults the other way because it is
 reachable over a socket.
 
-`clusters` and `entity_groups` are this client's own mappings, with the same
-meaning and the same replace-not-merge policy they have on
-[`to_sql`](#to_sqlkql-schemanone-parametersnone-databasenone-allow_writetrue-clustersnone-entity_groupsnone).
+`clusters`, `entity_groups` and `functions` are this client's own mappings,
+with the same meaning and the same replace-not-merge policy they have on
+[`to_sql`](#to_sqlkql-schemanone-parametersnone-databasenone-allow_writetrue-clustersnone-entity_groupsnone-query_nownone-functionsnone).
 They apply to **every** translation the client performs, queries and ingestion
 alike, so two clients on one connection can be configured independently — which
 is the point of them being per-client rather than only
-`set_clusters` / `set_entity_groups`. Both are validated at construction, so a
-malformed entry fails where it was written.
+`set_clusters` / `set_entity_groups` / `set_functions`. All are validated at
+construction, so a malformed entry fails where it was written.
 
 | Method | Behaviour |
 |---|---|

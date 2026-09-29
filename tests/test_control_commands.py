@@ -56,6 +56,13 @@ KUSTO_SCHEMA: dict[str, list[tuple[str, int, str, str]]] = {
         ("Name", 0, "System.String", "string"),
         ("Entities", 1, "System.String", "string"),
     ],
+    ".show functions": [
+        ("Name", 0, "System.String", "string"),
+        ("Parameters", 1, "System.String", "string"),
+        ("Body", 2, "System.String", "string"),
+        ("Folder", 3, "System.String", "string"),
+        ("DocString", 4, "System.String", "string"),
+    ],
     ".show databases": [
         ("DatabaseName", 0, "System.String", "string"),
         ("PersistentStorage", 1, "System.String", "string"),
@@ -126,8 +133,9 @@ KUSTO_COLUMNS = {
 #
 #: `.show entity_groups` joins it for a different reason: a named entity group
 #: is cluster-side state, so what this reports is the caller's
-#: `entity_groups=` mapping — and this fixture passes none.
-ALWAYS_EMPTY = {".show materialized-views", ".show entity_groups"}
+#: `entity_groups=` mapping — and this fixture passes none. `.show functions`
+#: likewise reports the `functions=` registry.
+ALWAYS_EMPTY = {".show materialized-views", ".show entity_groups", ".show functions"}
 
 
 @pytest.fixture(scope="module")
@@ -407,8 +415,9 @@ def test_the_split_matches_the_command_before_looking_for_a_pipe() -> None:
 
     assert split_command(".show tables") == (".show tables", "")
     assert split_command(".show tables | limit 3") == (".show tables", "| limit 3")
+    # Reported as written: lower-casing it showed a `t` nobody wrote (R7).
     assert split_command(".ingest inline into table T <| 1") == (
-        ".ingest inline into table t <| 1",
+        ".ingest inline into table T <| 1",
         "",
     )
 

@@ -1,6 +1,10 @@
 # Proposal — stored functions, registered locally
 
-> **Status: accepted, in implementation.** Written for the feature request
+> **Status: implemented.** The normative rule is [`TRANSLATION.md`
+> R24](TRANSLATION.md); the trap tests are `tests/test_stored_functions.py`,
+> and a sweep of 56 queries through the same definitions on both engines agreed
+> on every one, refusals included, with 15 more on `withsource` labels. Implementing it corrected four claims below,
+> each marked where it stands. Written for the feature request
 > "register local tabular KQL functions for offline query testing". Every
 > semantic claim in §2 was measured on the pinned Kusto Emulator on 2026-09-27
 > and 2026-09-29, against two databases (`NetDefaultDB` and a
@@ -32,7 +36,7 @@ duckdb_kql.kql(
 | Names | Case-sensitive: `fpread()` is SEM0260. A built-in's name is reserved: `.create function strlen(...)` and `count()` are SEM0515 |
 | A function and a table of the same name | Both may exist, in either creation order. A bare name reaches the **function**; only `table('X')` reaches the table |
 | A caller's `let` inside the body | **Captured.** `F() { FpT }` answers 100 for `let FpT = <100>; F()`, not the table's 7 — and still 100 through `database('FpOther').F()`. A caller's `let` *function* is captured the same way: 3 rows, not 1 |
-| A caller's *scalar* `let` | Never reaches the body: a body is validated when it is created (`FpG() { FpT \| extend k = Kx }` is SEM0100 at `.create`), so it only reads columns, its parameters and its own `let`s |
+| A caller's *scalar* `let` | **Reaches a name the body does not bind.** A validated body cannot have one (`FpG() { FpT \| extend k = Kx }` is SEM0100 at `.create`), but with `skipvalidation` — which Kusto's own export writes on every function — `let Kx = 5; FpG()` answers 5. *Corrected during implementation: this row first said "never", and the first version shielded bodies accordingly and raised here.* |
 | A body's own `let` vs the caller's | The body's wins: `let k = 100; FpLets()` still filters on its own `k = 5` |
 | A column vs a parameter or body `let` of the same name | **The column wins**, 7 not 0 and 7 not 5 — as it does against a top-level `let` in a query (§4.2) |
 | Whose database | The **function's**: `database('FpOther').FpF()` reads FpOther's `FpT` (50, not 7), a table only FpOther has works (9), and a nested call resolves there too (50). An unqualified call to another database's function is SEM0260 |
@@ -62,8 +66,10 @@ that contains the call. Then:
   `WITH` list reaches the *table*);
 - **schema discovery is free**: `_schema_with_lets` already hands a `let`'s
   columns to a downstream `join` or `project`;
-- **the caller's scalars cannot leak in**, because the body is a separate
-  binding that the caller's substitution pass never visits — which is §2's rule.
+- **the caller's scalars reach only what the body does not bind**: the body is
+  a separate binding the caller's substitution pass never visits, and its scalar
+  scope is seeded with the caller's and then overridden by its parameters and
+  its own `let`s (§2, as corrected).
 
 Rejected:
 
@@ -95,10 +101,10 @@ through the existing `clusters=` map or is refused: never a remote call.
 
 ### 3.4 Scalars inside a body
 
-The parameters, bound to the call's arguments, and the body's own `let`s seed
-the body's scalar scope — the caller's do not. At a pipeline position each is a
-`let`-bound name like any other, so a column of the same name wins (§4.2, which
-this depends on).
+The caller's scalars, then the parameters bound to the call's arguments, then
+the body's own `let`s, each overriding the last, form the body's scalar scope.
+At a pipeline position each is a `let`-bound name like any other, so a column of
+the same name wins over all of them (§4.2, which this depends on).
 
 ### 3.5 Errors
 
@@ -108,7 +114,8 @@ this depends on).
 | Wrong number of arguments, or a bare name with required parameters | Refused, SEM0219's wording |
 | Recursion | Detected on the expansion stack; refused naming the cycle, `A → B → A`, SEM0057's wording |
 | A built-in's name | Refused at registration, SEM0515 |
-| An unsupported signature or body | Refused at registration, so a bad fixture fails at the line that registered it |
+| An unsupported signature, or a body that is not tabular | Refused at registration, so a bad fixture fails at the line that registered it |
+| A construct inside a body this package does not translate | Refused at the call, naming the function — so a whole exported script registers even when some of its functions are out of reach |
 | A table the body reads that does not exist | Fails at the call, as `skipvalidation` does in Kusto — loudly, from DuckDB or from the schema |
 
 ## 4. Two bugs this depends on, fixed first
@@ -174,9 +181,10 @@ duckdb-kql serve --functions schema.csl        # per server; --functions Sales=s
 
 - An entry is **Kusto's own export form**, verbatim: `.create-or-alter function
   [with (…)] Name(params) { body }` (`.create function` is accepted too). One
-  string may hold several, separated by blank lines as a database script is — so
-  the output of `.show database D schema as csl script` pastes across unchanged,
-  the same argument that made entity-group entries KQL text.
+  string may hold several, each starting on a line of its own — so the function
+  lines of `.show database D schema as csl script` paste across unchanged, the
+  same argument that made entity-group entries KQL text. *Not split on blank
+  lines, as a database script is: a function body may hold one.*
 - A string or list means the current database; a mapping keys them by database,
   `None` for the current one.
 - Parsed and checked at registration. `folder`, `docstring` and
@@ -198,9 +206,11 @@ Supported:
   defaults;
 - `F()` and bare `F`, anywhere a table can appear: a pipeline's source, a
   `join`/`lookup` right side, a `union` branch, an `in`/`has_any` subquery,
-  `toscalar`, a `let` body, an ingestion source;
+  a `let` value (`let X = F()`), an ingestion source. *`toscalar` was listed
+  here; it is not supported at all yet, with or without functions;*
 - nested calls, `database('D').F()`, `cluster(...).database(...).F()`;
-- scalar `let`s inside a body.
+- `let`s inside a body, scalar and tabular. *A tabular one was to be refused;
+  the reserved CTE names of §4.1 scope it for free.*
 
 Refused with a message saying so, for later:
 
@@ -208,7 +218,6 @@ Refused with a message saying so, for later:
 - tabular parameters, and `invoke` of a stored function;
 - **scalar** stored functions (`AddOne(x:long) { x + 1 }`);
 - `view = true` (it changes what a wildcard matches);
-- a tabular `let` inside a body;
 - a query-local `let F = () { … }` — a different, lexical rule (§2), which must
   not share this path.
 

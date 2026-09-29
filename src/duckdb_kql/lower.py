@@ -25,6 +25,7 @@ from .entity_groups import Entity, ResolvedGroups, resolve_group
 from .errors import KqlError, KqlSchemaError, KqlUnsupportedError, SourceSpan
 from .params import ParameterDeclaration, normalize_type
 from .parser import parse
+from .stored_functions import ResolvedFunctions, StoredFunction, lookup, registered_names
 
 __all__ = ["lower", "parse_entity_reference", "qualify", "query_parameters"]
 
@@ -531,8 +532,17 @@ def _lower_function_call(node: Any) -> ir.Expr:
     if not kids:
         return ir.FunctionCall(node.getText().rstrip("()"))
     name = kids[0].getText()
-    args = tuple(_lower_expr(k) for k in kids[1:])
     declared = _LET_FUNCTIONS.get(name)
+    if declared is None and _stored(name, None) is not None:
+        # Before the arguments: a refusal here is what sends `x in (F())` to
+        # its tabular reading, and an argument's error would pre-empt it.
+        raise KqlUnsupportedError(
+            f"function:{name}",
+            span=_span(node),
+            hint=f"{name!r} is a stored function, and it is tabular: a tabular "
+            "expression is not expected here (Kusto: SEM0085)",
+        )
+    args = tuple(_lower_expr(k) for k in kids[1:])
     if declared is not None:
         return _inline_let_function(node, declared, args)
     return ir.FunctionCall(name, args)
@@ -624,7 +634,7 @@ def _lower_source(node: Any) -> ir.Source:
                     f"macro-expand scope {name!r} used as a table — "
                     f"write {name}.TableName",
                 )
-            return ir.TableRef(name)
+            return _stored_bare_source(node, name) or ir.TableRef(name)
 
     if kind == "FunctionCallOrPathPathExpression":
         scoped = _lower_scoped_table(node)
@@ -632,7 +642,17 @@ def _lower_source(node: Any) -> ir.Source:
             return scoped
         qualified = _lower_qualified_table(node)
         if qualified is not None:
-            return qualified
+            return _stored_qualified_bare(node, qualified) or qualified
+
+    if kind == "NamedFunctionCallExpression":
+        called = _stored_call_source(node)
+        if called is not None:
+            return called
+
+    if kind == "DotCompositeFunctionCallExpression":
+        called = _stored_qualified_source(node)
+        if called is not None:
+            return called
 
     if kind == "RangeExpression":
         kids = _rule_children(node)
@@ -997,6 +1017,358 @@ def _scope_binding(name: str, entity: Entity) -> Iterator[None]:
         yield
     finally:
         _SCOPE = None
+
+
+# ---------------------------------------------------------------------------
+# Stored functions
+# ---------------------------------------------------------------------------
+
+
+@dataclasses.dataclass
+class _FunctionScope:
+    """What a stored-function call can see, for the statement being lowered.
+
+    A stored function is a macro expanded where it is called (measured,
+    docs/stored-functions-proposal.md §2): a caller's `let` captures a name in
+    its body, so the body is lowered afresh at each call, in the caller's
+    scope, into a tabular binding of its own placed just before the binding —
+    or the query — that holds the call. That placement is the whole of the
+    capture rule: a caller's `let` declared earlier is in scope there, one
+    declared later is not, and translation resolves the names by exact KQL name
+    (TRANSLATION.md R7).
+    """
+
+    functions: ResolvedFunctions | None
+    #: The database the query runs in, when the caller named it (`database=`).
+    current: str | None
+    clusters: Resolved | None
+    #: The texts a generated binding name must not appear in (see `_fresh_name`).
+    texts: tuple[str, ...]
+    counter: int = 0
+    #: The database whose functions an unqualified call resolves in: None at
+    #: the top, the function's own inside its body.
+    context: str | None = None
+    #: The calls being expanded, outermost first, for the recursion check.
+    expanding: list[tuple[str | None, str]] = dataclasses.field(default_factory=list)
+    #: Bindings produced by calls, per scope, waiting to be placed.
+    pending: list[list[tuple[str, ir.Query]]] = dataclasses.field(
+        default_factory=lambda: [[]]
+    )
+    #: Tabular `let`s in scope here, by exact name: a caller's shadows a
+    #: function of the same name (measured: 100, not the function's 7).
+    visible: frozenset[str] = frozenset()
+    #: Scalars in scope here, for the arguments of a call.
+    scalars: Scalars = dataclasses.field(default_factory=dict)
+
+
+_FN: _FunctionScope | None = None
+
+
+@contextlib.contextmanager
+def _function_scope(
+    functions: ResolvedFunctions | None,
+    current: str | None,
+    clusters: Resolved | None,
+    kql: str,
+) -> Iterator[None]:
+    """Stored functions in force for one statement."""
+    global _FN
+    previous = _FN
+    texts = (kql, *(f.command for fns in (functions or {}).values() for f in fns.values()))
+    _FN = _FunctionScope(functions, current, clusters, texts)
+    try:
+        yield
+    finally:
+        _FN = previous
+
+
+@contextlib.contextmanager
+def _nested_scope() -> Iterator[None]:
+    """A scope whose `let`s and calls do not outlive it: a body."""
+    if _FN is None:
+        yield
+        return
+    saved = (_FN.visible, _FN.scalars)
+    _FN.pending.append([])
+    try:
+        yield
+    finally:
+        _FN.pending.pop()
+        _FN.visible, _FN.scalars = saved
+
+
+def _drain_pending() -> list[tuple[str, ir.Query]]:
+    """The bindings calls produced in this scope so far, to be placed now."""
+    if _FN is None or not _FN.pending[-1]:
+        return []
+    out = list(_FN.pending[-1])
+    _FN.pending[-1].clear()
+    return out
+
+
+def _see_tabular(name: str) -> None:
+    if _FN is not None:
+        _FN.visible = _FN.visible | {name}
+
+
+def _stored(name: str, database: str | None) -> StoredFunction | None:
+    """The definition *name* resolves to in *database* (None: the context's)."""
+    if _FN is None or not _FN.functions:
+        return None
+    try:
+        where = database if database is not None else _FN.context
+        return lookup(_FN.functions, where, name, _FN.current)
+    except ValueError as exc:
+        raise KqlUnsupportedError(f"function:{name}", hint=str(exc)) from None
+
+
+def _stored_call_source(node: Any) -> ir.Source | None:
+    """``F(...)`` at a source position, if it names a stored function."""
+    if _FN is None:
+        return None
+    kids = _rule_children(node)
+    if not kids:
+        return None
+    found = _find_names(kids[0])
+    name = found[0] if found else kids[0].getText()
+    if name in _LET_FUNCTIONS:
+        return None   # a caller's `let` function shadows it, and is not tabular
+    function = _stored(name, None)
+    if function is None:
+        if _is_builtin(name):
+            return None
+        raise _unknown_function(node, name, None)
+    return _expand(node, function, kids[1:])
+
+
+def _stored_bare_source(node: Any, name: str, database: str | None = None) -> ir.Source | None:
+    """A bare ``F`` (or ``database('D').F``), if it names a stored function.
+
+    A caller's tabular `let` of that name wins, and a table only when no
+    function has the name: Kusto resolves a bare name to the function first,
+    whichever was created first (measured).
+    """
+    if _FN is None or (database is None and name in _FN.visible):
+        return None
+    function = _stored(name, database)
+    if function is None:
+        return None
+    required = [p for p, default in _stored_parameters(function) if default is None]
+    if required:
+        raise KqlUnsupportedError(
+            f"function:{name}",
+            span=_span(node),
+            hint=f"{name}(): function expects {len(required)} argument(s) — a bare "
+            "name calls a function only when every parameter has a default "
+            "(Kusto: SEM0219)",
+        )
+    return _expand(node, function, [])
+
+
+def _stored_qualified_source(node: Any) -> ir.Source | None:
+    """``database('D').F(...)`` or ``cluster('c').database('d').F(...)``."""
+    if _FN is None:
+        return None
+    parts = _rule_children(node)
+    calls = []
+    for part in parts:
+        found = _find_all(part, "NamedFunctionCallExpression")
+        if not found:
+            return None
+        calls.append(found[0])
+    if len(calls) < 2:
+        return None
+    heads = [(_rule_children(c)[0].getText().lower(), c) for c in calls[:-1]]
+    cluster: str | None = None
+    database: str | None = None
+    if [h for h, _ in heads] == ["database"]:
+        database = _single_string_argument(heads[0][1], "database")
+    elif [h for h, _ in heads] == ["cluster", "database"]:
+        cluster = _single_string_argument(heads[0][1], "cluster")
+        database = _single_string_argument(heads[1][1], "database")
+    else:
+        return None
+    if database is None:
+        return None
+    if cluster is not None:
+        from .clusters import resolve
+
+        # Through the `clusters=` map, as a table would be; unmapped is refused.
+        database = resolve(cluster, database, _FN.clusters)
+    call = calls[-1]
+    kids = _rule_children(call)
+    found = _find_names(kids[0])
+    name = found[0] if found else kids[0].getText()
+    function = _stored(name, database)
+    if function is None:
+        raise _unknown_function(node, name, database)
+    return _expand(node, function, kids[1:])
+
+
+def _stored_qualified_bare(node: Any, table: ir.TableRef) -> ir.Source | None:
+    """``database('D').F`` — a qualified bare name — if D has a function F."""
+    if _FN is None or not _FN.functions:
+        return None
+    database = table.database
+    if table.cluster is not None:
+        from .clusters import resolve
+
+        database = resolve(table.cluster, table.database or "", _FN.clusters)
+    if database is None:
+        return None
+    return _stored_bare_source(node, table.name, database)
+
+
+def _is_builtin(name: str) -> bool:
+    from .translate import _SPECIAL_FORMS
+    from .translate.functions import AGGREGATE_FUNCTIONS, SCALAR_FUNCTIONS
+
+    return name in SCALAR_FUNCTIONS or name in AGGREGATE_FUNCTIONS or name in _SPECIAL_FORMS
+
+
+def _unknown_function(node: Any, name: str, database: str | None) -> KqlUnsupportedError:
+    """SEM0260, with what *is* registered — never a table of that name.
+
+    Unsupported rather than a schema error: a Kusto built-in this package does
+    not map (`external_table`) and an unregistered stored function look the same
+    from here, and the first is what unsupported means.
+    """
+    assert _FN is not None
+    where = database if database is not None else _FN.context
+    known = registered_names(_FN.functions, where, _FN.current)
+    near = [k for k in known if k.casefold() == name.casefold() and k != name]
+    place = f" for database {where!r}" if where is not None else ""
+    return KqlUnsupportedError(
+        f"function:{name}",
+        span=_span(node),
+        hint=(
+            "no DuckDB mapping for a built-in of that name in this wave (see "
+            f"translate/functions.py), and no stored function by that name is "
+            f"registered{place}. If it is a stored function, it lives in the "
+            "database, so register its definition with functions="
+            f"[\".create-or-alter function {name}(...) {{ ... }}\"]"
+            + (f"; did you mean {near[0]!r}? names are case-sensitive" if near else "")
+            + (f"; registered: {known}" if known else "")
+        ),
+    )
+
+
+def _stored_parameters(function: StoredFunction) -> list[tuple[str, ir.Expr | None]]:
+    for kid in _rule_children(function.declaration):
+        if _cls(kid) == "LetFunctionParameterList":
+            return [_lower_let_parameter(p) for p in _rule_children(kid)]
+    return []
+
+
+def _expand(node: Any, function: StoredFunction, arg_nodes: list[Any]) -> ir.TableRef:
+    """Expand one call into a binding of its own, and stand the call in for it."""
+    assert _FN is not None
+    key = (function.database, function.name)
+    if key in _FN.expanding:
+        cycle = " → ".join(n for _, n in [*_FN.expanding[_FN.expanding.index(key):], key])
+        raise KqlUnsupportedError(
+            f"function:{function.name}",
+            span=_span(node),
+            hint=f"recursive call to {function.name!r} is not allowed ({cycle}; "
+            "Kusto: SEM0057)",
+        )
+    binding = _bind_stored_arguments(node, function, arg_nodes)
+
+    body_node = next(
+        k for k in _rule_children(function.declaration) if _cls(k) == "LetFunctionBody"
+    )
+    final = _collapse(
+        next(k for k in _rule_children(body_node) if _cls(k) != "LetFunctionBodyStatement")
+    )
+    caller_visible = _FN.visible
+    context = _FN.context
+    let_functions = dict(_LET_FUNCTIONS)
+    _FN.expanding.append(key)
+    _FN.context = function.database
+    try:
+        with _nested_scope():
+            # Dynamic, like the tables: a name the body does not bind is the
+            # caller's. Measured with `skipvalidation` (which Kusto's own export
+            # writes on every function): `let Kx = 5; FpG()` over `{ FpT |
+            # extend k = Kx }` answers 5. The parameters bind over the caller's
+            # (`let x = 100; FpQ(3)` is 3), the body's own `let`s over both, and
+            # a column over all of them (R23).
+            scalars, tabulars = _lower_lets(body_node, {**_FN.scalars, **binding})
+            query = _lower_query_node(final)
+            query = _substitute_query(query, _pipeline_scope(scalars))
+            tabulars.extend(_drain_pending())
+            names = {n for n, _ in tabulars} | set(_FN.visible)
+            query = _resolve_in_subqueries(query, names)
+            query.lets.extend((n, _resolve_in_subqueries(b, names)) for n, b in tabulars)
+    except KqlError as exc:
+        if isinstance(exc, KqlSchemaError) or "function:" in str(exc):
+            raise
+        raise KqlUnsupportedError(
+            f"function:{function.name}", hint=f"in its body: {exc}"
+        ) from exc
+    finally:
+        _FN.expanding.pop()
+        _FN.context = context
+        _LET_FUNCTIONS.clear()
+        _LET_FUNCTIONS.update(let_functions)
+
+    if function.database is not None and function.database != _FN.current:
+        # Its tables are its database's — except a name the caller's `let`s
+        # capture, which Kusto resolves to the `let` even across databases.
+        query = _qualify_query(query, function.database, caller_visible, _FN.clusters)
+    name = _fresh_name(function.name)
+    _FN.pending[-1].append((name, query))
+    return ir.TableRef(name)
+
+
+def _bind_stored_arguments(
+    node: Any, function: StoredFunction, arg_nodes: list[Any]
+) -> Scalars:
+    """Positional arguments, lowered in the **caller's** scope, plus defaults."""
+    assert _FN is not None
+    for arg in arg_nodes:
+        if _find_all(arg, "NamedExpressionNameClause"):
+            raise KqlUnsupportedError(
+                f"function:{function.name}",
+                span=_span(arg),
+                hint="a named argument (`x = 5`) is not supported yet; pass it by position",
+            )
+    args = [_substitute(_lower_expr(a), _FN.scalars) for a in arg_nodes]
+    parameters = _stored_parameters(function)
+    required = [p for p, default in parameters if default is None]
+    if len(args) > len(parameters) or len(args) < len(required):
+        raise KqlUnsupportedError(
+            f"function:{function.name}",
+            span=_span(node),
+            hint=f"{function.name}(): function expects "
+            + (
+                f"{len(parameters)}"
+                if len(required) == len(parameters)
+                else f"{len(required)}..{len(parameters)}"
+            )
+            + f" argument(s), got {len(args)} (Kusto: SEM0219)",
+        )
+    binding: Scalars = {}
+    for i, (parameter, default) in enumerate(parameters):
+        value = args[i] if i < len(args) else default
+        assert value is not None
+        binding[parameter] = value
+    return binding
+
+
+def _fresh_name(function: str) -> str:
+    """A binding name for one call, appearing in no text the statement came from.
+
+    A table reference reaches a binding by exact name (R7), so a name a query
+    could spell would let that query read the expansion. None of the source
+    texts contains this one, and an identifier can only be spelled from them.
+    """
+    assert _FN is not None
+    while True:
+        name = f"{function}()#{_FN.counter}"
+        _FN.counter += 1
+        if not any(name in text for text in _FN.texts):
+            return name
 
 
 def parse_entity_reference(text: str) -> Entity | None:
@@ -1463,7 +1835,7 @@ def _resolve_macro_group(node: Any) -> tuple[Entity, ...]:
 
 def _lower_macro_body(nodes: list[Any], scope: str, entity: Entity) -> ir.Query:
     """One branch: the body with *scope* bound to *entity*."""
-    with _scope_binding(scope, entity):
+    with _scope_binding(scope, entity), _nested_scope():
         statements = [s for n in nodes for s in _find_all(n, "QueryStatement")]
         if not statements:
             raise _unsupported(nodes[0], "macro-expand body")
@@ -1479,6 +1851,7 @@ def _lower_macro_body(nodes: list[Any], scope: str, entity: Entity) -> ir.Query:
             tabulars.extend(more_tabulars)
         body = _lower_query_node(statements[0])
         body = _substitute_query(body, _pipeline_scope(scalars))
+        tabulars.extend(_drain_pending())
         names = {name for name, _ in tabulars}
         body = _resolve_in_subqueries(body, names)
         body.lets.extend(
@@ -1774,12 +2147,23 @@ def query_parameters(kql: str) -> list[ParameterDeclaration]:
     return _lower_query_parameters(parse(kql).tree)
 
 
-def lower(kql: str, entity_groups: ResolvedGroups | None = None) -> ir.Query:
+def lower(
+    kql: str,
+    entity_groups: ResolvedGroups | None = None,
+    functions: ResolvedFunctions | None = None,
+    database: str | None = None,
+    clusters: Resolved | None = None,
+) -> ir.Query:
     """Parse *kql* and lower it to IR.
 
     *entity_groups* resolves a `macro-expand` written against a **named** group.
     It is needed here rather than in `qualify` because expanding a group changes
     how many union branches there are, which is structure and not annotation.
+
+    *functions* are the stored functions a call may resolve to, expanded here
+    for the same reason; *database* is the one the query runs in, which is
+    where an unqualified call looks, and *clusters* resolves a call through
+    `cluster(...)`.
 
     Raises:
         KqlSyntaxError: the query does not parse.
@@ -1838,7 +2222,9 @@ def lower(kql: str, entity_groups: ResolvedGroups | None = None) -> ir.Query:
     groups = dict(_lower_let_entity_groups(tree))
 
     pipe = _collapse(statements[0])
-    with _macro_context(groups, entity_groups):
+    with _macro_context(groups, entity_groups), _function_scope(
+        functions, database, clusters, kql
+    ):
         scalars, tabulars = _lower_lets(tree, seed)
         if _cls(pipe) != "PipeExpression":
             # A source with no pipeline at all, e.g. `print 1` or `datatable()`.
@@ -1846,6 +2232,9 @@ def lower(kql: str, entity_groups: ResolvedGroups | None = None) -> ir.Query:
         else:
             parts = _rule_children(pipe)
             query = _lower_head(parts[0], parts[1:])
+        # Calls in the query itself: placed after every `let`, all of which the
+        # query sees.
+        tabulars.extend(_drain_pending())
 
     names = {name for name, _ in tabulars}
     query = _substitute_query(query, _pipeline_scope(scalars))
@@ -2177,15 +2566,38 @@ def _is_tabular_value(node: Any, scalars: Scalars) -> bool:
     kind = _cls(node)
     if kind in _TABULAR_VALUE:
         return True
-    if kind == "FunctionCallOrPathPathExpression" and _lower_scoped_table(node):
+    if kind == "FunctionCallOrPathPathExpression" and (
+        _lower_scoped_table(node) or _is_database_path(node)
+    ):
         # `let t = scope.T` inside a macro-expand body binds a TABLE. Without
         # this it read as a scalar, because `scope.T` is dynamic property access
-        # to everything that has not been told what `scope` is.
+        # to everything that has not been told what `scope` is. The same held
+        # for `let t = database('D').T`, which failed as a table named `t`.
         return True
+    if kind == "DotCompositeFunctionCallExpression" and _is_database_path(node):
+        # `database('D').F()`, a stored function in another database.
+        return True
+    if kind == "NamedFunctionCallExpression":
+        # `let X = ReadEvents()` binds the function's rows.
+        kids = _rule_children(node)
+        found = _find_names(kids[0]) if kids else []
+        if not found or found[0] in _LET_FUNCTIONS:
+            return False
+        return _stored(found[0], None) is not None
     if kind in _NAME_KINDS:
         name = _name_text(node)
         return name is not None and name not in scalars
     return False
+
+
+def _is_database_path(node: Any) -> bool:
+    """Whether *node* starts at ``database(...)`` or ``cluster(...)``."""
+    parts = _rule_children(node)
+    calls = _find_all(parts[0], "NamedFunctionCallExpression") if parts else []
+    if not calls:
+        return False
+    heads = _rule_children(calls[0])
+    return bool(heads) and heads[0].getText().lower() in ("database", "cluster")
 
 
 def _unparenthesize(node: Any) -> Any:
@@ -2446,6 +2858,9 @@ def _lower_lets(
     #: Names bound by a `let` in this context, for the SEM0079 check. Not
     #: `scalars`, which is seeded with query parameters.
     declared: set[str] = set()
+    if _FN is not None:
+        # A stored function called below takes its arguments from here.
+        _FN.scalars = scalars
 
     for statement in _find_all(tree, "LetStatement"):
         # A `let` written *inside* a macro-expand body belongs to that body and
@@ -2477,18 +2892,15 @@ def _lower_lets(
         declared.add(name)
         value = _collapse(kids[-1])
 
-        if kind == "LetMaterializeDeclaration":
+        if kind == "LetMaterializeDeclaration" or _is_tabular_value(value, scalars):
             # `materialize()` is a caching hint for a distributed engine; it
             # cannot change the result, so unwrapping it is correct.
-            tabulars.append(
-                (name, _substitute_query(_lower_query_node(value), _pipeline_scope(scalars)))
-            )
-            continue
-
-        if _is_tabular_value(value, scalars):
-            tabulars.append(
-                (name, _substitute_query(_lower_query_node(value), _pipeline_scope(scalars)))
-            )
+            bound = _substitute_query(_lower_query_node(value), _pipeline_scope(scalars))
+            # A stored function called in the value is a binding of its own,
+            # placed just before this one: it sees the `let`s this one sees.
+            tabulars.extend(_drain_pending())
+            tabulars.append((name, bound))
+            _see_tabular(name)
         else:
             scalars[name] = _substitute(_lower_expr(value), scalars)
 

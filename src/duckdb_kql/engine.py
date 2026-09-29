@@ -38,6 +38,7 @@ if TYPE_CHECKING:
 
     from .clusters import ClusterArg
     from .entity_groups import EntityGroupArg
+    from .stored_functions import FunctionArg
     from .translate import TranslationResult
 
 #: Values a caller may supply for a query's declared parameters. Deliberately
@@ -94,6 +95,7 @@ def kql(
     clusters: ClusterArg | None = None,
     entity_groups: EntityGroupArg | None = None,
     query_now: Any = None,
+    functions: FunctionArg | None = None,
 ) -> DuckDBPyRelation:
     """Execute the KQL *query* against a DuckDB connection, returning a relation.
 
@@ -122,7 +124,8 @@ def kql(
         )
     """
     translated, bound = _prepare(
-        con, query, parameters, database, allow_write, clusters, entity_groups, query_now
+        con, query, parameters, database, allow_write, clusters, entity_groups, query_now,
+        functions,
     )
     return con.sql(translated, params=bound) if bound else con.sql(translated)
 
@@ -148,6 +151,7 @@ def execute(
     clusters: ClusterArg | None = None,
     entity_groups: EntityGroupArg | None = None,
     query_now: Any = None,
+    functions: FunctionArg | None = None,
 ) -> DuckDBPyConnection:
     """Execute the KQL *query* and return the connection, mirroring ``con.execute``.
 
@@ -155,7 +159,8 @@ def execute(
     relation to keep composing.
     """
     translated, bound = _prepare(
-        con, query, parameters, database, allow_write, clusters, entity_groups, query_now
+        con, query, parameters, database, allow_write, clusters, entity_groups, query_now,
+        functions,
     )
     return con.execute(translated, bound) if bound else con.execute(translated)
 
@@ -271,6 +276,7 @@ def script(
     entity_groups: EntityGroupArg | None = None,
     query_now: Any = None,
     continue_on_errors: bool = False,
+    functions: FunctionArg | None = None,
 ) -> list[ScriptResult]:
     """Run a KQL **script** — several statements, in order, against one connection.
 
@@ -336,7 +342,8 @@ def script(
     for index, (line, statement) in enumerate(split_script(script), start=1):
         try:
             columns, rows = _run_statement(
-                con, statement, database, allow_write, clusters, entity_groups, query_now
+                con, statement, database, allow_write, clusters, entity_groups, query_now,
+                functions,
             )
         except Exception as exc:
             if not continue_on_errors:
@@ -355,10 +362,12 @@ def _run_statement(
     clusters: ClusterArg | None,
     entity_groups: EntityGroupArg | None,
     query_now: Any,
+    functions: FunctionArg | None = None,
 ) -> tuple[list[str], list[tuple[Any, ...]]]:
     """Execute one statement eagerly and read back what it produced."""
     translated, bound = _prepare(
-        con, statement, None, database, allow_write, clusters, entity_groups, query_now
+        con, statement, None, database, allow_write, clusters, entity_groups, query_now,
+        functions,
     )
     cursor = con.execute(translated, bound) if bound else con.execute(translated)
     # `description` is None for a statement that returns no result set. Every
@@ -379,6 +388,7 @@ def _prepare(
     clusters: ClusterArg | None = None,
     entity_groups: EntityGroupArg | None = None,
     query_now: Any = None,
+    functions: FunctionArg | None = None,
 ) -> tuple[str, Parameters]:
     """Translate the KQL *query* and get *con* into the state the SQL assumes."""
     from . import to_sql
@@ -395,6 +405,7 @@ def _prepare(
         allow_write=allow_write,
         entity_groups=entity_groups,
         query_now=query_now,
+        functions=functions,
         clusters=clusters,
     )
 
@@ -451,6 +462,7 @@ def df(
     clusters: ClusterArg | None = None,
     entity_groups: EntityGroupArg | None = None,
     query_now: Any = None,
+    functions: FunctionArg | None = None,
 ) -> pd.DataFrame:
     """Execute the KQL *query* and return a pandas DataFrame.
 
@@ -471,7 +483,8 @@ def df(
     are not interchangeable there the way they are here.
     """
     translated, bound = _prepare(
-        con, query, parameters, database, allow_write, clusters, entity_groups, query_now
+        con, query, parameters, database, allow_write, clusters, entity_groups, query_now,
+        functions,
     )
     return (con.execute(translated, bound) if bound else con.execute(translated)).df()
 
@@ -485,10 +498,12 @@ def arrow(
     clusters: ClusterArg | None = None,
     entity_groups: EntityGroupArg | None = None,
     query_now: Any = None,
+    functions: FunctionArg | None = None,
 ) -> pa.Table:
     """Execute the KQL *query* and return a pyarrow Table."""
     return kql(
-        con, query, parameters, database, allow_write, clusters, entity_groups, query_now
+        con, query, parameters, database, allow_write, clusters, entity_groups, query_now,
+        functions,
     ).arrow()
 
 

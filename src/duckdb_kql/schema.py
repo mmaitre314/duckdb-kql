@@ -50,7 +50,19 @@ def _table_columns(name: str, schema: Schema | None) -> list[str]:
 
 
 def output_columns(query: ir.Query, schema: Schema | None = None) -> list[str]:
-    """The column names *query* produces, in order."""
+    """The column names *query* produces, in order.
+
+    A query's own tabular `let`s are in scope for it, in order — a stored
+    function's body is one such query, and a join over a function whose rows
+    come from its own `let` could not learn its columns without them.
+    """
+    for name, bound in query.lets:
+        if isinstance(bound, ir.Query):
+            try:
+                columns = output_columns(bound, schema)
+            except KqlSchemaError:
+                continue
+            schema = {**(schema or {}), name: columns}
     cols = _source_columns(query.source, schema)
     for op in query.operators:
         cols = _operator_columns(op, cols, schema)

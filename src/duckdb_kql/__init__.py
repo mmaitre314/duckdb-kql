@@ -66,6 +66,7 @@ from .errors import (
 )
 from .params import ParameterDeclaration
 from .parser import ParseResult, parse, validate
+from .stored_functions import FunctionArg, get_functions, set_functions
 
 if TYPE_CHECKING:
     # Layer 1 is resolved lazily at runtime (see ``__getattr__``), which leaves
@@ -119,6 +120,8 @@ __all__ = [
     "get_clusters",
     "set_entity_groups",
     "get_entity_groups",
+    "set_functions",
+    "get_functions",
     "EntityGroupMap",
     # errors (Layer 0)
     "KqlError",
@@ -189,6 +192,7 @@ def to_sql(
     clusters: ClusterArg | None = None,
     entity_groups: EntityGroupArg | None = None,
     query_now: Any = None,
+    functions: FunctionArg | None = None,
 ) -> TranslationResult:
     """Translate *kql* to DuckDB SQL. Requires no connection and no database.
 
@@ -211,6 +215,12 @@ def to_sql(
         entity_groups: what entities a **named** entity group contains, for
             `macro-expand MyGroup as s (...)`. Inline and `let`-bound groups
             need no mapping — their entities are in the query text.
+        functions: the stored functions a query may call, as Kusto exports
+            them — ``".create-or-alter function ReadEvents() { Events }"``, a
+            script of several, a list, or ``{"Sales": ..., None: ...}`` keyed by
+            database (None for the one the query runs in). Omitted, the
+            :func:`set_functions` default applies; an unregistered call is
+            refused. See ``docs/stored-functions-proposal.md``.
         clusters: what local database stands in for each Kusto cluster, as
             ``{("cluster", "kusto_db"): "duckdb_db"}`` or the nested
             ``{"cluster": {"kusto_db": "duckdb_db"}}``. Omitted, `cluster(...)`
@@ -253,7 +263,8 @@ def to_sql(
     # property. `active.moment` is therefore read *after* translating, not before.
     with clock(moment) as active:
         result = _to_sql(
-            kql, schema, parameters, database, allow_write, clusters, entity_groups
+            kql, schema, parameters, database, allow_write, clusters, entity_groups,
+            functions,
         )
         if not active.used:
             # Nothing asked for the clock, so no placeholder mentions it and
@@ -274,6 +285,7 @@ def _to_sql(
     allow_write: bool,
     clusters: ClusterArg | None,
     entity_groups: EntityGroupArg | None,
+    functions: FunctionArg | None = None,
 ) -> TranslationResult:
     """:func:`to_sql`'s body, with the clock already pinned if it was asked for."""
     from . import ir
@@ -290,6 +302,7 @@ def _to_sql(
     from .ingest import is_ingestion_command, parse_ingestion, render_ingestion
     from .lower import lower, qualify
     from .params import bind
+    from .stored_functions import effective_functions
     from .translate import TranslationResult as _Result
     from .translate import to_sql as _emit
 
@@ -320,7 +333,13 @@ def _to_sql(
         # fail with "unknown entity group" however the mapping was supplied.
         rows_sql = _emit(
             qualify(
-                lower(ingestion.source, effective_entity_groups(entity_groups)),
+                lower(
+                    ingestion.source,
+                    effective_entity_groups(entity_groups),
+                    effective_functions(functions),
+                    database,
+                    resolved,
+                ),
                 database,
                 resolved,
             ),
@@ -348,13 +367,24 @@ def _to_sql(
         # the command standing in as its source.
         command, pipeline = split_command(head)
         # raises, naming the ones that work
-        head = _command_sql(command, effective_entity_groups(entity_groups))
+        head = _command_sql(
+            command,
+            effective_entity_groups(entity_groups),
+            effective_functions(functions),
+            database,
+        )
         if not pipeline:
             return _Result(head)
 
         # Lowered against a placeholder table, whose source is then replaced.
         # `lower` wants a whole query and the pipeline alone is not one.
-        tail = lower(f"__command__ {pipeline}", effective_entity_groups(entity_groups))
+        tail = lower(
+            f"__command__ {pipeline}",
+            effective_entity_groups(entity_groups),
+            effective_functions(functions),
+            database,
+            effective_clusters(clusters),
+        )
         source = ir.CommandSource(head, COLUMNS[command], command)
         return _emit(
             qualify(ir.Query(source, tail.operators), database, effective_clusters(clusters)),
@@ -362,7 +392,13 @@ def _to_sql(
         )
 
     query = qualify(
-        lower(kql, effective_entity_groups(entity_groups)),
+        lower(
+            kql,
+            effective_entity_groups(entity_groups),
+            effective_functions(functions),
+            database,
+            effective_clusters(clusters),
+        ),
         database,
         effective_clusters(clusters),
     )

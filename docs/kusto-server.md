@@ -89,6 +89,7 @@ duckdb-kql serve [DATABASE] [--init SCRIPT] [-p PORT] [--allow-origin ORIGIN]
 | `DATABASE` | DuckDB database file to serve. Omit for an empty in-memory one. |
 | `--allow-write` | Permit ingestion commands to modify the database. **Off by default.** |
 | `--cluster-map` | JSON mapping Kusto clusters to local databases, for queries using `cluster()`. |
+| `--functions` | `[DATABASE=]FILE` of stored function definitions, as Kusto exports them (`.create-or-alter function F() { … }`). Repeatable; `DATABASE=` registers them for that database. See below. |
 | `--init` | A `.sql` script to run before serving. See below. |
 | `-p, --port` | TCP port (default `31415`). |
 | `--allow-origin` | Allow a browser origin. Repeatable; replaces the default list. |
@@ -179,6 +180,20 @@ Without the map such a query is **refused**, not answered from whatever happens
 to be local — the point of the map is that the substitution is stated. The
 values are the names the databases are attached under, which `.show databases`
 lists.
+
+A **stored function** is database-side state too, so a query calling one needs
+its definition supplied. `--functions` takes a file of them in the form Kusto
+exports — the function lines of `.show database D schema as csl script` paste
+in as they are:
+
+```bash
+duckdb-kql serve data.duckdb --functions schema.csl --functions Sales=sales.csl
+```
+
+A query calling an unregistered function is refused rather than read as a
+table, `.show functions` lists what is registered, and a bad definition stops
+the server at start-up. `.create-or-alter function` itself is refused: there is
+nowhere in the database to keep one. See `docs/stored-functions-proposal.md`.
 
 Cluster spellings are normalized (scheme, trailing slash, host case), so one
 entry covers every way of writing one host — and a short name matches its

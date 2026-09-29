@@ -48,6 +48,7 @@ from .control import SCHEMA, CommandColumn, is_control_command, is_write_command
 from .entity_groups import EntityGroupArg
 from .errors import KqlError, KqlUnsupportedError
 from .options import read_only_requested
+from .stored_functions import FunctionArg
 from .types import kusto_type, rest_datatype
 
 if TYPE_CHECKING:
@@ -577,6 +578,7 @@ class KustoRestServer(ThreadingHTTPServer):
         allow_write: bool = False,
         clusters: ClusterArg | None = None,
         entity_groups: EntityGroupArg | None = None,
+        functions: FunctionArg | None = None,
     ) -> None:
         super().__init__((host, port), _Handler)
         self._con = con
@@ -614,6 +616,12 @@ class KustoRestServer(ThreadingHTTPServer):
         #: cluster-side state, so `macro-expand MyGroup` is refused without one
         #: — the same posture as an unmapped `cluster(...)`.
         self.entity_groups = entity_groups
+        #: The stored functions a query may call. Database-side state in Kusto,
+        #: and there is no database here holding them, so they are supplied —
+        #: parsed now, so a bad definition stops the server at start-up.
+        from .stored_functions import parse_functions
+
+        self.functions = parse_functions(functions)
         self._lock = threading.Lock()
 
     @property
@@ -702,6 +710,7 @@ class KustoRestServer(ThreadingHTTPServer):
                 self.clusters,
                 self.entity_groups,
                 options.get("query_now"),
+                functions=self.functions,
             )
             names = list(rel.columns)
             kinds = [kusto_type(t) for t in rel.types]
@@ -818,6 +827,7 @@ def build_server(
     allow_write: bool = False,
     clusters: ClusterArg | None = None,
     entity_groups: EntityGroupArg | None = None,
+    functions: FunctionArg | None = None,
 ) -> KustoRestServer:
     """A server ready to `serve_forever()`, with its own DuckDB connection.
 
@@ -840,6 +850,7 @@ def build_server(
         allow_write=allow_write,
         clusters=clusters,
         entity_groups=entity_groups,
+        functions=functions,
     )
 
 
@@ -852,6 +863,7 @@ def serve(
     allow_write: bool = False,
     clusters: ClusterArg | None = None,
     entity_groups: EntityGroupArg | None = None,
+    functions: FunctionArg | None = None,
 ) -> None:
     """Run until interrupted. This is what the CLI's ``serve`` calls."""
     server = build_server(
@@ -862,6 +874,7 @@ def serve(
         allow_write=allow_write,
         clusters=clusters,
         entity_groups=entity_groups,
+        functions=functions,
     )
     print(f"duckdb-kql serving {database} as database {server.database!r}")
     if init is not None:

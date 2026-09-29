@@ -32,6 +32,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, cast
 from ..clusters import ClusterArg
 from ..entity_groups import EntityGroupArg
 from ..errors import KqlError
+from ..stored_functions import FunctionArg
 from ..translate import quote_ident
 from ._models import WellKnownDataSet, kusto_type, to_wire, widen_out_of_range
 from .client_request_properties import ClientRequestProperties
@@ -214,6 +215,7 @@ class KustoClient:
         allow_write: bool = True,
         clusters: ClusterArg | None = None,
         entity_groups: EntityGroupArg | None = None,
+        functions: FunctionArg | None = None,
     ) -> None:
         self._is_closed = False
         self._lock = threading.Lock()
@@ -237,6 +239,13 @@ class KustoClient:
         from ..entity_groups import parse_entity_groups
 
         self.entity_groups = parse_entity_groups(entity_groups)
+        #: The stored functions a query may call, parsed here for the same
+        #: reason and forwarded the same way. Per client: two clients on one
+        #: connection may register different ones, and None means the
+        #: `duckdb_kql.set_functions` default.
+        from ..stored_functions import parse_functions
+
+        self.functions = parse_functions(functions)
         #: Local stand-ins for Kusto clusters, for `cluster('c').database('d')`.
         #: Per-client rather than only process-global, matching `serve` and
         #: :func:`duckdb_kql.query`.
@@ -346,6 +355,7 @@ class KustoClient:
                 clusters=self.clusters,
                 entity_groups=self.entity_groups,
                 query_now=_query_now(properties),
+                functions=self.functions,
             )
         except KqlError as exc:
             raise _semantic_error(exc) from exc
@@ -415,14 +425,23 @@ class KustoClient:
             # `duckdb_kql.kql(con, same_command, database=...)` ran it.
             return self._execute_write(con, database, query, properties, "ingestion")
 
+        from ..stored_functions import effective_functions
+
         try:
-            sql = translate_control_command(query, self.entity_groups)
+            sql = translate_control_command(
+                query,
+                self.entity_groups,
+                effective_functions(self.functions),
+                self._attached(database),
+            )
         except KqlUnsupportedError as exc:
             # This client's own refusal type, not a service error: "we do not
             # implement that command" is a statement about the client, and it is
-            # what callers of execute_mgmt are documented to catch.
+            # what callers of execute_mgmt are documented to catch. The refusal's
+            # own hint when it has one: `.create-or-alter function` says to use
+            # functions=, which the generic list would hide.
             raise KustoUnsupportedError(
-                f"control command {query.strip()!r}", hint=UNSUPPORTED_HINT
+                f"control command {query.strip()!r}", hint=exc.hint or UNSUPPORTED_HINT
             ) from exc
         except KqlError as exc:
             raise _semantic_error(exc) from exc
@@ -495,6 +514,7 @@ class KustoClient:
                     clusters=self.clusters,
                     entity_groups=self.entity_groups,
                     query_now=_query_now(properties),
+                    functions=self.functions,
                 )
             )
         except KqlUnsupportedError as exc:

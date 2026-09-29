@@ -40,7 +40,8 @@ from collections.abc import Callable
 from typing import NamedTuple
 
 from .entity_groups import ResolvedGroups
-from .errors import KqlUnsupportedError
+from .errors import KqlSchemaError, KqlUnsupportedError
+from .stored_functions import ResolvedFunctions, StoredFunction
 from .translate import quote_string
 
 __all__ = [
@@ -121,6 +122,16 @@ SCHEMA: dict[str, tuple[CommandColumn, ...]] = {
     ".show entity_groups": (
         CommandColumn("Name", "String", "string"),
         CommandColumn("Entities", "String", "string"),
+    ),
+    # Measured columns, over the `functions=` registry: there is no database
+    # holding the real ones. `Folder` and `DocString` are empty strings when
+    # unset, as the emulator reports them here.
+    ".show functions": (
+        CommandColumn("Name", "String", "string"),
+        CommandColumn("Parameters", "String", "string"),
+        CommandColumn("Body", "String", "string"),
+        CommandColumn("Folder", "String", "string"),
+        CommandColumn("DocString", "String", "string"),
     ),
     # The web UI reads this one to build its schema tree: `CslOutputSchema`
     # carries each table's columns as `name:kqltype`, which is why the type
@@ -291,21 +302,32 @@ def split_command(text: str) -> tuple[str, str]:
                 # `//` inside a string literal. Past the command head there is
                 # no literal to worry about, so this position is the safe one.
                 return command, ""
-    return lowered, ""
+    # The text as written, not lowered: the caller only reports it, and a
+    # refusal that lower-cased `.create-or-alter function F() { Events }`
+    # showed an `events` nobody wrote (R7).
+    return collapsed, ""
 
 
 def translate_control_command(
-    text: str, entity_groups: ResolvedGroups | None = None
+    text: str,
+    entity_groups: ResolvedGroups | None = None,
+    functions: ResolvedFunctions | None = None,
+    database: str | None = None,
 ) -> str:
     """Translate a supported control command to DuckDB SQL.
 
     *entity_groups* is only read by `.show entity_groups`, which reports the
-    caller's mapping — there is no cluster holding the real thing.
+    caller's mapping — there is no cluster holding the real thing. *functions*
+    and *database* are read by `.show functions` and `.show function F` in the
+    same way.
 
     Raises:
         KqlUnsupportedError: for every other `.`-command, naming the ones that
             do work rather than leaving the caller to guess.
     """
+    one = _SHOW_FUNCTION.match(text)
+    if one is not None:
+        return _function_sql(one.group(1), functions, database)
     command, pipeline = split_command(text)
     if pipeline:
         raise KqlUnsupportedError(
@@ -314,10 +336,87 @@ def translate_control_command(
         )
     if command == ".show entity_groups":
         return _entity_groups_sql(entity_groups)
+    if command == ".show functions":
+        return _functions_sql(functions, database)
     build = _COMMANDS.get(command)
     if build is None:
-        raise KqlUnsupportedError(f"control command {text.strip()!r}", hint=UNSUPPORTED_HINT)
+        hint = FUNCTION_COMMAND_HINT if _FUNCTION_COMMAND.match(text) else UNSUPPORTED_HINT
+        raise KqlUnsupportedError(f"control command {text.strip()!r}", hint=hint)
     return build()
+
+
+#: `.show function Name`, the one command here that takes an argument.
+_SHOW_FUNCTION = re.compile(
+    r"^\s*\.show\s+function\s+(\[\s*'[^']*'\s*\]|\[\s*\"[^\"]*\"\s*\]|[A-Za-z_][A-Za-z0-9_]*)\s*;?\s*$",
+    re.IGNORECASE,
+)
+_FUNCTION_COMMAND = re.compile(
+    r"^\s*\.(create-or-alter|create|alter|drop)\s+function", re.IGNORECASE
+)
+
+#: The management commands for functions are out of scope (see
+#: docs/stored-functions-proposal.md §7); the refusal says what to use.
+FUNCTION_COMMAND_HINT = (
+    "stored functions are registered, not created: pass the same "
+    "`.create-or-alter function` text as functions= (duckdb_kql.set_functions, "
+    "duckdb_kql.kql(..., functions=...), KustoClient(functions=...), or "
+    "`duckdb-kql serve --functions FILE`); the management commands themselves "
+    "would need somewhere in the database to keep them"
+)
+
+
+def _function_rows(
+    functions: ResolvedFunctions | None, database: str | None
+) -> list[StoredFunction]:
+    from .stored_functions import lookup, registered_names
+
+    return [
+        f
+        for name in registered_names(functions, None, database)
+        if (f := lookup(functions, None, name, database)) is not None
+    ]
+
+
+def _functions_sql(functions: ResolvedFunctions | None, database: str | None) -> str:
+    """`.show functions`: the registry for the database the query runs in."""
+    rows = _function_rows(functions, database)
+    if not rows:
+        return (
+            'SELECT CAST(NULL AS VARCHAR) AS "Name", CAST(NULL AS VARCHAR) AS '
+            '"Parameters", CAST(NULL AS VARCHAR) AS "Body", CAST(NULL AS VARCHAR) '
+            'AS "Folder", CAST(NULL AS VARCHAR) AS "DocString" WHERE FALSE'
+        )
+    return " UNION ALL ".join(_function_row(f) for f in rows)
+
+
+def _function_sql(
+    written: str, functions: ResolvedFunctions | None, database: str | None
+) -> str:
+    """`.show function F`, one row — or Kusto's refusal when there is no F."""
+    name = written.strip()
+    if name.startswith("["):
+        name = name.strip("[] ")[1:-1]
+    for function in _function_rows(functions, database):
+        if function.name == name:
+            return _function_row(function)
+    # A statement about the database, as Kusto's own "not found" is — not a
+    # command this package lacks.
+    raise KqlSchemaError(
+        name,
+        hint=f"Entity ID '{name}' of kind 'ExpressionFunction' was not found — "
+        "no stored function by that name is registered (functions=)",
+    )
+
+
+def _function_row(function: StoredFunction) -> str:
+    values = (
+        ("Name", function.name),
+        ("Parameters", function.parameters),
+        ("Body", function.body),
+        ("Folder", function.folder),
+        ("DocString", function.docstring),
+    )
+    return "SELECT " + ", ".join(f'{quote_string(v)} AS "{k}"' for k, v in values)
 
 
 def _entity_groups_sql(groups: ResolvedGroups | None) -> str:

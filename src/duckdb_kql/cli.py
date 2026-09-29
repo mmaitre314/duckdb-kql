@@ -40,6 +40,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
+import re
 import sys
 from collections.abc import Callable, Sequence
 from pathlib import Path
@@ -251,6 +252,11 @@ def _serve_command(args: argparse.Namespace) -> int:
             print(f"duckdb-kql serve: --entity-groups: {exc}", file=sys.stderr)
             return EXIT_TRANSLATION_ERROR
     try:
+        functions = _read_functions(args.functions or [])
+    except (OSError, ValueError, TypeError) as exc:
+        print(f"duckdb-kql serve: --functions: {exc}", file=sys.stderr)
+        return EXIT_TRANSLATION_ERROR
+    try:
         serve(
             args.database,
             port=args.port,
@@ -259,6 +265,7 @@ def _serve_command(args: argparse.Namespace) -> int:
             allow_write=args.allow_write,
             clusters=clusters,
             entity_groups=entity_groups,
+            functions=functions,
         )
     except ImportError as exc:  # pragma: no cover - depends on the install
         # `engine._require_duckdb` already names the extra to install; repeating
@@ -447,6 +454,26 @@ def _load_schema(path: str | None) -> dict[str, list[str]] | None:
 # ---------------------------------------------------------------------------
 # Argument parsing
 # ---------------------------------------------------------------------------
+
+
+#: `Sales=sales.csl`: a database name, then the file. A bare path has no `=`
+#: after an identifier, which keeps a Windows drive letter (`C:\\…`) a path.
+_DATABASE_PREFIX = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.+)$")
+
+
+def _read_functions(values: list[str]) -> dict[str | None, list[str]] | None:
+    """``--functions [DATABASE=]FILE`` arguments, read and grouped by database."""
+    if not values:
+        return None
+    out: dict[str | None, list[str]] = {}
+    for value in values:
+        prefixed = _DATABASE_PREFIX.match(value)
+        database, path = (prefixed.group(1), prefixed.group(2)) if prefixed else (None, value)
+        out.setdefault(database, []).append(Path(path).read_text(encoding="utf-8"))
+    from .stored_functions import parse_functions
+
+    parse_functions(out)  # a bad definition stops here, naming the flag
+    return out
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -662,6 +689,18 @@ def _parser() -> argparse.ArgumentParser:
             '{"MyGroup": ["database(\'d1\')", "database(\'d2\')"]}. '
             "An inline or let-bound group needs no mapping. Without one a "
             "named group is refused rather than expanded to nothing."
+        ),
+    )
+    serve.add_argument(
+        "--functions",
+        metavar="[DATABASE=]FILE",
+        action="append",
+        help=(
+            "a file of stored function definitions, as Kusto exports them — "
+            ".create-or-alter function Name(params) { body } — so queries "
+            "calling Name() resolve here. Repeatable; DATABASE= registers the "
+            "file's functions for that database rather than the one queries run "
+            "in. Without it a call to a stored function is refused."
         ),
     )
     serve.add_argument(

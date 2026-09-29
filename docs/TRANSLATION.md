@@ -1140,6 +1140,32 @@ stage that fails the query, by name and at run time, if the input has the column
 after all: right answer or no answer, and a parameterized query still
 translates offline.
 
+### R24 — A stored function expands at the call site
+*Trap: `tests/test_stored_functions.py`*
+
+A stored function is database-side state, registered here with `functions=`
+in the form Kusto exports it. It is **not** a view evaluated in its own scope.
+Measured, with `FpF() { FpT }` over a table `FpT` holding 7:
+
+```
+FpF() | summarize s = sum(Value)                                          7
+let FpT = datatable(Value:long)[100]; FpF() | summarize s = sum(Value)   100
+let F = () { FpT }; let FpT = datatable(Value:long)[100]; F() | …          7   (a query-local let: lexical)
+```
+
+So each call is lowered afresh into a tabular binding of its own, placed
+immediately before the binding — or the query — that holds it: a caller's
+`let` declared earlier captures a name in the body, one declared later does
+not, and names still match by exact spelling (R7). Scalars are dynamic the same
+way: a name the body does not bind is the caller's, its parameters and its own
+`let`s bind over the caller's, and a column over all of them (R23). The body's
+unqualified tables and nested calls resolve in the **function's** database
+(`database('Other').FpF()` reads Other's `FpT`), except a name a caller's `let`
+captures. A function beats a table of the same name; a bare name calls it only
+when no parameter is required, and is otherwise refused rather than read as the
+table. The obvious implementation — each function as a `let` prepended to the
+query — is lexical, and answers 7 where Kusto answers 100.
+
 ---
 
 ## 5. Tabular operator conventions
