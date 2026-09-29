@@ -882,6 +882,9 @@ class _CteNames:
     taken: frozenset[str]
     #: KQL `let` name -> CTE name, innermost scope last.
     scopes: list[dict[str, str]] = dataclasses.field(default_factory=list)
+    #: KQL `let` name -> the table it aliases, or None — its `withsource` label
+    #: (`_table_label`). Kept beside `scopes`, one dict per scope.
+    labels: list[dict[str, str | None]] = dataclasses.field(default_factory=list)
     counter: int = 0
     #: The parameter placeholders rendered so far (`TranslationResult.slots`).
     slots: set[str] = dataclasses.field(default_factory=set)
@@ -909,6 +912,38 @@ def _let_cte(name: str) -> str | None:
         if name in scope:
             return scope[name]
     return None
+
+
+def _let_label(name: str) -> tuple[bool, str | None]:
+    """``(bound, label)`` for *name*: whether a `let` in scope binds it, and
+    the table it aliases if it is only an alias."""
+    if _NAMES is None:
+        return False, None
+    for labels in reversed(_NAMES.labels):
+        if name in labels:
+            return True, labels[name]
+    return False, None
+
+
+def _alias_label(bound: ir.Query) -> str | None:
+    """The table *bound* is a bare alias of, followed through other aliases.
+
+    Measured: `let A = FpT; union withsource=Src A, FpU` labels the first branch
+    `FpT`, and so does `let B = A` over it and a stored function `{ FpT }` or
+    `{ let t = FpT; t }` — while one operator anywhere (`FpT | where …`) makes
+    it `union_argN`.
+    """
+    if bound.operators or not isinstance(bound.source, ir.TableRef):
+        return None
+    source = bound.source
+    if source.database is None and source.cluster is None:
+        for name, inner in reversed(bound.lets):
+            if name == source.name:
+                return _alias_label(inner) if isinstance(inner, ir.Query) else None
+        found, label = _let_label(source.name)
+        if found:
+            return label
+    return source.name
 
 
 def _table_names(query: ir.Query, schema: Schema | None) -> frozenset[str]:
@@ -941,10 +976,12 @@ def _render_query(query: ir.Query, schema: Schema | None = None) -> TranslationR
     assert _NAMES is not None
     scope: dict[str, str] = {}
     _NAMES.scopes.append(scope)
+    _NAMES.labels.append({})
     try:
         return _render_scoped(query, schema, scope)
     finally:
         _NAMES.scopes.pop()
+        _NAMES.labels.pop()
 
 
 def _render_scoped(
@@ -969,6 +1006,7 @@ def _render_scoped(
             continue
         cte = _NAMES.binding_name(name)
         let_ctes.append(f"{quote_ident(cte)} AS ({to_sql(bound, schema)})")
+        _NAMES.labels[-1][name] = _alias_label(bound)
         scope[name] = cte
         schema = _schema_with_let(schema, name, bound)
     query = _promote_fuzzy_source(query, schema)
@@ -2056,8 +2094,11 @@ def _table_label(
     """The `withsource` label for a bare table branch, or None for `union_argN`.
 
     A `let`-bound name is *not* a table and does not get its name: measured,
-    `let A = ...; union withsource=Src UT1, A` reports `union_arg1` for the
-    second branch.
+    `let A = FpT | where …; union withsource=Src A, FpU` reports `union_arg0`
+    for it. **Unless it is only an alias**: `let A = FpT` reports `FpT`, through
+    a chain of aliases and through a stored function whose body is one
+    (`_alias_label`). This said "a `let`-bound name" unconditionally, which was
+    measured on a binding with an operator in it.
 
     **Known residue — the database qualifier.** Measured, Kusto qualifies every
     label as soon as one branch resolves to a database other than the *current*
@@ -2079,6 +2120,10 @@ def _table_label(
     explicitly a *different* database, so Kusto always qualifies and bare labels
     would be identical for every entity — which defeats the point of asking.
     """
+    if source.database is None and source.cluster is None:
+        bound, label = _let_label(source.name)
+        if bound:
+            return label
     if source.name in let_names:
         return None
     if qualify and source.database:

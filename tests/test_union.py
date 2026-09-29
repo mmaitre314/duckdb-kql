@@ -182,6 +182,28 @@ def test_withsource_does_not_name_a_let_bound_table(con):
     assert {r[0] for r in rows} == {"UT1", "union_arg1"}
 
 
+@pytest.mark.parametrize(
+    "kql",
+    [
+        "let A = UT1; union withsource=Src A, UT2",
+        "let A = UT1; let B = A; union withsource=Src B, UT2",
+        "let A = UT1; A | union withsource=Src UT2",
+    ],
+)
+def test_withsource_names_the_table_a_let_only_aliases(con, kql):
+    """Measured on the emulator (2026-09-29): a binding that is nothing but a
+    table's name reports **the table**, through a chain of aliases and on the
+    left of a piped union. The test above measured a `datatable` binding, and
+    "a let name is not a table name" was generalized from it; one operator is
+    still enough to make the label positional (next test)."""
+    assert {r[0] for r in _rows(con, kql)} == {"UT1", "UT2"}
+
+
+def test_withsource_is_positional_for_a_let_with_an_operator(con):
+    rows = _rows(con, "let A = UT1 | where x > 0; union withsource=Src A, UT2")
+    assert {r[0] for r in rows} == {"union_arg0", "UT2"}
+
+
 def test_withsource_strips_the_database_qualifier(con):
     rows = _rows(con, "union withsource=Src database('memory').UT1, UT2")
     assert {r[0] for r in rows} == {"UT1", "UT2"}
