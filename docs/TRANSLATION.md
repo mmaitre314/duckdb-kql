@@ -368,6 +368,17 @@ who did. `project-rename` is the way out.
 Not checked when no schema is available, because then there is no column list
 to check — one more reason `duckdb_kql.kql()` is the better entry point.
 
+**Tables and tabular `let`s: the translator resolves them, never DuckDB.**
+*Trap: `tests/test_let_case_capture.py`.* Columns cannot be kept apart, but CTE
+names can, because the translator chooses them. A binding used to become a CTE
+under its own name, and then DuckDB's folding decided what a table reference
+meant — `let fpt = <100>; FpT | …` answered 100 where Kusto reads the table
+(7). Now each tabular `let` is a CTE under a reserved name, a bare table
+reference reaches it only by **exact** KQL name and only in scope (a binding
+sees the ones declared before it, not itself), and the generated names — the
+bindings' and the stages' `_s0`, `_s1`… — step around every name the statement
+reads as a table. `let a` and `let A` are two bindings, as in Kusto.
+
 ---
 
 ### R8 — datetime is UTC; binning has an origin

@@ -407,15 +407,20 @@ def _qualified_name(name: str) -> str:
 
 
 def render_table_ref(source: ir.TableRef) -> str:
-    """``"Orders"`` or ``"Sales"."Orders"``.
+    """``"Orders"``, ``"Sales"."Orders"``, or the CTE of a ``let`` in scope.
 
     Two parts, not three: DuckDB reads ``"db"."name"`` as catalog-and-table and
     finds it wherever the database's search path puts it. Pinning ``"main"`` in
     the middle would be more explicit and would stop resolving the moment
     someone attaches a file whose tables live in another schema.
+
+    A bare name bound by a tabular ``let`` is rendered as that binding's CTE,
+    looked up here by its **exact** KQL name — see :class:`_CteNames` for why
+    DuckDB is not allowed to make that choice.
     """
     if source.database is None:
-        return quote_ident(source.name)
+        cte = _let_cte(source.name)
+        return quote_ident(cte if cte is not None else source.name)
     return f"{quote_ident(source.database)}.{quote_ident(source.name)}"
 
 
@@ -808,26 +813,140 @@ def to_sql(query: ir.Query, schema: Schema | None = None) -> TranslationResult:
     side, the body of a `toscalar` reached from inside an expression — has its
     own FROM, and must not read a column the operator *around* it bound. See
     ``translate/sharing.py``.
+
+    The outermost call also decides the generated CTE names for the whole
+    statement, since a nested query sees every CTE around it (:class:`_CteNames`).
     """
-    with sharing.barrier():
-        return _render_query(query, schema)
+    global _NAMES
+    if _NAMES is not None:
+        with sharing.barrier():
+            return _render_query(query, schema)
+    _NAMES = _CteNames(_table_names(query, schema))
+    try:
+        with sharing.barrier():
+            return _render_query(query, schema)
+    finally:
+        _NAMES = None
+
+
+@dataclasses.dataclass
+class _CteNames:
+    """The generated CTE names of one statement, and the `let`s in scope.
+
+    A tabular `let` used to become a CTE under its **own** name, leaving DuckDB
+    to decide what a table reference meant — and DuckDB matches quoted
+    identifiers case-insensitively where KQL identifiers are case-sensitive
+    (R7). So a binding captured a table whose name differs only in case,
+    silently. Measured on the emulator::
+
+        let fpt = datatable(Value:long)[100]; FpT | summarize s = sum(Value)
+            Kusto 7 (the table)          here 100 (the let)
+
+    The generated stage names had the same flaw from the other side: a user's
+    table called `_s0`, read from a nested query, resolved to the stage CTE.
+
+    So the translator makes the choice, in KQL's terms, and DuckDB is never
+    asked. Each binding gets a reserved name no referenced table can match
+    under DuckDB's folding, a bare `TableRef` reaches it only by **exact** KQL
+    name, and only where it is in scope: a binding's own body sees the bindings
+    declared before it and not itself, which is Kusto's sequential `let` and
+    the reason `let T = T | where …` still reads the table.
+
+    The counter is statement-wide, not per query: a nested query's binding must
+    not reuse an outer one's CTE name, or DuckDB would let it shadow a
+    reference that KQL resolves to the outer binding.
+    """
+
+    #: Case-folded names the statement reads as tables — every bare
+    #: `TableRef`, and every table the schema knows (a wildcard may match one).
+    taken: frozenset[str]
+    #: KQL `let` name -> CTE name, innermost scope last.
+    scopes: list[dict[str, str]] = dataclasses.field(default_factory=list)
+    counter: int = 0
+
+    def binding_name(self, name: str) -> str:
+        """A fresh CTE name for the binding *name*, free of every taken name."""
+        index = self.counter
+        self.counter += 1
+        prefix = "_l"
+        while f"{prefix}{index}_{name}".casefold() in self.taken:
+            prefix = "_" + prefix
+        return f"{prefix}{index}_{name}"
+
+
+#: The statement being rendered, or None between statements. A module global
+#: like the clock and the sharing scopes, set and cleared by :func:`to_sql`.
+_NAMES: _CteNames | None = None
+
+
+def _let_cte(name: str) -> str | None:
+    """The CTE of the innermost tabular `let` named exactly *name*, if one is in scope."""
+    if _NAMES is None:
+        return None
+    for scope in reversed(_NAMES.scopes):
+        if name in scope:
+            return scope[name]
+    return None
+
+
+def _table_names(query: ir.Query, schema: Schema | None) -> frozenset[str]:
+    """Every bare name *query* could read as a table, case-folded.
+
+    Walked by dataclass field, as `_referenced_columns` is, so a `TableRef`
+    nested in an expression — `x in (T | project c)` — is not missed.
+    """
+    found = {key.casefold() for key in schema or {} if "." not in key}
+    stack: list[object] = [query]
+    seen: set[int] = set()
+    while stack:
+        current = stack.pop()
+        if isinstance(current, (list, tuple)):
+            stack.extend(current)
+            continue
+        if not dataclasses.is_dataclass(current) or isinstance(current, type):
+            continue
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        if isinstance(current, ir.TableRef) and current.database is None:
+            found.add(current.name.casefold())
+        stack.extend(getattr(current, f.name) for f in dataclasses.fields(current))
+    return frozenset(found)
 
 
 def _render_query(query: ir.Query, schema: Schema | None = None) -> TranslationResult:
     """:func:`to_sql`'s body, once the enclosing binding scopes are hidden."""
+    assert _NAMES is not None
+    scope: dict[str, str] = {}
+    _NAMES.scopes.append(scope)
+    try:
+        return _render_scoped(query, schema, scope)
+    finally:
+        _NAMES.scopes.pop()
+
+
+def _render_scoped(
+    query: ir.Query, schema: Schema | None, scope: dict[str, str]
+) -> TranslationResult:
+    """Render *query* with its own tabular `let`s entering *scope* in order."""
     from ..schema import output_columns
 
-    # A tabular `let` becomes a named CTE, so `TableRef(name)` in the body needs
-    # no rewriting — it already refers to the CTE.
-    schema = _schema_with_lets(query, schema)
+    assert _NAMES is not None
+    # Each binding is rendered, and its columns learned, seeing only the ones
+    # declared before it — sequential, as Kusto's `let` is. The body then sees
+    # them all.
+    let_ctes = []
+    schema = dict(schema) if schema is not None else None
+    for name, bound in query.lets:
+        if not isinstance(bound, ir.Query):
+            continue
+        cte = _NAMES.binding_name(name)
+        let_ctes.append(f"{quote_ident(cte)} AS ({to_sql(bound, schema)})")
+        scope[name] = cte
+        schema = _schema_with_let(schema, name, bound)
     query = _promote_fuzzy_source(query, schema)
-    let_ctes = [
-        f"{quote_ident(name)} AS ({to_sql(bound, schema)})"
-        for name, bound in query.lets
-        if isinstance(bound, ir.Query)
-    ]
 
-    stage = _stage_prefix([name for name, _ in query.lets])
+    stage = _stage_prefix(_NAMES.taken)
     stages = [render_source(query.source, schema)]
     # Resolved up front rather than on first join: `extend` needs it too, to
     # keep a replaced column in its original position. A `datatable`/`print`/
@@ -992,24 +1111,26 @@ def _operator_keyword(op: ir.Operator) -> str:
 _STAGE_NAME = re.compile(r"_+s\d+\Z")
 
 
-def _stage_prefix(let_names: list[str]) -> str:
-    """A prefix for the generated per-stage CTEs that no ``let`` can collide with.
+def _stage_prefix(taken: frozenset[str]) -> str:
+    """A prefix for the generated per-stage CTEs that no table can collide with.
 
-    A tabular `let` becomes a CTE of its own name in the same ``WITH``, so a
-    query that names one `_s0` used to emit two CTEs called `_s0` and die with
-    DuckDB's ``Duplicate CTE name`` — legal KQL, and an error naming nothing the
-    user wrote. Underscore-prefixed names are unusual but not reserved, and a
-    KQL query has no way to know what this translator calls its internals.
+    A stage CTE shares the ``WITH`` — and every nested query's view of it — with
+    each table the statement reads, so a table called `_s0` read from a nested
+    query resolved to the stage instead. (A tabular `let` used to collide the
+    same way, as `Duplicate CTE name`; bindings now have reserved names of their
+    own, see :class:`_CteNames`.) Underscore-prefixed names are unusual but not
+    reserved, and a KQL query has no way to know what this translator calls its
+    internals.
 
-    Lengthening the prefix rather than refusing keeps the query working, and
-    keeps the *usual* answer `_s` — so the emitted SQL is unchanged for every
-    query that does not do this, which is all of them in the corpus. Repeats
-    until it finds a free prefix, which terminates because each round is longer
-    than the last and the name set is finite.
+    *taken* is case-folded, because DuckDB's name resolution is. Lengthening the
+    prefix rather than refusing keeps the query working, and keeps the *usual*
+    answer `_s` — so the emitted SQL is unchanged for every query that does not
+    do this. Repeats until it finds a free prefix, which terminates because each
+    round is longer than the last and the name set is finite.
     """
     prefix = "_s"
     while any(
-        name.startswith(prefix) and _STAGE_NAME.fullmatch(name) for name in let_names
+        name.startswith(prefix) and _STAGE_NAME.fullmatch(name) for name in taken
     ):
         prefix = "_" + prefix
     return prefix
@@ -1073,23 +1194,24 @@ def _promote_fuzzy_source(query: ir.Query, schema: Schema | None) -> ir.Query:
     return out
 
 
-def _schema_with_lets(query: ir.Query, schema: Schema | None) -> Schema | None:
-    """Extend *schema* with the columns each tabular ``let`` produces.
+def _schema_with_let(
+    schema: Schema | None, name: str, bound: ir.Query
+) -> Schema | None:
+    """Extend *schema* with the columns the tabular ``let`` *name* produces.
 
     Without this a join whose side is a `let`-bound table cannot resolve its
-    columns, even though they are fully determined by the binding.
+    columns, even though they are fully determined by the binding. A binding
+    whose columns cannot be known here leaves the schema as it was; a join
+    that needs them reports it.
     """
-    if not query.lets:
-        return schema
     from ..schema import output_columns
 
+    try:
+        columns = output_columns(bound, schema)
+    except Exception:  # noqa: BLE001 - resolve lazily; join reports it
+        return schema
     extended = dict(schema or {})
-    for name, bound in query.lets:
-        if isinstance(bound, ir.Query):
-            try:
-                extended[name] = output_columns(bound, extended)
-            except Exception:  # noqa: BLE001 - resolve lazily; join reports it
-                pass
+    extended[name] = columns
     return extended
 
 
