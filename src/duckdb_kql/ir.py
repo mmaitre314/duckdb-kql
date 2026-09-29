@@ -108,6 +108,22 @@ class Parameter(Expr):
 
 
 @dataclass(frozen=True)
+class LetRef(Expr):
+    """A name bound by a scalar ``let`` or a query parameter, read in a pipeline.
+
+    Kusto resolves such a name against the operator's **input**: a column of
+    the same name wins, and only otherwise is it the bound value (R23) —
+    measured, ``let Value = 5; datatable(Value:long)[7] | extend k = Value``
+    gives 7. Lowering cannot know the columns, so it keeps both halves here and
+    translation, which can, decides (`schema.resolve_let_refs`). Nothing may
+    render one unresolved.
+    """
+
+    name: str
+    value: Expr
+
+
+@dataclass(frozen=True)
 class BinaryOp(Expr):
     """A binary operation.
 

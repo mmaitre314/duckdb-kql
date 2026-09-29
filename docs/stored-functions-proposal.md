@@ -155,10 +155,11 @@ is named by the `let` in `project`/`extend` (`project v` gives a column `v`, not
 
 **Fix:** a top-level scalar `let` or query parameter used at a pipeline position
 lowers to a `LetRef(name, value)` that keeps both, and translation resolves it
-against the operator's input columns. Where those columns are **unknown** — a
-table with no schema — the answer cannot be decided, so the reference is
-refused with the same hint `join` gives: pass `schema=`, or use
-`duckdb_kql.kql(con, …)`, which always has one.
+against the operator's input columns (TRANSLATION.md R23). Where those columns
+are **unknown** — a table with no schema — the value is assumed behind a guard
+stage that makes DuckDB fail the query if the input has the column after all.
+Refusing at translation was the first version; it refused every parameterized
+query `duckdb-kql translate` writes, for a clash almost none of them have.
 
 ## 5. The API
 

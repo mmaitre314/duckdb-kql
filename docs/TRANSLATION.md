@@ -1110,6 +1110,36 @@ written: `let a = tolower(s); T | project a` is SEM0100 there — a top-level
 `let` is a scalar constant and cannot read a table column — and we accept it.
 That is a separate divergence, recorded in §9.
 
+### R23 — A column shadows a `let` or query parameter of the same name
+*Trap: `tests/test_let_column_shadowing.py`*
+
+In a pipeline, a name means the **column** of the operator's input if there is
+one, and the scalar `let` or declared query parameter only otherwise. Measured:
+
+```
+let Value = 5; datatable(Value:long)[7] | extend k = Value      k = 7
+let Value = 5; datatable(x:long)[7]     | extend k = Value      k = 5
+let v = 5; datatable(x:long)[1] | extend v = 10, k = v          k = 5   (R21)
+declare query_parameters(Value:long); datatable(Value:long)[7] | extend k = Value
+                                                                 k = 7   (Value=5)
+```
+
+R22's substitution used to be unconditional and answered 5 for the first. It
+holds in `invoke` bodies and tabular `let` bodies too, which are pipelines. It
+does **not** hold for a scalar function's closure, parameters and locals — they
+win over a column (`let K = 7; let F = (x:long) { x + K }` gives `F(1)` = 8 over
+a `K` column of 100) — nor for a `let`'s own value, which binds where it is
+written, with no columns in scope.
+
+Lowering keeps both halves in an `ir.LetRef` and translation chooses, since only
+translation knows the columns. A bare reference is named after the binding in
+`project`, `extend` and `distinct` (`project v` is a column `v`), and not in
+`summarize by` (`Column1`) or `print` (`print_0`). Where the input's columns
+are unknown — `to_sql` with no schema — the value is assumed behind a guard
+stage that fails the query, by name and at run time, if the input has the column
+after all: right answer or no answer, and a parameterized query still
+translates offline.
+
 ---
 
 ## 5. Tabular operator conventions

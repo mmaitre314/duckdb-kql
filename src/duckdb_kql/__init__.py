@@ -369,6 +369,10 @@ def _to_sql(
     result = _emit(query, schema)
     if query.parameters or parameters:
         bound, unbound = bind(query.parameters, parameters)
+        # Only what the SQL mentions: a parameter declared and never read, or
+        # read only where a column of its name shadows it (R23), has no
+        # placeholder, and DuckDB refuses a value bound to none.
+        bound = {slot: value for slot, value in bound.items() if slot in result.slots}
         return result.with_parameters(bound, unbound, tuple(query.parameters))
     return result
 

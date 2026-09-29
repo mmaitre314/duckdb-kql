@@ -13,7 +13,9 @@ and only queries containing a ``join`` require one at all.
 
 from __future__ import annotations
 
+import dataclasses
 import fnmatch
+from typing import Any
 
 from . import ir
 from .errors import KqlSchemaError
@@ -21,7 +23,8 @@ from .errors import KqlSchemaError
 __all__ = [
     "Schema", "output_columns", "join_output_columns", "lookup_output_columns",
     "union_output_columns", "mv_expand_output_columns", "parse_output_columns",
-    "replacing", "match_wildcard",
+    "replacing", "match_wildcard", "let_ref_names", "resolve_let_refs",
+    "resolve_source_let_refs",
     "surviving_branches",
     "disambiguate",
 ]
@@ -207,9 +210,154 @@ def _source_columns_unchecked(source: ir.Source, schema: Schema | None) -> list[
 def _operator_columns(
     op: ir.Operator, cols: list[str], schema: Schema | None
 ) -> list[str]:
+    op = resolve_let_refs(op, cols)
     return _no_case_collision(
         _operator_columns_unchecked(op, cols, schema), _operator_name(op)
     )
+
+
+def resolve_let_refs(op: ir.Operator, cols: list[str] | None) -> ir.Operator:
+    """Decide every `ir.LetRef` in *op* against its input columns (R23).
+
+    A name bound by a scalar `let` or a query parameter means the **column** of
+    that name when the operator's input has one, and the bound value otherwise.
+    Measured on the emulator::
+
+        let Value = 5; datatable(Value:long)[7] | extend k = Value      k = 7
+        let Value = 5; datatable(x:long)[7]     | extend k = Value      k = 5
+        let v = 5; datatable(x:long)[1] | extend v = 10, k = v          k = 5 (R21)
+
+    The substitution used to be unconditional, so the first answered 5.
+
+    A bare reference in `project`, `extend` or `distinct` is named after the
+    binding — `project v` is a column `v`, measured, where substituting the
+    value made it `Column1`. `summarize by v` really is `Column1`, so it stays
+    unnamed.
+
+    With *cols* unknown — a table and no schema — the choice cannot be made
+    here, and this refuses; the renderer does not call it that way, but assumes
+    the value behind a guard stage that DuckDB checks (`translate._shadow_guard`).
+    Nested queries (`x in (T | …)`) are left alone: each has its own input and
+    is decided when it is rendered.
+    """
+    first = _first_let_ref(op)
+    if first is None:
+        return op
+    if cols is None:
+        raise KqlSchemaError(
+            first.name,
+            hint=f"`{first.name}` is bound by a let (or is a query parameter), and "
+            "a column of the same name in this pipeline's input would win instead "
+            "(R23); the input's columns are not known here — pass schema=, or use "
+            "duckdb_kql.kql(con, ...), which reads them from the connection",
+        )
+    if isinstance(op, (ir.Project, ir.Extend, ir.Distinct)):
+        op = dataclasses.replace(
+            op,
+            expressions=tuple(
+                dataclasses.replace(e, name=e.expr.name)
+                if e.name is None and isinstance(e.expr, ir.LetRef)
+                else e
+                for e in op.expressions
+            ),
+        )
+    resolved: ir.Operator = _resolve(op, frozenset(cols), {})
+    return resolved
+
+
+def let_ref_names(op: ir.Operator) -> list[str]:
+    """The let-bound names *op* reads, sorted, outside any nested query."""
+    names: set[str] = set()
+    stack: list[object] = [op]
+    seen: set[int] = set()
+    while stack:
+        current = stack.pop()
+        if isinstance(current, ir.Query):
+            continue
+        if isinstance(current, (list, tuple)):
+            stack.extend(current)
+            continue
+        if not dataclasses.is_dataclass(current) or isinstance(current, type):
+            continue
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        if isinstance(current, ir.LetRef):
+            names.add(current.name)
+        stack.extend(getattr(current, f.name) for f in dataclasses.fields(current))
+    return sorted(names)
+
+
+def resolve_source_let_refs(source: ir.Source) -> ir.Source:
+    """A source's `LetRef`s, which have no input columns to lose to."""
+    if _first_let_ref(source) is None:
+        return source
+    resolved: ir.Source = _resolve(source, frozenset(), {})
+    return resolved
+
+
+def _first_let_ref(node: object) -> ir.LetRef | None:
+    """Some `LetRef` in *node* outside a nested query, or None."""
+    stack: list[object] = [node]
+    seen: set[int] = set()
+    while stack:
+        current = stack.pop()
+        if isinstance(current, ir.LetRef):
+            return current
+        if isinstance(current, ir.Query):
+            continue
+        if isinstance(current, (list, tuple)):
+            stack.extend(current)
+            continue
+        if not dataclasses.is_dataclass(current) or isinstance(current, type):
+            continue
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        stack.extend(getattr(current, f.name) for f in dataclasses.fields(current))
+    return None
+
+
+def _resolve(node: object, columns: frozenset[str], memo: dict[int, object]) -> Any:
+    """Rebuild *node* with each `LetRef` decided; shared nodes stay shared.
+
+    The memo keeps the IR a DAG, as `lower._substitute` does and for the same
+    reason: a binding read *n* times is one node, and rebuilding it per path is
+    exponential in a chain of them.
+    """
+    hit = memo.get(id(node), _MISSING)
+    if hit is not _MISSING:
+        return hit
+    out: object
+    if isinstance(node, ir.LetRef):
+        out = (
+            ir.ColumnRef(node.name)
+            if node.name in columns
+            else _resolve(node.value, columns, memo)
+        )
+    elif isinstance(node, ir.Query):
+        out = node
+    elif isinstance(node, tuple):
+        items = tuple(_resolve(i, columns, memo) for i in node)
+        out = node if all(a is b for a, b in zip(items, node, strict=True)) else items
+    elif isinstance(node, list):
+        out = [_resolve(i, columns, memo) for i in node]
+    elif dataclasses.is_dataclass(node) and not isinstance(node, type):
+        changes = {}
+        for field in dataclasses.fields(node):
+            value = getattr(node, field.name)
+            new = _resolve(value, columns, memo)
+            if new is not value:
+                changes[field.name] = new
+        out = dataclasses.replace(node, **changes) if changes else node
+    else:
+        out = node
+    memo[id(node)] = out
+    return out
+
+
+#: A sentinel, because ``None`` is a value the memo legitimately stores.
+_MISSING = object()
 
 
 def _operator_name(op: ir.Operator) -> str:

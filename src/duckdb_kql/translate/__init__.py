@@ -94,6 +94,11 @@ class TranslationResult(str):
     #: the build-time CLI writes them into the SQL's header, because otherwise a
     #: consumer is handed a placeholder with no way to know what belongs in it.
     declarations: tuple[ParameterDeclaration, ...] = ()
+    #: The ``$slot`` placeholders the SQL actually contains. Not every declared
+    #: parameter reaches the SQL — one may be unused, or shadowed everywhere by
+    #: a column of its name (R23) — and DuckDB refuses a value bound to a
+    #: placeholder the statement does not mention.
+    slots: frozenset[str] = frozenset()
 
     def with_parameters(
         self,
@@ -103,6 +108,7 @@ class TranslationResult(str):
     ) -> TranslationResult:
         result = TranslationResult(str(self))
         result.udfs = self.udfs
+        result.slots = self.slots
         result.parameters = parameters
         result.unbound = unbound
         result.declarations = declarations
@@ -136,6 +142,8 @@ def render_parameter(param: ir.Parameter) -> str:
     to infer from; stating the declared type keeps a parameter behaving exactly
     like the literal it stands in for.
     """
+    if _NAMES is not None:
+        _NAMES.slots.add(param.slot)
     return f"CAST(${param.slot} AS {TYPE_MAP[param.kind]})"
 
 
@@ -186,6 +194,16 @@ def render_expr(node: ir.Expr) -> str:
 
     if isinstance(node, ir.Parameter):
         return render_parameter(node)
+
+    if isinstance(node, ir.LetRef):
+        # Every stage resolves these against its input first (R23). Rendering
+        # the value here instead is exactly the bug that rule fixes, so a path
+        # that forgot to resolve fails loudly rather than answering.
+        raise KqlUnsupportedError(
+            f"let:{node.name}",
+            hint="internal: a let-bound name reached SQL unresolved; please "
+            "report the query",
+        )
 
     if isinstance(node, ir.ColumnRef):
         return quote_ident(node.name)
@@ -824,7 +842,9 @@ def to_sql(query: ir.Query, schema: Schema | None = None) -> TranslationResult:
     _NAMES = _CteNames(_table_names(query, schema))
     try:
         with sharing.barrier():
-            return _render_query(query, schema)
+            result = _render_query(query, schema)
+        result.slots = frozenset(_NAMES.slots)
+        return result
     finally:
         _NAMES = None
 
@@ -863,6 +883,8 @@ class _CteNames:
     #: KQL `let` name -> CTE name, innermost scope last.
     scopes: list[dict[str, str]] = dataclasses.field(default_factory=list)
     counter: int = 0
+    #: The parameter placeholders rendered so far (`TranslationResult.slots`).
+    slots: set[str] = dataclasses.field(default_factory=set)
 
     def binding_name(self, name: str) -> str:
         """A fresh CTE name for the binding *name*, free of every taken name."""
@@ -929,7 +951,12 @@ def _render_scoped(
     query: ir.Query, schema: Schema | None, scope: dict[str, str]
 ) -> TranslationResult:
     """Render *query* with its own tabular `let`s entering *scope* in order."""
-    from ..schema import output_columns
+    from ..schema import (
+        let_ref_names,
+        output_columns,
+        resolve_let_refs,
+        resolve_source_let_refs,
+    )
 
     assert _NAMES is not None
     # Each binding is rendered, and its columns learned, seeing only the ones
@@ -945,6 +972,13 @@ def _render_scoped(
         scope[name] = cte
         schema = _schema_with_let(schema, name, bound)
     query = _promote_fuzzy_source(query, schema)
+    # A source has no input columns, so its let-bound names are their values.
+    query = ir.Query(
+        resolve_source_let_refs(query.source),
+        query.operators,
+        query.lets,
+        query.parameters,
+    )
 
     stage = _stage_prefix(_NAMES.taken)
     stages = [render_source(query.source, schema)]
@@ -957,6 +991,16 @@ def _render_scoped(
 
     for index, op in enumerate(query.operators):
         prev = f"{stage}{len(stages) - 1}"
+        # First, so every check and renderer below sees columns and values only.
+        if cols is None and let_ref_names(op):
+            # The input's columns are unknown, so the choice R23 makes cannot
+            # be made here. Assume the value, and make DuckDB prove it: a guard
+            # stage fails the query if the input turns out to have the column.
+            stages.append(_shadow_guard(prev, let_ref_names(op)))
+            prev = f"{stage}{len(stages) - 1}"
+            op = resolve_let_refs(op, [])
+        else:
+            op = resolve_let_refs(op, cols)
         if cols is not None:
             _refuse_forward_reference(op, cols)
         if cols is None and _mv_expand_needs_columns(op):
@@ -1003,6 +1047,39 @@ def _render_scoped(
     ctes = let_ctes + [f"{stage}{i} AS ({sql})" for i, sql in enumerate(stages)]
     body = f"SELECT * FROM {stage}{len(stages) - 1}"
     return TranslationResult("WITH " + ",\n     ".join(ctes) + f"\n{body}")
+
+
+def _shadow_guard(prev: str, names: list[str]) -> str:
+    """A pass-through stage that fails if *prev* has a column in *names*.
+
+    For a let-bound name read where the input's columns are unknown — `to_sql`
+    with no schema, which is how `duckdb-kql translate` writes SQL files. KQL
+    reads a column of that name in preference to the binding (R23); the stage
+    after this one assumes there is none, and this is what makes that an
+    assumption DuckDB checks rather than one it silently gets wrong.
+
+    Decided by the input's **shape**, via ``DESCRIBE`` — so an empty input with
+    the column fails too — and by exact name, since `value` does not shadow
+    `Value` in KQL. Measured on DuckDB: the predicate folds to a constant, so a
+    query with no such column pays nothing per row. Refusing at translation
+    instead was the first version, and it refused every parameterized query the
+    CLI translates, for a clash almost none of them have.
+    """
+    listed = ", ".join(quote_string(n) for n in names)
+    which = ", ".join(f"`{n}`" for n in names)
+    one = len(names) == 1
+    message = (
+        f"duckdb-kql: {which} {'is' if one else 'are'} bound by a let or query "
+        f"parameter, and this pipeline's input also has a column of "
+        f"{'that name' if one else 'one of those names'}, which KQL reads instead "
+        "(R23). The SQL was translated without the input's columns; translate "
+        "with schema= to read the column."
+    )
+    return (
+        f"SELECT * FROM {prev} WHERE CASE WHEN EXISTS (SELECT 1 FROM "
+        f"(DESCRIBE SELECT * FROM {prev}) WHERE column_name IN ({listed})) "
+        f"THEN error({quote_string(message)}) ELSE TRUE END"
+    )
 
 
 def _referenced_columns(node: object) -> set[str]:

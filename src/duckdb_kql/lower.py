@@ -1155,7 +1155,13 @@ def _lower_invoke(node: Any, kids: list[Any]) -> list[ir.Operator]:
         )
     args = tuple(_lower_expr(k) for k in parts[1:])
     binding = _bind_let_arguments(node, declared, args)
-    return [_substitute_operator(op, binding) for op in declared.operators]
+    # A pipeline position: a column of the piped rows shadows a parameter of
+    # the same name, measured — `invoke f(5)` over rows with a `K` column reads
+    # the column for `K` (100, not 5). A scalar function's parameter is the
+    # other way round (see `_inline_let_function`).
+    return [
+        _substitute_operator(op, _pipeline_scope(binding)) for op in declared.operators
+    ]
 
 
 def _tabular_parameter_name(node: Any) -> str:
@@ -1224,8 +1230,14 @@ def _declare_tabular_function(
             hint=f"the body must start at `{tabular}`, the tabular parameter; a "
             "body sourced elsewhere is not something `invoke` can splice into",
         )
+    # The body closes over the scalars declared before it, but it is a
+    # pipeline, so a column of the rows it is spliced onto still wins: measured,
+    # `let K = 5; … { rows | extend k = K }` over rows with a `K` column is 100.
+    # A parameter shadows an outer binding of its name; closing over that
+    # binding instead left the parameter nothing to bind at the call.
+    closure = {k: v for k, v in scalars.items() if k not in {p for p, _ in parameters}}
     operators = tuple(
-        _substitute_operator(op, scalars) for op in query.operators
+        _substitute_operator(op, _pipeline_scope(closure)) for op in query.operators
     )
     _LET_FUNCTIONS[name] = LetFunction(
         name, tuple(parameters), None, tabular, operators
@@ -1466,7 +1478,7 @@ def _lower_macro_body(nodes: list[Any], scope: str, entity: Entity) -> ir.Query:
             scalars.update(more_scalars)
             tabulars.extend(more_tabulars)
         body = _lower_query_node(statements[0])
-        body = _substitute_query(body, scalars)
+        body = _substitute_query(body, _pipeline_scope(scalars))
         names = {name for name, _ in tabulars}
         body = _resolve_in_subqueries(body, names)
         body.lets.extend(
@@ -1836,7 +1848,7 @@ def lower(kql: str, entity_groups: ResolvedGroups | None = None) -> ir.Query:
             query = _lower_head(parts[0], parts[1:])
 
     names = {name for name, _ in tabulars}
-    query = _substitute_query(query, scalars)
+    query = _substitute_query(query, _pipeline_scope(scalars))
     query = _resolve_in_subqueries(query, names)
     # The bindings need the same pass: `let u = T | where x in (V)` is the same
     # expression as the top-level form and was previously left unresolved.
@@ -2219,6 +2231,18 @@ def _lower_operators(nodes: list[Any]) -> list[ir.Operator]:
     return out
 
 
+def _pipeline_scope(scalars: Scalars) -> Scalars:
+    """*scalars* as they are read at a pipeline position.
+
+    There a column of the operator's input shadows a `let` or query parameter of
+    the same name (R23), so each binding becomes a `LetRef` that keeps both and
+    lets translation choose. Only a pipeline position: a scalar `let`'s own
+    value, and a scalar function's body, parameters and locals, bind eagerly —
+    measured, the function's closure and parameters win over a column there.
+    """
+    return {name: ir.LetRef(name, value) for name, value in scalars.items()}
+
+
 def _substitute(node: Any, scalars: Scalars) -> Any:
     """Replace scalar ``let`` references inside an expression.
 
@@ -2266,6 +2290,10 @@ def _substitute_once(node: Any, scalars: Scalars, memo: dict[int, Any]) -> Any:
 
     if isinstance(node, ir.ColumnRef):
         return scalars.get(node.name, node)
+    if isinstance(node, ir.LetRef):
+        # A binding made by an inner scope — an `invoke` argument — may read a
+        # name an outer one binds: `invoke f(K)` puts `K` inside `f`'s parameter.
+        return dataclasses.replace(node, value=_substitute(node.value, scalars))
     if isinstance(node, ir.BinaryOp):
         return dataclasses.replace(
             node,
@@ -2452,11 +2480,15 @@ def _lower_lets(
         if kind == "LetMaterializeDeclaration":
             # `materialize()` is a caching hint for a distributed engine; it
             # cannot change the result, so unwrapping it is correct.
-            tabulars.append((name, _substitute_query(_lower_query_node(value), scalars)))
+            tabulars.append(
+                (name, _substitute_query(_lower_query_node(value), _pipeline_scope(scalars)))
+            )
             continue
 
         if _is_tabular_value(value, scalars):
-            tabulars.append((name, _substitute_query(_lower_query_node(value), scalars)))
+            tabulars.append(
+                (name, _substitute_query(_lower_query_node(value), _pipeline_scope(scalars)))
+            )
         else:
             scalars[name] = _substitute(_lower_expr(value), scalars)
 
