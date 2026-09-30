@@ -1144,7 +1144,7 @@ translates offline.
 *Trap: `tests/test_stored_functions.py`*
 
 A stored function is database-side state, registered here with `functions=`
-in the form Kusto exports it. It is **not** a view evaluated in its own scope.
+as a list of its definitions (`function Name(params) { body }`). It is **not** a view evaluated in its own scope.
 Measured, with `FpF() { FpT }` over a table `FpT` holding 7:
 
 ```

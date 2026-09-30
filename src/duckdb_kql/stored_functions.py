@@ -7,13 +7,18 @@ here, so the definitions are supplied — the same design as named entity groups
 function from a table of the same name, or from nothing, would return plausible
 rows for a question nobody asked. An unregistered call is refused.
 
-**Entries are Kusto's own export form**, verbatim::
+**A list of definitions**, one per item, the way `set_entity_groups` takes a
+list of entities::
 
-    .create-or-alter function with (folder = "Tests", docstring = "…") ReadEvents() { Events }
+    duckdb_kql.set_functions([
+        'function with (folder = "Tests", docstring = "Reads it") ReadEvents() { Events }',
+        'function Above(x:long = 5) { Events | where Value > x }',
+    ])
 
-— which is what `.show database D schema as csl script` emits for each function,
-so a production database's definitions paste across unchanged. One string may
-hold several, one per command, as a database script does.
+— or a dict of database -> such a list, with None for the database a query runs
+in. An item is Kusto's own definition without its command verb; the verb is
+accepted too (`.create-or-alter function …`), so the function lines of
+`.show database D schema as csl script` paste in unchanged.
 
 What a definition *means* is decided at each call, not here: Kusto expands a
 stored function where it is called, so a caller's `let` captures a name inside
@@ -38,6 +43,7 @@ __all__ = [
     "parse_functions",
     "registered_names",
     "set_functions",
+    "split_definitions",
 ]
 
 
@@ -64,14 +70,17 @@ class StoredFunction:
 #: Database (None = the current one) -> function name -> definition.
 ResolvedFunctions = dict[str | None, dict[str, StoredFunction]]
 
-#: One command, a script of several, or a list of either.
-FunctionScript = str | Sequence[str]
+#: What the ``functions=`` parameters accept: a list of definitions for the
+#: database the query runs in, a dict of database -> such a list (None for that
+#: database), or an already-parsed registry — so a component holding a parsed
+#: one can forward it, as `KustoClient` does.
+FunctionArg = Sequence[str] | Mapping[str | None, Sequence[str]] | ResolvedFunctions
 
-#: What the ``functions=`` parameters accept: definitions for the current
-#: database, a mapping of database to definitions (None for the current one),
-#: or an already-parsed registry — so a component holding a parsed one can
-#: forward it, as `KustoClient` does.
-FunctionArg = FunctionScript | Mapping[str | None, FunctionScript] | ResolvedFunctions
+_SHAPE = (
+    "functions takes a list of definitions, one per item — "
+    "['function F() { T }', ...] — or a dict of database -> such a list, with "
+    "None for the database the query runs in"
+)
 
 
 def parse_functions(functions: FunctionArg | None) -> ResolvedFunctions | None:
@@ -82,46 +91,38 @@ def parse_functions(functions: FunctionArg | None) -> ResolvedFunctions | None:
     """
     if functions is None:
         return None
-    if isinstance(functions, (str, list, tuple)):
-        return {None: _parse_script(functions, None)}
-    if not isinstance(functions, Mapping):
-        raise TypeError(
-            "functions must be a string of `.create-or-alter function` commands, a "
-            f"list of them, or a dict of database -> those; got {type(functions).__name__}"
-        )
-    out: ResolvedFunctions = {}
-    for database, definitions in functions.items():
-        if database is not None and (not isinstance(database, str) or not database):
-            raise TypeError(
-                f"functions: a database must be a non-empty str, or None for the "
-                f"current one; got {database!r}"
-            )
-        if isinstance(definitions, Mapping):
-            # Already parsed — accepted as-is, which makes this idempotent.
-            parsed = dict(definitions)
-            if not all(isinstance(f, StoredFunction) for f in parsed.values()):
+    if isinstance(functions, Mapping):
+        out: ResolvedFunctions = {}
+        for database, definitions in functions.items():
+            if database is not None and (not isinstance(database, str) or not database):
                 raise TypeError(
-                    f"functions[{database!r}]: expected command text, got a mapping"
+                    "functions: a database must be a non-empty str, or None for the "
+                    f"one the query runs in; got {database!r}"
                 )
-            out[database] = parsed
-        else:
-            out[database] = _parse_script(definitions, database)
-    return out
+            out[database] = _parse_definitions(definitions, database)
+        return out
+    return {None: _parse_definitions(functions, None)}
 
 
-def _parse_script(definitions: FunctionScript, database: str | None) -> dict[str, StoredFunction]:
+def _parse_definitions(definitions: object, database: str | None) -> dict[str, StoredFunction]:
+    where = f"functions[{database!r}]" if database is not None else "functions"
+    if isinstance(definitions, Mapping):
+        # Already parsed — accepted as-is, which makes this idempotent.
+        parsed = dict(definitions)
+        if not all(isinstance(f, StoredFunction) for f in parsed.values()):
+            raise TypeError(f"{where}: expected a list of definitions, got a mapping")
+        return parsed
     if isinstance(definitions, str):
-        texts = _split_commands(definitions)
-    elif isinstance(definitions, (list, tuple)):
-        texts = [c for d in definitions for c in _split_commands(_expect_str(d))]
-    else:
-        raise TypeError(
-            "functions: expected command text or a list of it, got "
-            f"{type(definitions).__name__}"
-        )
+        # Refused rather than iterated: a string is a sequence of one-character
+        # strings, and "not a function definition: 'f'" would say nothing useful.
+        raise TypeError(f"{_SHAPE}; got a str — wrap it in a list: [{definitions[:40]!r}…]")
+    if not isinstance(definitions, (list, tuple)):
+        raise TypeError(f"{_SHAPE}; got {type(definitions).__name__}")
     out: dict[str, StoredFunction] = {}
-    for text in texts:
-        function = _parse_command(text, database)
+    for text in definitions:
+        if not isinstance(text, str):
+            raise TypeError(f"{where}: a definition is a str, got {type(text).__name__}")
+        function = _parse_definition(text, database)
         if function.name in out:
             raise ValueError(
                 f"function {function.name!r} is defined twice"
@@ -132,65 +133,68 @@ def _parse_script(definitions: FunctionScript, database: str | None) -> dict[str
     return out
 
 
-def _expect_str(value: object) -> str:
-    if not isinstance(value, str):
-        raise TypeError(f"functions: expected a command string, got {type(value).__name__}")
-    return value
-
-
-#: A line that starts a control command. Specific verbs rather than any leading
-#: dot, because a function body is KQL and a path expression may continue on a
-#: line of its own — `.field` — where no command verb can.
-_COMMAND_START = re.compile(
-    r"^\s*\.(create-or-alter|create-merge|create|alter-merge|alter|drop|add|show|"
-    r"set-or-append|set-or-replace|set|append|delete|ingest|execute)\b",
-    re.IGNORECASE,
+#: Where a definition starts: `function`, or the whole exported command.
+_DEFINE = re.compile(
+    r"\s*(?:\.(?:create-or-alter|create|alter)\s+)?function\b", re.IGNORECASE
 )
+_DEFINITION_LINE = re.compile(
+    r"^\s*(?:\.(?:create-or-alter|create|alter)\s+)?function\b", re.IGNORECASE
+)
+#: Any other command, which a file of definitions may not hold.
+_COMMAND_LINE = re.compile(r"^\s*\.[A-Za-z]")
 _COMMENT_LINE = re.compile(r"^\s*(//.*)?$")
 
 
-def _split_commands(text: str) -> list[str]:
-    """One command per chunk: each starts on a line with a command verb.
+def split_definitions(text: str) -> list[str]:
+    """A file of definitions, one per item: what ``serve --functions FILE`` reads.
 
-    Not on blank lines, as a database script is split: a function body may hold
-    one. Comment lines outside a command are dropped; inside one they are the
-    body's, and the parser reads them.
+    Each starts on a line of its own with `function` (or the exported
+    `.create-or-alter function`). Not split on blank lines, as a database script
+    is: a function body may hold one. Comment lines outside a definition are
+    dropped; inside one they are the body's, and the parser reads them.
     """
     chunks: list[list[str]] = []
     for line in text.splitlines():
-        if _COMMAND_START.match(line):
+        if _DEFINITION_LINE.match(line):
             chunks.append([line])
+        elif _COMMAND_LINE.match(line) or (not chunks and not _COMMENT_LINE.match(line)):
+            raise ValueError(
+                f"functions: {line.strip()!r} is not a function definition; a file of "
+                "them holds `function Name(params) { body }` items only"
+            )
         elif chunks:
             chunks[-1].append(line)
-        elif not _COMMENT_LINE.match(line):
-            raise ValueError(
-                f"functions: expected a `.create-or-alter function` command, got {line.strip()!r}"
-            )
     out = []
     for lines in chunks:
         while lines and _COMMENT_LINE.match(lines[-1]):
             lines.pop()
         out.append("\n".join(lines))
     if not out:
-        raise ValueError("functions: no `.create-or-alter function` command found")
+        raise ValueError("functions: no `function Name(params) { body }` definition found")
     return out
 
 
-_DEFINE = re.compile(r"\s*\.(create-or-alter|create|alter)\s+function\b", re.IGNORECASE)
 _NAME = re.compile(
     r"\s*(\[\s*(?:'(?:[^'\\]|\\.)*'|\"(?:[^\"\\]|\\.)*\")\s*\]|[A-Za-z_][A-Za-z0-9_]*)"
 )
 _PROPERTIES = frozenset({"docstring", "folder", "skipvalidation", "view"})
 
 
-def _parse_command(text: str, database: str | None) -> StoredFunction:
+def _without_leading_comments(text: str) -> str:
+    lines = text.splitlines()
+    while lines and _COMMENT_LINE.match(lines[0]):
+        lines.pop(0)
+    return "\n".join(lines)
+
+
+def _parse_definition(text: str, database: str | None) -> StoredFunction:
+    text = _without_leading_comments(text)
     head = _DEFINE.match(text)
     if head is None:
-        first = text.strip().splitlines()[0]
+        first = (text.strip().splitlines() or [""])[0]
         raise ValueError(
-            f"functions: {first!r} is not a function definition. functions= takes "
-            "`.create-or-alter function Name(params) { body }` commands — the "
-            "function lines of `.show database D schema as csl script`"
+            f"functions: {first!r} is not a function definition; expected "
+            "`function Name(params) { body }`"
         )
     rest = text[head.end():]
     properties: dict[str, str] = {}
@@ -226,6 +230,12 @@ def _parse_declaration(
     # The newline before `;` keeps a trailing `// comment` on the brace's line
     # from swallowing it.
     wrapper = f"let {name_text} = {after}\n;\nprint 0"
+    later = [line for line in text.splitlines()[1:] if _DEFINITION_LINE.match(line)]
+    if later:
+        raise ValueError(
+            f"function {name_text}: one definition per item — {later[0].strip()!r} "
+            "starts another; give it an item of its own"
+        )
     try:
         tree = parse(wrapper).tree
     except KqlError as exc:
@@ -457,7 +467,10 @@ def set_functions(functions: FunctionArg | None) -> None:
 
     Meant for a test fixture or start-up::
 
-        duckdb_kql.set_functions(Path("schema.csl").read_text())
+        duckdb_kql.set_functions([
+            "function ReadEvents() { Events }",
+            "function Above(x:long = 5) { Events | where Value > x }",
+        ])
 
     ``None`` clears it. **Process-wide, not thread-local**, like
     :func:`duckdb_kql.set_entity_groups`; :func:`get_functions` exists so a

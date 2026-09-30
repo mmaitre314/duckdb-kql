@@ -1246,7 +1246,7 @@ def _unknown_function(node: Any, name: str, database: str | None) -> KqlUnsuppor
             f"translate/functions.py), and no stored function by that name is "
             f"registered{place}. If it is a stored function, it lives in the "
             "database, so register its definition with functions="
-            f"[\".create-or-alter function {name}(...) {{ ... }}\"]"
+            f"[\"function {name}(...) {{ ... }}\"]"
             + (f"; did you mean {near[0]!r}? names are case-sensitive" if near else "")
             + (f"; registered: {known}" if known else "")
         ),

@@ -462,15 +462,21 @@ _DATABASE_PREFIX = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.+)$")
 
 
 def _read_functions(values: list[str]) -> dict[str | None, list[str]] | None:
-    """``--functions [DATABASE=]FILE`` arguments, read and grouped by database."""
+    """``--functions [DATABASE=]FILE`` arguments, read and grouped by database.
+
+    A file holds definitions one after another, each starting on a line with
+    `function` — the items `set_functions` takes as a list, in a file.
+    """
     if not values:
         return None
+    from .stored_functions import parse_functions, split_definitions
+
     out: dict[str | None, list[str]] = {}
     for value in values:
         prefixed = _DATABASE_PREFIX.match(value)
         database, path = (prefixed.group(1), prefixed.group(2)) if prefixed else (None, value)
-        out.setdefault(database, []).append(Path(path).read_text(encoding="utf-8"))
-    from .stored_functions import parse_functions
+        text = Path(path).read_text(encoding="utf-8")
+        out.setdefault(database, []).extend(split_definitions(text))
 
     parse_functions(out)  # a bad definition stops here, naming the flag
     return out
@@ -696,9 +702,9 @@ def _parser() -> argparse.ArgumentParser:
         metavar="[DATABASE=]FILE",
         action="append",
         help=(
-            "a file of stored function definitions, as Kusto exports them — "
-            ".create-or-alter function Name(params) { body } — so queries "
-            "calling Name() resolve here. Repeatable; DATABASE= registers the "
+            "a file of stored function definitions, one after another — "
+            "function Name(params) { body } — so queries calling Name() "
+            "resolve here. Repeatable; DATABASE= registers the "
             "file's functions for that database rather than the one queries run "
             "in. Without it a call to a stored function is refused."
         ),

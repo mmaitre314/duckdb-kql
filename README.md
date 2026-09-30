@@ -156,6 +156,25 @@ duckdb_kql.query(con, '''
 ''')
 ```
 
+## Stored functions
+
+Register stored functions to run queries calling them against local tables.
+
+```python
+duckdb_kql.set_functions([
+    'function with (folder = "Tests", docstring = "Reads it") ReadEvents() { Events }',
+    'function EventsAbove(x:long = 5) { Events | where Value > x }',
+])
+
+duckdb_kql.query(con, '''
+    ReadEvents()
+    | join kind=inner (EventsAbove(10)) on Value
+    | summarize Total = sum(Value)
+''')
+```
+
+Pass `{None: [...], 'Sales': [...]}` to register functions for other attached databases, called as `database('Sales').F()`.
+
 ## Coverage
 
 Correctness measured against the real KQL engine (the [Kusto Emulator](https://learn.microsoft.com/en-us/azure/data-explorer/kusto-emulator-overview)).

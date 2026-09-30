@@ -215,12 +215,11 @@ def to_sql(
         entity_groups: what entities a **named** entity group contains, for
             `macro-expand MyGroup as s (...)`. Inline and `let`-bound groups
             need no mapping — their entities are in the query text.
-        functions: the stored functions a query may call, as Kusto exports
-            them — ``".create-or-alter function ReadEvents() { Events }"``, a
-            script of several, a list, or ``{"Sales": ..., None: ...}`` keyed by
-            database (None for the one the query runs in). Omitted, the
-            :func:`set_functions` default applies; an unregistered call is
-            refused. See ``docs/stored-functions-proposal.md``.
+        functions: the stored functions a query may call, as a list of
+            definitions — ``["function ReadEvents() { Events }"]`` — or a dict
+            of database -> such a list, with None for the database the query
+            runs in. Omitted, the :func:`set_functions` default applies; an
+            unregistered call is refused. See ``docs/stored-functions-proposal.md``.
         clusters: what local database stands in for each Kusto cluster, as
             ``{("cluster", "kusto_db"): "duckdb_db"}`` or the nested
             ``{"cluster": {"kusto_db": "duckdb_db"}}``. Omitted, `cluster(...)`

@@ -357,9 +357,9 @@ _FUNCTION_COMMAND = re.compile(
 #: The management commands for functions are out of scope (see
 #: docs/stored-functions-proposal.md §7); the refusal says what to use.
 FUNCTION_COMMAND_HINT = (
-    "stored functions are registered, not created: pass the same "
-    "`.create-or-alter function` text as functions= (duckdb_kql.set_functions, "
-    "duckdb_kql.kql(..., functions=...), KustoClient(functions=...), or "
+    "stored functions are registered, not created: pass the definition as an "
+    "item of functions=['function Name(params) { body }'] (duckdb_kql.set_functions, "
+    "duckdb_kql.kql(..., functions=[...]), KustoClient(functions=[...]), or "
     "`duckdb-kql serve --functions FILE`); the management commands themselves "
     "would need somewhere in the database to keep them"
 )

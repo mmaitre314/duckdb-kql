@@ -231,24 +231,32 @@ replaces the global rather than merging, exactly as `clusters=` does. A
 `functions` registers **stored functions**, so a query calling
 `ReadEvents()` runs unchanged against local tables. A stored function is
 database-side state and there is no database here to hold it, so it is
-supplied — in the form Kusto exports it, which `.show database D schema as csl
-script` prints one per line:
+supplied, as a list of definitions — one per item, `function Name(params) {
+body }`:
 
 ```python
-duckdb_kql.kql(
-    con,
-    "ReadEvents() | summarize Total = sum(Value)",
-    functions=".create-or-alter function ReadEvents() { Events }",
-)
+duckdb_kql.set_functions([
+    'function with (folder = "Tests", docstring = "Reads it") ReadEvents() { Events }',
+    'function Above(x:long = 5) { Events | where Value > x }',
+])
+
+duckdb_kql.kql(con, "ReadEvents() | summarize Total = sum(Value)")
+duckdb_kql.kql(con, "Above(10) | count")
 ```
 
-It takes one command, a string of several (one per command line, so the
-function lines of an exported script paste across as they are), a list, or a
-mapping of database name to those — `{None: ..., "Sales": ...}`, where `None`
-is the database the query runs in and `database('Sales').F()` calls Sales's
-`F` against Sales's tables. Set it once with `duckdb_kql.set_functions(...)`;
-as with the others, a per-call argument replaces it, and `{}` means none.
-Definitions are checked when registered, so a bad one fails at that line.
+Two shapes, as `set_entity_groups` takes collections:
+
+| Shape | Means |
+|---|---|
+| `["function F() { T }", ...]` | Definitions for the database the query runs in. |
+| `{None: [...], "Sales": [...]}` | Definitions per database. `None` is the database the query runs in; `database('Sales').F()` calls Sales's `F`, against Sales's tables. |
+
+A bare string is refused rather than read a character at a time — wrap it in a
+list. An item may keep the `.create-or-alter` verb, so the function lines of
+`.show database D schema as csl script` paste in as they are. Pass the same
+shapes as `functions=` to a single call, where they replace the
+`set_functions` default rather than merging (`[]` means none). Definitions are
+checked when registered, so a bad one fails at that line.
 
 A call is expanded where it is written, as Kusto expands it (TRANSLATION.md
 R24): a caller's `let` of a name the body reads is the one the body sees, and a

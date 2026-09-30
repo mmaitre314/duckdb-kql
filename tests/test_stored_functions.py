@@ -25,25 +25,19 @@ from duckdb_kql.errors import KqlSchemaError, KqlUnsupportedError
 
 duckdb = pytest.importorskip("duckdb")
 
-READ = ".create-or-alter function ReadEvents() { Events }"
+READ = "function ReadEvents() { Events }"
 
-#: The first line is the export form, as `.show database D schema as csl script`
-#: prints it — one line, which is why it is assembled rather than written out.
-EXPORTED = (
-    '.create-or-alter function with (folder = "Tests", docstring = "Reads it", '
-    'skipvalidation = "true") FpF() { FpT }'
-)
-
-DEFINITIONS = EXPORTED + """
-
-.create-or-alter function FpAbove(x:long) { FpT | where Value > x }
-.create-or-alter function FpDef(x:long = 5) { FpT | where Value > x }
-.create-or-alter function FpLets() { let k = 5; FpT | where Value > k }
-.create-or-alter function FpP(Value:long) { FpT | extend k = Value }
-.create-or-alter function FpQ(x:long) { FpT | extend k = x }
-.create-or-alter function FpH() { FpF() | count }
-.create-or-alter function FpSame() { print y = 2 }
-"""
+DEFINITIONS = [
+    'function with (folder = "Tests", docstring = "Reads it", skipvalidation = "true") '
+    "FpF() { FpT }",
+    "function FpAbove(x:long) { FpT | where Value > x }",
+    "function FpDef(x:long = 5) { FpT | where Value > x }",
+    "function FpLets() { let k = 5; FpT | where Value > k }",
+    "function FpP(Value:long) { FpT | extend k = Value }",
+    "function FpQ(x:long) { FpT | extend k = x }",
+    "function FpH() { FpF() | count }",
+    "function FpSame() { print y = 2 }",
+]
 
 
 @pytest.fixture
@@ -75,7 +69,7 @@ def test_the_reported_reproduction_through_the_client() -> None:
     with duckdb_kql.connect() as connection:
         connection.execute("CREATE TABLE Events (Value BIGINT)")
         connection.execute("INSERT INTO Events VALUES (7)")
-        with KustoClient(connection, functions=READ) as client:
+        with KustoClient(connection, functions=[READ]) as client:
             response = client.execute(None, "ReadEvents() | summarize Total = sum(Value)")
             assert response.primary_results[0][0]["Total"] == 7
 
@@ -86,7 +80,7 @@ def test_the_management_command_says_what_to_use_instead() -> None:
 
     with KustoClient(duckdb_kql.connect()) as client:
         with pytest.raises(KustoUnsupportedError, match="functions="):
-            client.execute(None, READ)
+            client.execute(None, ".create-or-alter " + READ)
 
 
 # ---------------------------------------------------------------------------
@@ -122,14 +116,14 @@ def test_a_callers_scalar_reaches_only_a_name_the_body_does_not_bind(con) -> Non
     that never sees the database behaves. The first version shielded bodies from
     the caller's scalars, on the reasoning that a validated body cannot read
     one; the emulator answers 5 here, and that version raised."""
-    kx = ".create-or-alter function with (skipvalidation = 'true') FpG() { FpT | extend k = Kx }"
+    kx = ["function with (skipvalidation = 'true') FpG() { FpT | extend k = Kx }"]
     assert _rows(con, "let Kx = 5; FpG()", kx) == [(7, 5)]
     # ... but a parameter, and the body's own `let`, bind over the caller's:
     # Kusto 3 and 1, whatever the caller says.
     assert _rows(con, "let x = 100; FpQ(3)") == [(7, 3)]
     assert _one(con, "let k = 100; FpLets() | count") == 1
     # ... and a column over all of them (R23): Kusto 7
-    col = ".create-or-alter function FpC() { FpT | extend k = Value }"
+    col = ["function FpC() { FpT | extend k = Value }"]
     assert _rows(con, "let Value = 5; FpC()", col) == [(7, 7)]
 
 
@@ -179,13 +173,13 @@ def test_a_body_may_bind_a_table_of_its_own(con) -> None:
     """A tabular `let` inside a body is scoped to it by the reserved CTE names
     (R7), and a join still learns the function's columns through it — which
     failed until `output_columns` read a query's own bindings."""
-    local = ".create-or-alter function Loc() { let t = FpT | where Value > 0; t }"
+    local = ["function Loc() { let t = FpT | where Value > 0; t }"]
     assert _rows(con, "FpT | join kind=inner (Loc()) on Value | project Value1", local) == [(7,)]
     assert _rows(con, "let t = datatable(Value:long)[100]; Loc() | count", local) == [(1,)]
 
 
 def test_other_places_a_table_can_be(con, two_databases) -> None:
-    words = ".create-or-alter function Words() { datatable(w:string)['a'] }"
+    words = ["function Words() { datatable(w:string)['a'] }"]
     kql = "datatable(s:string)['a b', 'c'] | where s has_any (Words()) | count"
     assert _rows(con, kql, words) == [(1,)]
     assert _rows(con, "union database('FpOther').FpF(), FpT | count", two_databases) == [(2,)]
@@ -205,7 +199,7 @@ def test_withsource_labels_a_call_as_kusto_does(con, body, label) -> None:
     """Measured: a call is labelled with the table it only aliases, else
     positionally — the same rule as a `let` alias."""
     con.execute("CREATE TABLE FpU AS SELECT 8::BIGINT AS Value")
-    functions = [f".create-or-alter function G() {body}", ".create-or-alter function FpF() { FpT }"]
+    functions = [f"function G() {body}", "function FpF() { FpT }"]
     rows = _rows(con, "union withsource=Src G(), FpU | project Src", functions)
     assert {r[0] for r in rows} == {label, "FpU"}
 
@@ -241,12 +235,12 @@ def two_databases(con):
     con.execute("CREATE TABLE FpOther.FpOnlyOther (Value BIGINT)")
     con.execute("INSERT INTO FpOther.FpOnlyOther VALUES (9)")
     return {
-        None: [".create-or-alter function FpF() { FpT }"],
+        None: ["function FpF() { FpT }"],
         "FpOther": [
-            ".create-or-alter function FpF() { FpT }",
-            ".create-or-alter function FpReadOnlyOther() { FpOnlyOther }",
-            ".create-or-alter function FpInner() { FpT | where Value > 0 }",
-            ".create-or-alter function FpOuter() { FpInner() }",
+            "function FpF() { FpT }",
+            "function FpReadOnlyOther() { FpOnlyOther }",
+            "function FpInner() { FpT | where Value > 0 }",
+            "function FpOuter() { FpInner() }",
         ],
     }
 
@@ -318,10 +312,7 @@ def test_a_bare_name_with_required_parameters_is_not_read_as_the_table(con) -> N
 def test_recursion_is_refused_naming_the_cycle(con) -> None:
     """Kusto stores a cycle only with skipvalidation and refuses the call:
     SEM0057, "Recursive call to 'FpA' … is not allowed"."""
-    cycle = (
-        ".create-or-alter function FpA() { FpB() }\n"
-        ".create-or-alter function FpB() { FpA() | count }"
-    )
+    cycle = ["function FpA() { FpB() }", "function FpB() { FpA() | count }"]
     with pytest.raises(KqlUnsupportedError, match="FpA → FpB → FpA"):
         _rows(con, "FpA()", cycle)
 
@@ -329,14 +320,15 @@ def test_recursion_is_refused_naming_the_cycle(con) -> None:
 @pytest.mark.parametrize(
     ("definition", "match"),
     [
-        (".create-or-alter function strlen() { T }", "SEM0515"),
-        (".create-or-alter function F(T:(x:long)) { T }", "tabular parameter"),
-        (".create-or-alter function F(x:long) { x + 1 }", "scalar stored function"),
-        (".create-or-alter function with (view = true) F() { T }", "view"),
-        (".create-or-alter function with (colour = 'red') F() { T }", "unknown property"),
-        (".create-or-alter function F() { T | }", "does not parse"),
-        (".create-merge table T (x:long)", "not a function definition"),
-        (".create-or-alter function F() { T }\n.create-or-alter function F() { U }", "twice"),
+        (["function strlen() { T }"], "SEM0515"),
+        (["function F(T:(x:long)) { T }"], "tabular parameter"),
+        (["function F(x:long) { x + 1 }"], "scalar stored function"),
+        (["function with (view = true) F() { T }"], "view"),
+        (["function with (colour = 'red') F() { T }"], "unknown property"),
+        (["function F() { T | }"], "does not parse"),
+        (["function F() { T }\nfunction G() { U }"], "one definition per item"),
+        ([".create-merge table T (x:long)"], "not a function definition"),
+        (["function F() { T }", "function F() { U }"], "twice"),
     ],
 )
 def test_a_bad_definition_fails_where_it_is_registered(definition, match) -> None:
@@ -353,9 +345,9 @@ def test_a_bad_definition_fails_where_it_is_registered(definition, match) -> Non
 def test_a_calls_registry_replaces_the_default_and_empty_means_none(con) -> None:
     previous = duckdb_kql.get_functions()
     try:
-        duckdb_kql.set_functions(".create-or-alter function FpG() { print v = 'default' }")
+        duckdb_kql.set_functions(["function FpG() { print v = 'default' }"])
         assert duckdb_kql.kql(con, "FpG()").fetchall() == [("default",)]
-        own = ".create-or-alter function FpG() { print v = 'own' }"
+        own = ["function FpG() { print v = 'own' }"]
         assert duckdb_kql.kql(con, "FpG()", functions=own).fetchall() == [("own",)]
         with pytest.raises(KqlUnsupportedError, match="FpG"):
             duckdb_kql.kql(con, "FpG()", functions={})
@@ -369,8 +361,8 @@ def test_a_calls_registry_replaces_the_default_and_empty_means_none(con) -> None
 def test_two_clients_on_one_connection_keep_their_own(con) -> None:
     from duckdb_kql.kusto import KustoClient
 
-    a = KustoClient(con, functions=".create-or-alter function FpG() { print v = 'a' }")
-    b = KustoClient(con, functions=".create-or-alter function FpG() { print v = 'b' }")
+    a = KustoClient(con, functions=["function FpG() { print v = 'a' }"])
+    b = KustoClient(con, functions=["function FpG() { print v = 'b' }"])
     assert a.execute(None, "FpG()").primary_results[0][0]["v"] == "a"
     assert b.execute(None, "FpG()").primary_results[0][0]["v"] == "b"
     assert a.execute(None, ".show functions").primary_results[0][0]["Name"] == "FpG"
@@ -384,27 +376,44 @@ def test_show_functions_reports_the_registry(con) -> None:
     ]
 
 
-def test_the_export_form_pastes_across_verbatim() -> None:
-    """What `.show database D schema as csl script` emits, measured, with the
-    blank line and comments a hand-edited script collects."""
+@pytest.mark.parametrize(
+    "shape",
+    [
+        "function F() { T }",               # a str is a sequence of characters
+        {"Sales": "function F() { T }"},     # ... in a dict, too
+        42,
+    ],
+)
+def test_the_registry_is_a_collection(shape) -> None:
+    """A list of definitions, or a dict of database -> list — the shapes
+    `set_entity_groups` takes. A bare string is refused with a pointer, rather
+    than iterated a character at a time."""
+    with pytest.raises(TypeError, match="list of definitions"):
+        duckdb_kql.set_functions(shape)
+    assert duckdb_kql.get_functions() is None
+
+
+def test_an_exported_line_is_accepted_as_it_is() -> None:
+    """What `.show database D schema as csl script` emits, measured — the
+    `.create-or-alter` verb included — beside the plain form, and an item with
+    the blank line and comments a hand-edited definition collects."""
     from duckdb_kql.stored_functions import parse_functions
 
-    parsed = parse_functions(
-        "// exported\n"
+    parsed = parse_functions((
         '.create-or-alter function with (folder = "Tests", docstring = "Reads it", '
-        'skipvalidation = "true") FpF(x:long=0) { FpT | where Value > x }\n'
-        "\n"
-        ".create-or-alter function Multi() {\n    FpT\n\n    | count // rows\n}\n"
-    )
+        'skipvalidation = "true") FpF(x:long=0) { FpT | where Value > x }',
+        "// counts\nfunction Multi() {\n    FpT\n\n    | count // rows\n}",
+    ))
     assert parsed is not None
     assert sorted(parsed[None]) == ["FpF", "Multi"]
     assert parsed[None]["FpF"].parameters == "(x:long=0)"
+    assert parsed[None]["FpF"].folder == "Tests"
 
 
 def test_registration_evaluates_no_python_and_calls_nothing_remote() -> None:
     """A definition is KQL text; translating a call needs no connection at all,
     and a `cluster()` inside a body resolves only through the map."""
-    functions = ".create-or-alter function R() { cluster('prod').database('d').T }"
+    functions = ["function R() { cluster('prod').database('d').T }"]
     with pytest.raises(KqlSchemaError, match="cluster"):
         duckdb_kql.to_sql("R() | count", functions=functions)
     sql = duckdb_kql.to_sql(
@@ -416,12 +425,17 @@ def test_registration_evaluates_no_python_and_calls_nothing_remote() -> None:
 def test_the_server_takes_them_from_a_file(tmp_path) -> None:
     from duckdb_kql.cli import _read_functions
 
-    (tmp_path / "current.csl").write_text(READ, encoding="utf-8")
-    (tmp_path / "sales.csl").write_text(
-        ".create-or-alter function Orders() { T }", encoding="utf-8"
+    # A file holds the items one after another, each starting its own line.
+    (tmp_path / "current.kql").write_text(
+        "// fixtures\n" + READ + "\n\nfunction Recent() {\n    Events\n\n    | take 1\n}\n",
+        encoding="utf-8",
     )
-    read = _read_functions([str(tmp_path / "current.csl"), f"Sales={tmp_path / 'sales.csl'}"])
-    assert read == {None: [READ], "Sales": [".create-or-alter function Orders() { T }"]}
-    (tmp_path / "bad.csl").write_text(".create-or-alter function F(x:long) { x }")
+    (tmp_path / "sales.kql").write_text("function Orders() { T }", encoding="utf-8")
+    read = _read_functions([str(tmp_path / "current.kql"), f"Sales={tmp_path / 'sales.kql'}"])
+    assert read == {
+        None: [READ, "function Recent() {\n    Events\n\n    | take 1\n}"],
+        "Sales": ["function Orders() { T }"],
+    }
+    (tmp_path / "bad.kql").write_text("function F(x:long) { x }")
     with pytest.raises(ValueError, match="scalar"):
-        _read_functions([str(tmp_path / "bad.csl")])
+        _read_functions([str(tmp_path / "bad.kql")])

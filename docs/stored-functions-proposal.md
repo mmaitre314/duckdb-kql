@@ -24,7 +24,7 @@ halves of Kusto's name resolution with machinery that already exists.
 duckdb_kql.kql(
     con,
     "ReadEvents() | summarize Total = sum(Value)",
-    functions=".create-or-alter function ReadEvents() { Events }",
+    functions=["function ReadEvents() { Events }"],
 )
 ```
 
@@ -173,20 +173,26 @@ query `duckdb-kql translate` writes, for a clash almost none of them have.
 `functions=` beside `entity_groups=`, with the same shape of defaults:
 
 ```python
-duckdb_kql.set_functions(prod_schema_script)   # process default, for a fixture
-duckdb_kql.kql(con, query, functions={...})    # a call's map REPLACES it; {} is none
-KustoClient(con, functions=...)                # per client
-duckdb-kql serve --functions schema.csl        # per server; --functions Sales=sales.csl
+duckdb_kql.set_functions([...])                 # process default, for a fixture
+duckdb_kql.kql(con, query, functions=[...])     # a call's list REPLACES it; [] is none
+KustoClient(con, functions=[...])               # per client
+duckdb-kql serve --functions schema.kql         # per server; --functions Sales=sales.kql
 ```
 
-- An entry is **Kusto's own export form**, verbatim: `.create-or-alter function
-  [with (…)] Name(params) { body }` (`.create function` is accepted too). One
-  string may hold several, each starting on a line of its own — so the function
-  lines of `.show database D schema as csl script` paste across unchanged, the
-  same argument that made entity-group entries KQL text. *Not split on blank
-  lines, as a database script is: a function body may hold one.*
-- A string or list means the current database; a mapping keys them by database,
-  `None` for the current one.
+- **A collection, as `set_clusters` and `set_entity_groups` take**: a list of
+  definitions for the database the query runs in, or a dict of database -> such
+  a list, `None` for that database. A bare string is refused with a pointer to
+  wrap it. *The first version took Kusto's export form as one string — a script
+  of `.create-or-alter function` commands — and was changed before release for
+  consistency with the other two setters.*
+- An item is **one definition**, Kusto's own without its command verb:
+  `function [with (…)] Name(params) { body }`. The verb is accepted too, so the
+  function lines of `.show database D schema as csl script` paste in unchanged,
+  the same argument that made entity-group entries KQL text. Two definitions in
+  one item are refused, naming the second.
+- A file for `serve --functions` holds the items one after another, each
+  starting on a line of its own — not split on blank lines, as a database
+  script is, since a function body may hold one.
 - Parsed and checked at registration. `folder`, `docstring` and
   `skipvalidation` are accepted; `view = true` is refused (§6); a name defined
   twice for one database is refused.

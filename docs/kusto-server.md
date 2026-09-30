@@ -89,7 +89,7 @@ duckdb-kql serve [DATABASE] [--init SCRIPT] [-p PORT] [--allow-origin ORIGIN]
 | `DATABASE` | DuckDB database file to serve. Omit for an empty in-memory one. |
 | `--allow-write` | Permit ingestion commands to modify the database. **Off by default.** |
 | `--cluster-map` | JSON mapping Kusto clusters to local databases, for queries using `cluster()`. |
-| `--functions` | `[DATABASE=]FILE` of stored function definitions, as Kusto exports them (`.create-or-alter function F() { … }`). Repeatable; `DATABASE=` registers them for that database. See below. |
+| `--functions` | `[DATABASE=]FILE` of stored function definitions, `function F() { … }`, one after another. Repeatable; `DATABASE=` registers them for that database. See below. |
 | `--init` | A `.sql` script to run before serving. See below. |
 | `-p, --port` | TCP port (default `31415`). |
 | `--allow-origin` | Allow a browser origin. Repeatable; replaces the default list. |
@@ -182,13 +182,26 @@ values are the names the databases are attached under, which `.show databases`
 lists.
 
 A **stored function** is database-side state too, so a query calling one needs
-its definition supplied. `--functions` takes a file of them in the form Kusto
-exports — the function lines of `.show database D schema as csl script` paste
-in as they are:
+its definition supplied. `--functions` takes a file of them — the items
+`set_functions` takes as a list, one after another, each starting on a line of
+its own:
+
+```kusto
+// schema.kql
+function ReadEvents() { Events }
+
+function Recent(since:timespan = 1d) {
+    Events
+    | where Timestamp > ago(since)
+}
+```
 
 ```bash
-duckdb-kql serve data.duckdb --functions schema.csl --functions Sales=sales.csl
+duckdb-kql serve data.duckdb --functions schema.kql --functions Sales=sales.kql
 ```
+
+The function lines of `.show database D schema as csl script`, which keep the
+`.create-or-alter` verb, are accepted as they are.
 
 A query calling an unregistered function is refused rather than read as a
 table, `.show functions` lists what is registered, and a bad definition stops
