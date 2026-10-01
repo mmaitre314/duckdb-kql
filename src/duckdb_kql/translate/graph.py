@@ -50,6 +50,12 @@ class _Graph:
     #: The `partitioned-by` column, or None.
     partition: str | None
     degrees: bool = False
+    #: The edge columns the consumer reads, packed into each edge's `props`;
+    #: `edge_cols` stays the full list, which is what names are checked against.
+    edge_fields: list[str] | None = None
+    #: Whether the nodes are numbered (`ix`): only an operator that can observe
+    #: the order needs it, and the numbering is a sort of every node.
+    numbered: bool = True
 
     @property
     def partitioned(self) -> bool:
@@ -235,24 +241,41 @@ def render(source: ir.GraphSource, schema: Schema | None) -> str:
     tables = [(t, query_columns(t.query, schema)) for t in graph.nodes]
     _check_columns(graph, edge_cols, tables)
     props = _node_properties(graph, schema)
-    base_props = [p for p in props if p not in {m.name for m in graph.components}]
-    g = _Graph(_prefix(), edge_cols, props, graph.partition)
     consumer = source.consumer
+    edge_reads, node_reads = _reads(consumer)
+    base_props = [
+        p for p in props
+        if p not in {m.name for m in graph.components} and (node_reads is None or p in node_reads)
+    ]
+    g = _Graph(_prefix(), edge_cols, props, graph.partition)
+    g.edge_fields = [c for c in edge_cols if edge_reads is None or c in edge_reads]
+    g.numbered = bool(graph.components) or (
+        isinstance(consumer, ir.GraphToTable) and consumer.kind == "nodes"
+    )
     if isinstance(consumer, ir.GraphMatch):
         g.degrees = _uses_degrees(consumer)
 
-    ctes = [f"{g.name('ed')} AS MATERIALIZED ({to_sql(graph.edges, schema)})"]
-    for i, (table, _) in enumerate(tables):
-        ctes.append(f"{g.name(f't{i}')} AS MATERIALIZED ({to_sql(table.query, schema)})")
+    # The edges are read once, by the numbered relation below, which is the
+    # copy that holds still; the guard's probes evaluate no row of them.
+    ctes = [f"{g.name('ed')} AS NOT MATERIALIZED ({to_sql(graph.edges, schema)})"]
+    for i, (table, cols) in enumerate(tables):
+        kept = _node_columns(graph, table, cols, tables, base_props)
+        ctes.append(
+            f"{g.name(f't{i}')} AS MATERIALIZED (SELECT {', '.join(map(_quote, kept))} "
+            f"FROM ({to_sql(table.query, schema)}) x)"
+        )
     ctes.append(f"{g.name('chk')} AS MATERIALIZED ({_guard(g, graph, tables)})")
     ctes.append(f"{g.name('e')} AS MATERIALIZED ({_edges(g, graph)})")
     ctes.append(f"{g.name('nr')} AS ({_raw_nodes(g, graph, tables, base_props)})")
-    ctes.append(f"{g.name('n0')} AS MATERIALIZED ({_nodes(g)})")
-    nodes = "n0"
-    for i, marked in enumerate(graph.components):
-        ctes.extend(_components(g, nodes, i, marked, has_props=bool(base_props) or i > 0))
-        nodes = f"n{i + 1}"
-    ctes.append(f"{g.name('n')} AS MATERIALIZED (SELECT * FROM {g.name(nodes)})")
+    if g.numbered:
+        ctes.append(f"{g.name('n0')} AS MATERIALIZED ({_nodes(g)})")
+        nodes = "n0"
+        for i, marked in enumerate(graph.components):
+            ctes.extend(_components(g, nodes, i, marked, has_props=bool(base_props) or i > 0))
+            nodes = f"n{i + 1}"
+        ctes.append(f"{g.name('n')} AS MATERIALIZED (SELECT * FROM {g.name(nodes)})")
+    else:
+        ctes.append(f"{g.name('n')} AS MATERIALIZED ({_nodes(g)})")
 
     if isinstance(consumer, ir.GraphToTable):
         body = _graph_to_table(g, consumer)
@@ -303,9 +326,84 @@ def _check_columns(
             )
 
 
+def _reads(
+    consumer: ir.GraphMatch | ir.GraphToTable,
+) -> tuple[set[str] | None, set[str] | None]:
+    """The edge and node properties *consumer* can observe — None for all.
+
+    Reported: a five-hop match on a graph of 8M edges carried every column of
+    every edge, a 256-byte payload among them, through every relation it built,
+    to read one: `EdgeId`. What a relation leaves out here, nothing downstream
+    can ask for — every way of reading a property is one of these:
+
+    * a whole node, edge or path (`project a`, `p`) reads all of its kind;
+    * `a.x` reads `x` — of an edge for an edge or path variable;
+    * a name inside `map`/`all`/`any` reads it from each edge, or from each
+      inner node under `inner_nodes()`;
+    * `graph-to-table` reads every property of what it returns.
+
+    Partition keys and ids travel in their own columns, never in `props`.
+    """
+    if isinstance(consumer, ir.GraphToTable):
+        return (None, set()) if consumer.kind == "edges" else (set(), None)
+    kinds: dict[str, str] = {}
+    for pattern in consumer.patterns:
+        for node in pattern.nodes:
+            kinds[node.name] = "node"
+        for edge in pattern.edges:
+            kinds[edge.name] = "edge"
+    edges: set[str] | None = set()
+    nodes: set[str] | None = set()
+
+    def read(kind: str, name: str | None) -> None:
+        nonlocal edges, nodes
+        if kind == "node":
+            nodes = None if name is None or nodes is None else nodes | {name}
+        else:
+            edges = None if name is None or edges is None else edges | {name}
+
+    def visit(node: object, element: str | None) -> None:
+        if isinstance(node, ir.GraphVar) and node.name in kinds:
+            read(kinds[node.name], None)
+        elif isinstance(node, ir.GraphProperty) and node.var in kinds:
+            read(kinds[node.var], node.prop)
+        elif isinstance(node, ir.GraphElement) and element is not None:
+            read(element, node.name)
+        if isinstance(node, ir.GraphCall) and node.var is not None and node.body is not None:
+            visit(node.body, "node" if node.inner else "edge")
+            return
+        if dataclasses.is_dataclass(node) and not isinstance(node, (type, ir.Query)):
+            for f in dataclasses.fields(node):
+                visit(getattr(node, f.name), element)
+        elif isinstance(node, tuple):
+            for item in node:
+                visit(item, element)
+
+    visit(consumer.where, None)
+    visit(consumer.project, None)
+    return edges, nodes
+
+
+def _node_columns(
+    graph: ir.MakeGraph,
+    table: ir.NodeTable,
+    cols: list[str],
+    tables: list[tuple[ir.NodeTable, list[str]]],
+    props: list[str],
+) -> list[str]:
+    """The columns of a node table the relations read: its key, the partition,
+    the properties that are carried, and — with two tables — the columns they
+    share, whose types the guard compares."""
+    shared = set(tables[0][1]) & set(tables[1][1]) if len(tables) == 2 else set()
+    wanted = {table.key, graph.partition, *props, *shared}
+    return [c for c in cols if c in wanted]
+
+
 def _typeof(cte: str, column: str) -> str:
-    """The column's type, known even when the table is empty."""
-    return f"typeof((SELECT x.{_quote(column)} FROM {cte} x LIMIT 1))"
+    """The column's type, known even when the table is empty — and read
+    without evaluating a row: `typeof` is not folded, so `LIMIT 1` would run
+    the query under it, and a filter that is false prunes it instead."""
+    return f"typeof((SELECT x.{_quote(column)} FROM {cte} x WHERE false))"
 
 
 def _guard(g: _Graph, graph: ir.MakeGraph, tables: list[tuple[ir.NodeTable, list[str]]]) -> str:
@@ -357,10 +455,12 @@ def _edges(g: _Graph, graph: ir.MakeGraph) -> str:
     number the same row differently, and `unique_edges` would compare
     unrelated ids.
     """
-    fields = ", ".join(f"{_quote(c)} := x.{_quote(c)}" for c in g.edge_cols)
+    names = g.edge_cols if g.edge_fields is None else g.edge_fields
+    fields = ", ".join(f"{_quote(c)} := x.{_quote(c)}" for c in names)
+    props = f"struct_pack({fields})" if fields else "NULL"
     return (
         f"SELECT row_number() OVER () AS eid, x.{_quote(graph.source)} AS src, "
-        f"x.{_quote(graph.target)} AS dst{_part('x', g)}, struct_pack({fields}) AS props "
+        f"x.{_quote(graph.target)} AS dst{_part('x', g)}, {props} AS props "
         f"FROM {g.name('ed')} x, {g.name('chk')} c"
     )
 
@@ -407,10 +507,11 @@ def _raw_nodes(
             + ")"
             for j, (other, _) in enumerate(tables[:i])
         )
+        order = f", {i} AS grp, row_number() OVER () AS ord" if g.numbered else ""
         branches.append(
-            f"SELECT x.{_quote(table.key)} AS nid{_part('x', g)}, struct_pack({fields}) AS props, "
-            f"{i} AS grp, row_number() OVER () AS ord FROM {g.name(f't{i}')} x "
-            f"WHERE true{earlier} "
+            f"SELECT x.{_quote(table.key)} AS nid{_part('x', g)}, "
+            f"{f'struct_pack({fields})' if fields else 'NULL'} AS props{order} "
+            f"FROM {g.name(f't{i}')} x WHERE true{earlier} "
             f"QUALIFY row_number() OVER (PARTITION BY {partition}x.{_quote(table.key)}) = 1"
         )
     keys = {t.key for t, _ in tables}
@@ -428,11 +529,16 @@ def _raw_nodes(
         for i, (t, _) in enumerate(tables)
     )
     group = ", x.part" if g.partitioned else ""
+    part = ", part" if g.partitioned else ""
+    # First appearance: an end's position among the edges, sources first.
+    first, src_ord, dst_ord = (
+        (f", {len(tables)} AS grp, min(x.ord) AS ord", ", eid * 2 AS ord", ", eid * 2 + 1")
+        if g.numbered else ("", "", "")
+    )
     branches.append(
-        f"SELECT x.nid{', x.part' if g.partitioned else ''}, {packed} AS props, "
-        f"{len(tables)} AS grp, min(x.ord) AS ord FROM ("
-        f"SELECT src AS nid{', part' if g.partitioned else ''}, eid * 2 AS ord FROM {g.name('e')} "
-        f"UNION ALL SELECT dst{', part' if g.partitioned else ''}, eid * 2 + 1 FROM {g.name('e')}"
+        f"SELECT x.nid{', x.part' if g.partitioned else ''}, {packed} AS props{first} FROM ("
+        f"SELECT src AS nid{part}{src_ord} FROM {g.name('e')} "
+        f"UNION ALL SELECT dst{part}{dst_ord} FROM {g.name('e')}"
         f") x WHERE true{seen} GROUP BY x.nid{group}"
     )
     return "\nUNION ALL ".join(branches)
@@ -441,7 +547,9 @@ def _raw_nodes(
 def _nodes(g: _Graph) -> str:
     """Numbered by first appearance: node-table order, then edge order.
 
-    Measured: that is the order `graph-mark-components` numbers components in.
+    Measured: that is the order `graph-mark-components` numbers components in,
+    and `graph-to-table nodes` returns them in. Nothing else observes it, so
+    for anything else the nodes are not numbered at all.
     """
     part = ", part" if g.partitioned else ""
     degrees = ""
@@ -452,10 +560,8 @@ def _nodes(g: _Graph) -> str:
             f", (SELECT count(*) FROM {g.name('e')} e WHERE {_same('e.src', 'r.nid')}"
             f"{_same_part('e', 'r', g)}) AS outdeg"
         )
-    return (
-        f"SELECT nid{part}, props, row_number() OVER (ORDER BY grp, ord) AS ix{degrees} "
-        f"FROM {g.name('nr')} r"
-    )
+    ix = ", row_number() OVER (ORDER BY grp, ord) AS ix" if g.numbered else ""
+    return f"SELECT nid{part}, props{ix}{degrees} FROM {g.name('nr')} r"
 
 
 def _undirected(g: _Graph) -> str:
@@ -807,17 +913,25 @@ def _edge_item(alias: str, fields: set[str], g: _Graph) -> str:
     names = [c for c in g.edge_cols if f"props.{c}" in fields]
     if not names:
         # Read only through something with no fields of its own (`map(p, 1)`):
-        # the length is what matters, and the whole struct is the simple answer.
-        return f"{alias}.props"
+        # the length is what matters, and the id is the cheapest typed item.
+        return f"{alias}.eid"
     packed = ", ".join(f"{_quote(c)} := {alias}.props.{_quote(c)}" for c in names)
     return f"struct_pack({packed})"
 
 
-def _node_item(alias: str, fields: set[str], g: _Graph) -> str:
+def _reads_node(fields: set[str], g: _Graph) -> bool:
+    """Whether an inner node's *fields* need more than its id — the one thing
+    every step already has, as the end it grows from."""
+    return any(f.startswith("props.") and f[6:] in g.node_props for f in fields) or (
+        g.degrees and bool({"indeg", "outdeg"} & fields)
+    )
+
+
+def _node_item(alias: str, fields: set[str], g: _Graph, nid: str | None = None) -> str:
     """What one inner node contributes to a path's `inn` list — the fields of
     the node relation that are read, under the same names, so the expression
     renderer reads it as it would read the relation."""
-    parts = ["nid := " + f"{alias}.nid"]
+    parts = ["nid := " + (nid or f"{alias}.nid")]
     names = [c for c in g.node_props if f"props.{c}" in fields]
     if names:
         packed = ", ".join(f"{_quote(c)} := {alias}.props.{_quote(c)}" for c in names)
@@ -940,7 +1054,6 @@ def _path(
     edge, high, simple, cte = spec.edge, spec.high, spec.simple, spec.cte(g)
     relation = g.name("eu" if edge.direction == "any" else "e")
     near, far = ("dst", "src") if edge.direction == "in" else ("src", "dst")
-    part_e, part_n = (", e.part", ", n.part") if g.partitioned else ("", "")
     carry_edges, carry_inner = edge_fields is not None, inner_fields is not None
     edge_item = _edge_item("e", edge_fields or set(), g)
     node_item = _node_item("n", inner_fields or set(), g)
@@ -956,34 +1069,30 @@ def _path(
         f"(SELECT * FROM {g.name('n')} UNION ALL BY NAME SELECT NULL AS nid) n LIMIT 1)"
     )
 
-    def lists(zero: bool) -> str:
-        out = ""
-        if carry_edges:
-            out += f", {empty_edges if zero else f'[{edge_item}]'} AS edges"
-        if carry_inner:
-            out += f", {empty_inner} AS inn"
-        return out
+    lists = ""
+    if carry_edges:
+        lists += f", {empty_edges} AS edges"
+    if carry_inner:
+        lists += f", {empty_inner} AS inn"
 
-    def seeded(row: str, column: str) -> str:
-        if seeds is None:
-            return ""
-        part = f" AND {_same('s.part', row + '.part')}" if g.partitioned else ""
-        return f" JOIN {seeds} s ON {_same('s.nid', f'{row}.{column}')}{part}"
-
-    rows = []
-    if _bound(edge.low, "lower") == 0:
-        vis = ", [n.nid] AS vis" if simple else ""
-        rows.append(
-            f"SELECT n.nid AS st, n.nid AS en{part_n}, []::BIGINT[] AS eids{lists(True)}, "
-            f"0 AS plen{vis} FROM {g.name('n')} n{seeded('n', 'nid')}"
-        )
-    vis = f", [e.{near}, e.{far}] AS vis" if simple else ""
-    one_edge_simple = f" AND {_differ('e.' + near, 'e.' + far)}" if simple else ""
-    rows.append(
-        f"SELECT e.{near} AS st, e.{far} AS en{part_e}, [e.eid] AS eids{lists(False)}, "
-        f"1 AS plen{vis} FROM {relation} e{seeded('e', far if backward else near)} "
-        f"WHERE {high} >= 1{one_edge_simple}{edge_ok}"
-    )
+    # Every walk starts as a zero-length stub at a node — a seed when the
+    # `where` names some, every node otherwise — and each step adds one edge,
+    # the first included. Reported: anchored on its first edge instead, the
+    # recursion's working table is estimated as a cross product of the edges
+    # (a CTE has no statistics), DuckDB builds each step's hash table on the
+    # edges rather than on the walks, and a five-hop walk from one node read
+    # the 8M-edge relation into a hash table five times. Anchored on nodes,
+    # the estimate is the stubs', and the edges are probed instead. The rows
+    # are the same: each edge's start is exactly one node, so each one-edge
+    # path is one stub plus one step; the stubs are dropped by `plen >= lo`
+    # unless the range starts at zero, where they are the zero-length paths.
+    starts = seeds or g.name("n")
+    vis = ", [s.nid] AS vis" if simple else ""
+    part_s = ", s.part" if g.partitioned else ""
+    rows = [
+        f"SELECT s.nid AS st, s.nid AS en{part_s}, []::BIGINT[] AS eids{lists}, "
+        f"0 AS plen{vis} FROM {starts} s"
+    ]
 
     # The walk grows at `en` (forward) or at `st` (backward); the node passed
     # through becomes an inner node, and `step` is the edge's other end.
@@ -1002,8 +1111,17 @@ def _path(
         )
     else:
         fresh = ""
+    # The node relation holds each (partition, id) once and every edge end is
+    # in it, so joining it at the end a step grows from neither drops nor
+    # repeats a path: it is there only to read the node, when that is needed.
+    # A pushed-down `all(inner_nodes(p), …)` is rendered against `n` itself.
+    joined = bool(inner_ok) or (carry_inner and _reads_node(inner_fields or set(), g))
+    if carry_inner and not joined:
+        node_item = _node_item("n", inner_fields or set(), g, nid=f"p.{grow}")
+    node_join = f"JOIN {g.name('n')} n ON {_same('n.nid', 'p.' + grow)} " if joined else ""
     same_part = (
-        f" AND {_same('e.part', 'p.part')} AND {_same('n.part', 'p.part')}"
+        f" AND {_same('e.part', 'p.part')}"
+        + (f" AND {_same('n.part', 'p.part')}" if joined else "")
         if g.partitioned else ""
     )
     ends = f"e.{step}, p.en" if backward else f"p.st, e.{step}"
@@ -1011,15 +1129,18 @@ def _path(
     if carry_edges:
         carried += f", {extend('edges', edge_item)}"
     if carry_inner:
-        carried += f", {extend('inn', node_item)}"
+        # The node a stub's first step leaves is the path's end, not inner.
+        carried += f", CASE WHEN p.plen = 0 THEN p.inn ELSE {extend('inn', node_item)} END"
+    if inner_ok:
+        inner_ok = f" AND (p.plen = 0 OR ({inner_ok.removeprefix(' AND ')}))"
     vis = f", {extend('vis', 'e.' + step)}" if simple else ""
     step_sql = (
         f"SELECT {ends}{', p.part' if g.partitioned else ''}, {extend('eids', 'e.eid')}"
         f"{carried}, p.plen + 1{vis} "
         f"FROM {cte} p "
         f"JOIN {relation} e ON {_same('e.' + joint, 'p.' + grow)} "
-        f"JOIN {g.name('n')} n ON {_same('n.nid', 'p.' + grow)} "
-        f"WHERE p.plen >= 1 AND p.plen < {high}{fresh}{same_part}{edge_ok}{inner_ok}"
+        f"{node_join}"
+        f"WHERE p.plen < {high}{fresh}{same_part}{edge_ok}{inner_ok}"
     )
     return "\nUNION ALL ".join(rows) + "\nUNION ALL " + step_sql
 
@@ -1027,10 +1148,6 @@ def _path(
 def _has_node(inner: str, nid: str) -> str:
     """Whether the inner-node list *inner* holds the node *nid* — null-safe."""
     return f"(len(list_filter({inner}, {_ELEM} -> ({_ELEM}.nid IS NOT DISTINCT FROM {nid}))) > 0)"
-
-
-def _differ(left: str, right: str) -> str:
-    return f"{left} IS DISTINCT FROM {right}"
 
 
 def _refuse_shortest_shape(match: ir.GraphMatch) -> None:

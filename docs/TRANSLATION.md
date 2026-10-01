@@ -1206,7 +1206,7 @@ table. The obvious implementation — each function as a `let` prepended to the
 query — is lexical, and answers 7 where Kusto answers 100.
 
 ### R25 — A graph is two relations, and its identity rules are Kusto's, not SQL's
-*Traps: `tests/test_graph.py`, `tests/test_graph_pushdown.py`, `tests/test_grammar_graph.py`*
+*Traps: `tests/test_graph.py`, `tests/test_graph_pushdown.py`, `tests/test_graph_preparation.py`, `tests/test_grammar_graph.py`*
 
 `make-graph` builds nothing at run time. It lowers, with the graph operator
 after it, to one source whose SQL holds an **edge relation** — one row per edge
@@ -1251,6 +1251,15 @@ not one side of an `or`, not `any`. A pattern that nothing constrains still
 enumerates every walk in range, and the recursive CTE holds all of them: in
 the reported graph, three million walks need more than 1 GB, while the selective
 match that used to exhaust that budget now fits in 256 MB without spilling.
+
+What a graph's relations carry is what its consumer can observe: the
+properties it reads (a whole element reads all of its kind), and a node
+numbering only for `graph-mark-components` and `graph-to-table nodes`. A walk
+starts as a zero-length stub at a node, so that DuckDB builds each step's hash
+table on the walks and probes the edges; anchored on an edge, a CTE without
+statistics estimated the walks as a cross product and every hop hashed the
+whole edge relation. Neither change alters a row: a property not carried is one
+nothing reads, and each edge's start is exactly one node.
 
 ---
 

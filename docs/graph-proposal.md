@@ -2,16 +2,20 @@
 
 > **Status: phase 1 implemented; phase 2 not started.** The normative rule is
 > [`TRANSLATION.md` R25](TRANSLATION.md); the trap tests are
-> `tests/test_graph.py`, `tests/test_graph_pushdown.py` and
-> `tests/test_grammar_graph.py`, and parser patch `004` is in
-> `grammar/UPSTREAM.md`. A sweep of 220 queries — every measurement below, the
-> corpus's graph examples and 27 shapes of §3.4's seeding — through both
-> engines agrees on 173 answers and 19 refusals. Of the rest, 21 are refusals of ours
-> (hash ids, unmeasured names, shapes kept to the documentation, and corpus
+> `tests/test_graph.py`, `tests/test_graph_pushdown.py`,
+> `tests/test_graph_preparation.py` and `tests/test_grammar_graph.py`, and
+> parser patch `004` is in `grammar/UPSTREAM.md`. A sweep of 263 queries —
+> every measurement below, the corpus's graph examples and 70 shapes written
+> for §3.4's seeding and §3.2's pruning — through both engines agrees on 211
+> answers and 19 refusals. Of the rest, 25 are refusals of ours (hash ids,
+> unmeasured names, shapes kept to the documentation, `sample`, and corpus
 > examples blocked by functions outside graphs — `geo_distance_2points`,
 > `set_intersect`, `arg_max(*)`); 4 are the run-time type guards, refusing
-> where Kusto refuses at compile time; and 3 are Kusto's own arbitrary choices
-> (§2.1 twice, §2.7), which fall either way from one run to the next.
+> where Kusto refuses at compile time; 3 are Kusto's own arbitrary choices
+> (§2.1 twice, §2.7), which fall either way from one run to the next; and 1 is
+> R4's known divergence, that KQL has no null string: an edge-only inner
+> node's missing `tag` is `[null]` in `map(inner_nodes(p), tag)` here and
+> `[""]` in Kusto.
 > Implementing it corrected two claims below, each marked
 > where it stands. Every claim about Kusto in §2 was measured on the pinned
 > Kusto Emulator on 2026-10-01; three contradict Microsoft's documentation
@@ -259,6 +263,27 @@ Each line of that is there because the obvious alternative is a wrong answer:
   covers a property name shared by two node tables with different types, which
   Kusto drops rather than merging.
 
+The sketch packs every column; the SQL does not. Reported: a five-hop match on
+2M nodes and 8M edges, each row with a 256-byte payload, materialized the raw
+edges, a numbered copy of them, the node table, its numbered copy and a copy
+of that — every column of each, for a query that read `EdgeId` and `Id` — and
+ran out of a 2 GB budget and 8 GB of spill. So each relation carries what its
+consumer can observe and no more:
+
+- **Properties.** `props` holds the properties the operator reads: a whole
+  node, edge or path reads all of its kind, `a.x` reads `x`, and a name in a
+  `map`/`all`/`any` body reads it from each edge or inner node;
+  `graph-to-table` reads everything it returns. Ids and partition keys travel
+  in their own columns. A node table is narrowed to its key, its partition,
+  the properties carried and, with two tables, the columns they share, whose
+  types the guard compares.
+- **The raw edges are read once**, by `_g1_e`, which is the copy that holds
+  still. The guard reads their types through `WHERE false`: `typeof` is not
+  folded, so a `LIMIT 1` probe would run the edge query a second time.
+- **Nodes are numbered only where the order is observed** —
+  `graph-mark-components` and `graph-to-table nodes`. Elsewhere there is no
+  `ix`, no sort, and one materialized node relation instead of two.
+
 ### 3.3 Fixed-length patterns
 
 Each edge in the pattern becomes a reference to `_g1_e` — or, for `--`, to
@@ -290,11 +315,22 @@ emitted: Kusto's output order is unspecified.
 
 One recursive CTE per variable-length edge, carrying `_start`, `_end`, `_eids`,
 the edges as a list of structs, the inner nodes as a list of structs, and
-`_len`. The seed is the one-edge paths, plus every node as a zero-length path
-when `lo = 0`; each step appends an edge whose near end is `_end`, with
+`_len`. Every walk starts as a zero-length stub at a node — a seed (below), or
+every node — and each step appends an edge whose near end is `_end`, with
 `_len < hi` and, under `unique_edges`, `NOT list_contains(_eids, e._eid)`. The
-final filter is `_len BETWEEN lo AND hi`. Direction works as in §3.3, with
-`_g1_eu` for `-[p*..]-`.
+final filter is `_len BETWEEN lo AND hi`, which drops the stubs unless `lo = 0`,
+where they are the zero-length paths. The first step leaves the start node,
+which is not an inner node, so it is neither added to `_inner` nor tested by
+an `all(inner_nodes(p), …)`. Direction works as in §3.3, with `_g1_eu` for
+`-[p*..]-`.
+
+The stub is not a nicety. Anchored on its first edge, the walk's working table
+is estimated as a cross product of the edges — a CTE has no statistics — and
+DuckDB builds every step's hash table on the edge relation rather than on the
+walks: the reported five-hop match from one node built five hash tables of 8M
+edges. Anchored on nodes, the estimate is the stubs', so DuckDB builds on the
+walks and probes the edges. The rows are the same, because each edge's start is
+exactly one node: a stub and one step give each one-edge path once.
 
 | KQL | SQL |
 |---|---|
@@ -317,7 +353,7 @@ walks of a component the match never touched, enumerated before
 its top-level `and`s first:
 
 - conjuncts that read only the path's **start** node become a seed set, the
-  `DISTINCT` (node, partition) pairs the one-edge and zero-length rows join;
+  `DISTINCT` (node, partition) pairs the stubs are made from;
 - if only the **end** node is constrained, the walk is built backwards from
   there — each step prepends an edge whose far end is `_start`, so `_eids`
   stays in pattern order;
@@ -341,7 +377,8 @@ Seeding only helps when the `where` constrains an end. A pattern that nothing
 constrains still enumerates, and materializes, every walk in range, and needs
 memory or spill space to match. `tests/test_graph_pushdown.py` holds both
 sides: the reported query within 256 MB with spilling disabled, and the
-unconstrained one over it.
+unconstrained one over it. `tests/test_graph_preparation.py` holds the second
+report's fixture within 128 MB, and pins the step's build side in the plan.
 
 ### 3.5 `where` and `project`
 

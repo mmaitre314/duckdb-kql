@@ -286,5 +286,5 @@ def test_only_the_properties_read_are_carried() -> None:
         f"{_G} | graph-match (a)-[p*1..3]->(b) where a.id == 'A' project m = map(p, w)"
     )
     path = sql[sql.index('_p0" AS ('):]
-    assert '[struct_pack("w" := e.props."w")] AS edges' in path
+    assert 'list_append(p.edges, struct_pack("w" := e.props."w"))' in path
     assert 'e.props."c"' not in path and " AS inn" not in path
