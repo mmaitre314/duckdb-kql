@@ -1206,7 +1206,7 @@ table. The obvious implementation — each function as a `let` prepended to the
 query — is lexical, and answers 7 where Kusto answers 100.
 
 ### R25 — A graph is two relations, and its identity rules are Kusto's, not SQL's
-*Traps: `tests/test_graph.py`, `tests/test_grammar_graph.py`*
+*Traps: `tests/test_graph.py`, `tests/test_graph_pushdown.py`, `tests/test_grammar_graph.py`*
 
 `make-graph` builds nothing at run time. It lowers, with the graph operator
 after it, to one source whose SQL holds an **edge relation** — one row per edge
@@ -1238,6 +1238,19 @@ numbered — any of its answers is right, and tests compare only what is fixed.
 Kusto's compile-time type refusals (SEM1019, SEM1079, SEM1006) are run-time
 guards here, because the schema carries names and not types: a cast would
 match `'1'` with `1`.
+
+A variable-length edge's walk starts only where the `where` lets it. Conjuncts
+that read nothing but the path's start node seed it; when only the end node is
+constrained, the walk is built backwards from there with its edges still in
+pattern order. A top-level `all(p, c)` / `all(inner_nodes(p), c)` stops a
+failing prefix, and only the properties the query reads are carried. Each of
+these is an **earlier copy** of a test the outer `WHERE` still applies, so it
+can drop only walks the outer test drops anyway. That is the whole argument for
+exactness, and why nothing else moves: not a conjunct relating two variables,
+not one side of an `or`, not `any`. A pattern that nothing constrains still
+enumerates every walk in range, and the recursive CTE holds all of them: in
+the reported graph, three million walks need more than 1 GB, while the selective
+match that used to exhaust that budget now fits in 256 MB without spilling.
 
 ---
 

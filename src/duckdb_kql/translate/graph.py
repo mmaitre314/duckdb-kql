@@ -569,6 +569,22 @@ def _bound(expr: ir.Expr | None, what: str) -> int:
                   "an integer constant")
 
 
+@dataclasses.dataclass
+class _PathSpec:
+    """A variable-length edge of the pattern, before its CTE is rendered."""
+
+    index: int
+    edge: ir.PatternEdge
+    left: str  # pattern variable at the path's start (pattern order)
+    right: str  # … and at its end
+    alias: str
+    high: int
+    simple: bool
+
+    def cte(self, g: _Graph, suffix: str = "") -> str:
+        return g.name(f"p{self.index}{suffix}")
+
+
 def _match(g: _Graph, match: ir.GraphMatch) -> tuple[str, list[str]]:
     """The SELECT of a `graph-match` or `graph-shortest-paths`, and its path CTEs."""
     _refuse_columns(match)
@@ -579,6 +595,7 @@ def _match(g: _Graph, match: ir.GraphMatch) -> tuple[str, list[str]]:
     ctes: list[str] = []
     fixed: list[str] = []
     paths: list[str] = []
+    specs: list[_PathSpec] = []
     nodes_seen: list[str] = []
     shortest = match.shortest is not None
 
@@ -594,8 +611,8 @@ def _match(g: _Graph, match: ir.GraphMatch) -> tuple[str, list[str]]:
                 tables.append(f"{g.name('n')} {alias}")
                 nodes_seen.append(alias)
         for index, edge in enumerate(pattern.edges):
-            left = aliases[pattern.nodes[index].name]
-            right = aliases[pattern.nodes[index + 1].name]
+            left_var, right_var = pattern.nodes[index].name, pattern.nodes[index + 1].name
+            left, right = aliases[left_var], aliases[right_var]
             alias = f"w{len(aliases)}"
             aliases[edge.name] = alias
             if edge.variable:
@@ -605,9 +622,9 @@ def _match(g: _Graph, match: ir.GraphMatch) -> tuple[str, list[str]]:
                 if low < 0 or low > high:
                     raise _refuse("graph-match", "invalid variable length range (Kusto: SEM1013)")
                 simple = shortest or match.cycles == "none"
-                cte = g.name(f"p{len(ctes)}")
-                ctes.append(f"{cte} AS ({_path(g, edge, high, match, simple, cte)})")
-                tables.append(f"{cte} {alias}")
+                spec = _PathSpec(len(specs), edge, left_var, right_var, alias, high, simple)
+                specs.append(spec)
+                tables.append(f"{spec.cte(g)} {alias}")
                 conditions.append(f"{alias}.plen >= {low}")
                 conditions.append(_same(f"{alias}.st", f"{left}.nid"))
                 conditions.append(_same(f"{alias}.en", f"{right}.nid"))
@@ -649,8 +666,11 @@ def _match(g: _Graph, match: ir.GraphMatch) -> tuple[str, list[str]]:
                 )
 
     state = _Match(g, kinds, aliases)
+    conjuncts = _conjuncts(match.where)
     with _context(state):
         state.clause = "where"
+        for spec in specs:
+            ctes.extend(_path_ctes(state, spec, match, conjuncts))
         if match.where is not None:
             conditions.append(f"({_render(match.where)})")
         state.clause = "project"
@@ -681,55 +701,304 @@ def _match(g: _Graph, match: ir.GraphMatch) -> tuple[str, list[str]]:
     return body, ctes
 
 
-def _path(
-    g: _Graph, edge: ir.PatternEdge, high: int, match: ir.GraphMatch, simple: bool, cte: str
-) -> str:
-    """A variable-length edge: every walk of up to *high* edges, with its path.
+# ---------------------------------------------------------------------------
+# Variable-length edges: what the recursion is seeded from and carries
+# ---------------------------------------------------------------------------
 
-    Columns: ``st``/``en`` (the ends, in pattern order), ``eids``, ``edges``
-    (edge props), ``inn`` (inner nodes as structs), ``plen``, and for
-    `graph-shortest-paths` ``vis``, the nodes visited. Measured, shortest paths
-    are **simple** whatever `cycles=` says, so they never revisit a node, the
-    start included; `graph-match` paths under `unique_edges` may, and only
-    their edges must differ.
+
+def _conjuncts(expr: ir.Expr | None) -> list[ir.Expr]:
+    """The `where` clause split at its top-level `and`s.
+
+    The outer `WHERE` keeps a match only when **every** conjunct is true —
+    under KQL's null logic as under SQL's — so a conjunct may also be checked
+    earlier, on any part of the match it alone decides, without changing the
+    answer.
     """
+    if expr is None:
+        return []
+    if isinstance(expr, ir.BinaryOp) and expr.op == "and":
+        return _conjuncts(expr.left) + _conjuncts(expr.right)
+    return [expr]
+
+
+def _mentioned(node: object) -> set[str]:
+    """The pattern variables *node* reads."""
+    found: set[str] = set()
+    if isinstance(node, ir.GraphVar):
+        found.add(node.name)
+    elif isinstance(node, ir.GraphProperty):
+        found.add(node.var)
+    elif isinstance(node, ir.GraphCall) and node.var is not None:
+        found.add(node.var)
+    if dataclasses.is_dataclass(node) and not isinstance(node, (type, ir.Query)):
+        for f in dataclasses.fields(node):
+            found |= _mentioned(getattr(node, f.name))
+    elif isinstance(node, tuple):
+        for item in node:
+            found |= _mentioned(item)
+    return found
+
+
+def _uses(match: ir.GraphMatch, path: str) -> tuple[set[str] | None, set[str] | None]:
+    """The edge and inner-node fields the query reads from *path*.
+
+    Each is None when nothing reads that list at all — it is then not carried
+    through the recursion — or the full set when the whole of it is read
+    (`project p`, `array_length(p)`). Inner-node fields are `nid`, `indeg`,
+    `outdeg`, and property names under `props`.
+    """
+    edge: set[str] | None = None
+    inner: set[str] | None = None
+
+    def add(target: set[str] | None, names: set[str]) -> set[str]:
+        return (target or set()) | names
+
+    def body_fields(body: ir.Expr) -> set[str]:
+        names: set[str] = set()
+
+        def walk(node: object) -> None:
+            if isinstance(node, ir.GraphElement):
+                names.add(f"props.{node.name}")
+            elif isinstance(node, ir.GraphCall) and node.var is None:
+                names.add({"node_id": "nid", "node_degree_in": "indeg",
+                           "node_degree_out": "outdeg"}.get(node.name, ""))
+            if dataclasses.is_dataclass(node) and not isinstance(node, (type, ir.Query)):
+                for f in dataclasses.fields(node):
+                    walk(getattr(node, f.name))
+            elif isinstance(node, tuple):
+                for item in node:
+                    walk(item)
+
+        walk(body)
+        names.discard("")
+        return names
+
+    everything = {"*"}
+
+    def visit(node: object) -> None:
+        nonlocal edge, inner
+        if isinstance(node, ir.GraphVar) and node.name == path:
+            edge = everything
+        elif isinstance(node, ir.GraphProperty) and node.var == path:
+            edge = add(edge, {f"props.{node.prop}"})
+        elif isinstance(node, ir.GraphCall) and node.var == path and node.body is not None:
+            fields = body_fields(node.body)
+            if node.inner:
+                inner = add(inner, fields)
+            else:
+                # An edge has no `nid`/degrees; those are refused when rendered.
+                edge = add(edge, {f for f in fields if f.startswith("props.")})
+        if dataclasses.is_dataclass(node) and not isinstance(node, (type, ir.Query)):
+            for f in dataclasses.fields(node):
+                visit(getattr(node, f.name))
+        elif isinstance(node, tuple):
+            for item in node:
+                visit(item)
+
+    visit(match.where)
+    visit(match.project)
+    return edge, inner
+
+
+def _edge_item(alias: str, fields: set[str], g: _Graph) -> str:
+    """What one edge contributes to a path's `edges` list."""
+    if "*" in fields:
+        return f"{alias}.props"
+    names = [c for c in g.edge_cols if f"props.{c}" in fields]
+    if not names:
+        # Read only through something with no fields of its own (`map(p, 1)`):
+        # the length is what matters, and the whole struct is the simple answer.
+        return f"{alias}.props"
+    packed = ", ".join(f"{_quote(c)} := {alias}.props.{_quote(c)}" for c in names)
+    return f"struct_pack({packed})"
+
+
+def _node_item(alias: str, fields: set[str], g: _Graph) -> str:
+    """What one inner node contributes to a path's `inn` list — the fields of
+    the node relation that are read, under the same names, so the expression
+    renderer reads it as it would read the relation."""
+    parts = ["nid := " + f"{alias}.nid"]
+    names = [c for c in g.node_props if f"props.{c}" in fields]
+    if names:
+        packed = ", ".join(f"{_quote(c)} := {alias}.props.{_quote(c)}" for c in names)
+        parts.append(f"props := struct_pack({packed})")
+    if g.degrees and "indeg" in fields:
+        parts.append(f"indeg := {alias}.indeg")
+    if g.degrees and "outdeg" in fields:
+        parts.append(f"outdeg := {alias}.outdeg")
+    return f"struct_pack({', '.join(parts)})"
+
+
+def _path_ctes(
+    state: _Match, spec: _PathSpec, match: ir.GraphMatch, conjuncts: list[ir.Expr]
+) -> list[str]:
+    """A variable-length edge's CTEs: its seed set, if any, and the walk itself.
+
+    **Seeding.** The obvious recursion starts from every edge in the graph and
+    lets the outer `WHERE` discard what does not match — so a one-path answer
+    could cost every walk of the graph, and a disconnected component of a few
+    hundred edges was enough to exhaust a 1 GB budget. A conjunct that reads
+    only the path's start node restricts where the walk may begin, which is
+    exact because a path's start never changes as it grows. When only the
+    *end* node is constrained, the path is built backwards from there instead.
+
+    **Pruning.** A conjunct `all(p, c)` / `all(inner_nodes(p), c)` holds for a
+    path only if it holds for every prefix, so a prefix that fails it is not
+    extended. The outer `WHERE` still checks all of them: this changes how
+    much is enumerated, never what is returned.
+    """
+    g = state.graph
+    conjuncts = [c for c in conjuncts if not _volatile(c)]
+    start_only = [c for c in conjuncts if _mentioned(c) == {spec.left}]
+    end_only = [c for c in conjuncts if _mentioned(c) == {spec.right}]
+    every_edge: list[ir.GraphCall] = []
+    every_inner: list[ir.GraphCall] = []
+    for c in conjuncts:
+        if (
+            isinstance(c, ir.GraphCall) and c.name == "all" and c.var == spec.edge.name
+            and c.body is not None and not _mentioned(c.body)
+        ):
+            (every_inner if c.inner else every_edge).append(c)
+
+    ctes: list[str] = []
+    backward = not start_only and bool(end_only)
+    anchor_tests = end_only if backward else start_only
+    seeds = None
+    if anchor_tests:
+        # DISTINCT: a seed may match a path's end once, whatever the node
+        # relation holds, so the join never multiplies a path.
+        seeds = spec.cte(g, "s")
+        alias = state.aliases[spec.right if backward else spec.left]
+        tests = " AND ".join(f"({_render(c)})" for c in anchor_tests)
+        part = f", {alias}.part" if g.partitioned else ""
+        ctes.append(
+            f"{seeds} AS (SELECT DISTINCT {alias}.nid{part} "
+            f"FROM {g.name('n')} {alias} WHERE {tests})"
+        )
+
+    def element_test(tests: list[ir.GraphCall], kind: str, elem: str) -> str:
+        if not tests:
+            return ""
+        saved, state.element = state.element, (kind, elem)
+        try:
+            parts = [_holds(_render(t.body)) for t in tests if t.body is not None]
+        finally:
+            state.element = saved
+        return " AND " + " AND ".join(parts)
+
+    edge_ok = element_test(every_edge, "edge", "e.props")
+    inner_ok = element_test(every_inner, "node", "n")
+    edge_fields, inner_fields = _uses(match, spec.edge.name)
+    if match.cycles == "none":
+        # The outer query checks that no inner node is a pattern node.
+        inner_fields = (inner_fields or set()) | {"nid"}
+    body = _path(g, spec, match, seeds, backward, edge_fields, inner_fields, edge_ok, inner_ok)
+    ctes.append(f"{spec.cte(g)} AS ({body})")
+    return ctes
+
+
+def _volatile(expr: ir.Expr) -> bool:
+    """Whether *expr* may answer differently when evaluated twice — then a
+    second, earlier evaluation is not the same test."""
+    from .sharing import VOLATILE
+
+    def visit(node: object) -> bool:
+        if isinstance(node, ir.FunctionCall) and node.name in VOLATILE:
+            return True
+        if dataclasses.is_dataclass(node) and not isinstance(node, (type, ir.Query)):
+            return any(visit(getattr(node, f.name)) for f in dataclasses.fields(node))
+        if isinstance(node, tuple):
+            return any(visit(item) for item in node)
+        return False
+
+    return visit(expr)
+
+
+def _path(
+    g: _Graph,
+    spec: _PathSpec,
+    match: ir.GraphMatch,
+    seeds: str | None,
+    backward: bool,
+    edge_fields: set[str] | None,
+    inner_fields: set[str] | None,
+    edge_ok: str,
+    inner_ok: str,
+) -> str:
+    """A variable-length edge: every walk of up to `high` edges, with its path.
+
+    Columns: ``st``/``en`` (the ends, in pattern order), ``eids``, ``plen``,
+    and only when the query reads them ``edges`` (edge properties, only those
+    read) and ``inn`` (inner nodes, likewise); for a simple path ``vis``, the
+    nodes visited. Measured, shortest paths are **simple** whatever `cycles=`
+    says, so they never revisit a node, the start included; `graph-match`
+    paths under `unique_edges` may, and only their edges must differ.
+
+    *backward* builds each path from its end: the same rows, the lists
+    prepended to rather than appended, so the edges stay in pattern order.
+    """
+    edge, high, simple, cte = spec.edge, spec.high, spec.simple, spec.cte(g)
     relation = g.name("eu" if edge.direction == "any" else "e")
     near, far = ("dst", "src") if edge.direction == "in" else ("src", "dst")
     part_e, part_n = (", e.part", ", n.part") if g.partitioned else ("", "")
-    degrees = ", indeg := n.indeg, outdeg := n.outdeg" if g.degrees else ""
-    element = f"struct_pack(nid := n.nid, props := n.props{degrees})"
+    carry_edges, carry_inner = edge_fields is not None, inner_fields is not None
+    edge_item = _edge_item("e", edge_fields or set(), g)
+    node_item = _node_item("n", inner_fields or set(), g)
+
     # Typed empty lists, for the rows with no edge to take a type from. The
     # NULL row makes the subquery answer even for a graph with no edges.
     empty_edges = (
-        f"(SELECT list_filter([props], {_ELEM} -> false) FROM "
-        f"(SELECT props FROM {g.name('e')} UNION ALL SELECT NULL) LIMIT 1)"
+        f"(SELECT list_filter([{edge_item}], {_ELEM} -> false) FROM "
+        f"(SELECT * FROM {g.name('e')} UNION ALL BY NAME SELECT NULL AS eid) e LIMIT 1)"
     )
     empty_inner = (
-        f"(SELECT list_filter([{element}], {_ELEM} -> false) FROM "
+        f"(SELECT list_filter([{node_item}], {_ELEM} -> false) FROM "
         f"(SELECT * FROM {g.name('n')} UNION ALL BY NAME SELECT NULL AS nid) n LIMIT 1)"
     )
-    vis_zero = ", [n.nid] AS vis" if simple else ""
-    vis_one = f", [e.{near}, e.{far}] AS vis" if simple else ""
-    vis_step = f", list_append(p.vis, e.{far})" if simple else ""
+
+    def lists(zero: bool) -> str:
+        out = ""
+        if carry_edges:
+            out += f", {empty_edges if zero else f'[{edge_item}]'} AS edges"
+        if carry_inner:
+            out += f", {empty_inner} AS inn"
+        return out
+
+    def seeded(row: str, column: str) -> str:
+        if seeds is None:
+            return ""
+        part = f" AND {_same('s.part', row + '.part')}" if g.partitioned else ""
+        return f" JOIN {seeds} s ON {_same('s.nid', f'{row}.{column}')}{part}"
+
     rows = []
     if _bound(edge.low, "lower") == 0:
+        vis = ", [n.nid] AS vis" if simple else ""
         rows.append(
-            f"SELECT n.nid AS st, n.nid AS en{part_n}, []::BIGINT[] AS eids, "
-            f"{empty_edges} AS edges, {empty_inner} AS inn, 0 AS plen{vis_zero} "
-            f"FROM {g.name('n')} n"
+            f"SELECT n.nid AS st, n.nid AS en{part_n}, []::BIGINT[] AS eids{lists(True)}, "
+            f"0 AS plen{vis} FROM {g.name('n')} n{seeded('n', 'nid')}"
         )
+    vis = f", [e.{near}, e.{far}] AS vis" if simple else ""
     one_edge_simple = f" AND {_differ('e.' + near, 'e.' + far)}" if simple else ""
     rows.append(
-        f"SELECT e.{near} AS st, e.{far} AS en{part_e}, [e.eid] AS eids, [e.props] AS edges, "
-        f"{empty_inner} AS inn, 1 AS plen{vis_one} "
-        f"FROM {relation} e WHERE {high} >= 1{one_edge_simple}"
+        f"SELECT e.{near} AS st, e.{far} AS en{part_e}, [e.eid] AS eids{lists(False)}, "
+        f"1 AS plen{vis} FROM {relation} e{seeded('e', far if backward else near)} "
+        f"WHERE {high} >= 1{one_edge_simple}{edge_ok}"
     )
+
+    # The walk grows at `en` (forward) or at `st` (backward); the node passed
+    # through becomes an inner node, and `step` is the edge's other end.
+    grow, joint = ("st", far) if backward else ("en", near)
+    step = near if backward else far
+
+    def extend(lst: str, item: str) -> str:
+        return f"list_prepend({item}, p.{lst})" if backward else f"list_append(p.{lst}, {item})"
+
     if match.cycles == "unique_edges" and not simple:
         fresh = " AND NOT list_contains(p.eids, e.eid)"
     elif simple:
         fresh = (
             f" AND len(list_filter(p.vis, {_ELEM} -> "
-            f"({_ELEM} IS NOT DISTINCT FROM e.{far}))) = 0"
+            f"({_ELEM} IS NOT DISTINCT FROM e.{step}))) = 0"
         )
     else:
         fresh = ""
@@ -737,15 +1006,22 @@ def _path(
         f" AND {_same('e.part', 'p.part')} AND {_same('n.part', 'p.part')}"
         if g.partitioned else ""
     )
-    step = (
-        f"SELECT p.st, e.{far}{', p.part' if g.partitioned else ''}, list_append(p.eids, e.eid), "
-        f"list_append(p.edges, e.props), list_append(p.inn, {element}), p.plen + 1{vis_step} "
+    ends = f"e.{step}, p.en" if backward else f"p.st, e.{step}"
+    carried = ""
+    if carry_edges:
+        carried += f", {extend('edges', edge_item)}"
+    if carry_inner:
+        carried += f", {extend('inn', node_item)}"
+    vis = f", {extend('vis', 'e.' + step)}" if simple else ""
+    step_sql = (
+        f"SELECT {ends}{', p.part' if g.partitioned else ''}, {extend('eids', 'e.eid')}"
+        f"{carried}, p.plen + 1{vis} "
         f"FROM {cte} p "
-        f"JOIN {relation} e ON {_same('e.' + near, 'p.en')} "
-        f"JOIN {g.name('n')} n ON {_same('n.nid', 'p.en')} "
-        f"WHERE p.plen >= 1 AND p.plen < {high}{fresh}{same_part}"
+        f"JOIN {relation} e ON {_same('e.' + joint, 'p.' + grow)} "
+        f"JOIN {g.name('n')} n ON {_same('n.nid', 'p.' + grow)} "
+        f"WHERE p.plen >= 1 AND p.plen < {high}{fresh}{same_part}{edge_ok}{inner_ok}"
     )
-    return "\nUNION ALL ".join(rows) + "\nUNION ALL " + step
+    return "\nUNION ALL ".join(rows) + "\nUNION ALL " + step_sql
 
 
 def _has_node(inner: str, nid: str) -> str:
@@ -1004,7 +1280,12 @@ def _path_call(ctx: _Match, node: ir.GraphCall) -> str:
         ctx.element = saved
     if node.name == "map":
         return f"to_json(list_transform({items}, {_ELEM} -> ({body})))"
-    test = f"list_transform({items}, {_ELEM} -> coalesce(({body}), false))"
+    test = f"list_transform({items}, {_ELEM} -> {_holds(body)})"
     if node.name == "all":
         return f"coalesce(list_bool_and({test}), true)"
     return f"coalesce(list_bool_or({test}), false)"
+
+
+def _holds(condition: str) -> str:
+    """A graph function's condition as `all` and `any` count it."""
+    return f"coalesce(({condition}), false)"

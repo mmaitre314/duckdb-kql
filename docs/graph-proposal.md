@@ -2,16 +2,17 @@
 
 > **Status: phase 1 implemented; phase 2 not started.** The normative rule is
 > [`TRANSLATION.md` R25](TRANSLATION.md); the trap tests are
-> `tests/test_graph.py` and `tests/test_grammar_graph.py`, and parser patch
-> `004` is in `grammar/UPSTREAM.md`. A sweep of 193 queries — every
-> measurement below plus the corpus's graph examples — through both engines
-> agrees on 146 answers and 19 refusals. Of the rest, 21 are refusals of ours
+> `tests/test_graph.py`, `tests/test_graph_pushdown.py` and
+> `tests/test_grammar_graph.py`, and parser patch `004` is in
+> `grammar/UPSTREAM.md`. A sweep of 220 queries — every measurement below, the
+> corpus's graph examples and 27 shapes of §3.4's seeding — through both
+> engines agrees on 173 answers and 19 refusals. Of the rest, 21 are refusals of ours
 > (hash ids, unmeasured names, shapes kept to the documentation, and corpus
 > examples blocked by functions outside graphs — `geo_distance_2points`,
 > `set_intersect`, `arg_max(*)`); 4 are the run-time type guards, refusing
-> where Kusto refuses at compile time; 2 are Kusto's own arbitrary choices
-> (§2.1, §2.7); and 1 is a pre-existing gap outside graphs, a `datetime()`
-> inside a `dynamic([...])` literal. Implementing it corrected two claims below, each marked
+> where Kusto refuses at compile time; and 3 are Kusto's own arbitrary choices
+> (§2.1 twice, §2.7), which fall either way from one run to the next.
+> Implementing it corrected two claims below, each marked
 > where it stands. Every claim about Kusto in §2 was measured on the pinned
 > Kusto Emulator on 2026-10-01; three contradict Microsoft's documentation
 > (§2.9), and the emulator wins all three.
@@ -307,15 +308,40 @@ final filter is `_len BETWEEN lo AND hi`. Direction works as in §3.3, with
 | `node_id(x)` | `tostring()` of the id, through the existing R20 rendering |
 
 The inner `coalesce(c, false)` is §2.4's null rule; the outer one is the
-zero-length rule, because `list_bool_and([])` is null rather than `true`. An
-`all(p, c)` conjunct of the `where` may also be checked inside the recursive
-step, since a prefix that fails it cannot recover; that changes how much is
-enumerated, not what is returned. `any` and `map` cannot be moved.
+zero-length rule, because `list_bool_and([])` is null rather than `true`.
+
+**What the walk starts from.** Seeding from every edge is exact, and it can
+spend every walk of the graph on a one-row question. Reported: three million
+walks of a component the match never touched, enumerated before
+`start.Id == 'main-0'` was tested, ran out of 1 GB. So the `where` is split at
+its top-level `and`s first:
+
+- conjuncts that read only the path's **start** node become a seed set, the
+  `DISTINCT` (node, partition) pairs the one-edge and zero-length rows join;
+- if only the **end** node is constrained, the walk is built backwards from
+  there — each step prepends an edge whose far end is `_start`, so `_eids`
+  stays in pattern order;
+- a top-level `all(p, c)` or `all(inner_nodes(p), c)` whose `c` names no
+  pattern variable is checked on each edge or inner node as it is added, with
+  the same null rule, since a prefix that fails it cannot recover;
+- and a step carries only the properties the query reads: `map(p, EdgeId)`
+  carries one field per edge and no inner nodes, except that `cycles=none`
+  needs their ids.
+
+None of this changes what is returned: the outer `WHERE` still applies every
+conjunct, so an earlier copy can only drop walks that it would drop anyway. A
+conjunct that relates two variables, one side of an `or`, `any`, `map`, and
+anything volatile (a second evaluation would be a second draw) are not moved.
 
 **Path explosion is real and stays visible.** Under `unique_edges` or `all`,
 the number of paths grows exponentially with `hi`, and DuckDB keeps every
 intermediate path. A cap that dropped paths would be a wrong answer, so there
 is no cap: `servertimeout` and DuckDB's own interrupt bound the damage, loudly.
+Seeding only helps when the `where` constrains an end. A pattern that nothing
+constrains still enumerates, and materializes, every walk in range, and needs
+memory or spill space to match. `tests/test_graph_pushdown.py` holds both
+sides: the reported query within 256 MB with spilling disabled, and the
+unconstrained one over it.
 
 ### 3.5 `where` and `project`
 
