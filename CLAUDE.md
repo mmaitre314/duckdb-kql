@@ -8,7 +8,7 @@ are about to touch rather than inferring the rule from the code:
 
 | If you are changing… | Read |
 |---|---|
-| what the SQL must *mean* | [`docs/TRANSLATION.md`](docs/TRANSLATION.md) — §4 is R1–R21, the semantic invariants |
+| what the SQL must *mean* | [`docs/TRANSLATION.md`](docs/TRANSLATION.md) — §4 is R1–R25, the semantic invariants |
 | structure, without changing behaviour | [`docs/maintenance/README.md`](docs/maintenance/README.md) — the gate, the risk ladder, the 400-line review budget |
 | how a change is judged | [`docs/code-review/README.md`](docs/code-review/README.md) |
 | how a change gets in | [`CONTRIBUTING.md`](CONTRIBUTING.md) |

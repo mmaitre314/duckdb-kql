@@ -38,6 +38,10 @@ __all__ = [
     "ProjectRename",
     "Where", "Project", "Extend", "Take", "Sort", "SortKey", "Top", "Count",
     "Distinct",
+    # graphs
+    "NodeTable", "MarkComponents", "MakeGraph", "PatternNode", "PatternEdge",
+    "Pattern", "GraphMatch", "GraphToTable", "GraphSource", "GraphVar",
+    "GraphProperty", "GraphElement", "GraphCall",
 ]
 
 
@@ -649,3 +653,157 @@ class Query(Node):
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
         ops = " | ".join(type(o).__name__ for o in self.operators)
         return f"<Query {type(self.source).__name__}{' | ' + ops if ops else ''}>"
+
+
+# ---------------------------------------------------------------------------
+# Graphs (docs/graph-proposal.md, TRANSLATION.md R25)
+#
+# A graph exists only at translation time. `make-graph` and the graph
+# operators after it lower to one `GraphSource`, which produces a table like
+# any other source; the tabular operators after the graph operator follow it
+# as an ordinary pipeline.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class NodeTable(Node):
+    """``with Nodes on Key`` — one of at most two node tables."""
+
+    query: Query
+    key: str
+
+
+@dataclass(frozen=True)
+class MarkComponents(Node):
+    """``graph-mark-components [kind=weak|strong] [with_component_id=Name]``."""
+
+    kind: str = "weak"
+    name: str = "ComponentId"
+
+
+@dataclass(frozen=True)
+class MakeGraph(Node):
+    """``Edges | make-graph Src --> Tgt [with N1 on K1 [, N2 on K2] | with_node_id=X]``.
+
+    ``components`` are the `graph-mark-components` applied to the graph, in
+    order; each adds a node property.
+    """
+
+    edges: Query
+    source: str
+    target: str
+    nodes: tuple[NodeTable, ...] = ()
+    node_id: str | None = None
+    partition: str | None = None
+    components: tuple[MarkComponents, ...] = ()
+
+
+@dataclass(frozen=True)
+class PatternNode(Node):
+    """``(name)``; an anonymous ``()`` gets a hidden name no query can spell."""
+
+    name: str
+    anonymous: bool = False
+
+
+@dataclass(frozen=True)
+class PatternEdge(Node):
+    """``-[name]->``, ``<--``, ``-[name*lo..hi]-`` …
+
+    ``direction`` is ``"out"`` (left to right), ``"in"`` (right to left) or
+    ``"any"``. ``low``/``high`` are None for a single edge, and the bounds of a
+    variable-length edge otherwise — expressions, since a `let` may supply one,
+    and integer literals once the `let`s are resolved.
+    """
+
+    name: str
+    direction: str
+    anonymous: bool = False
+    low: Expr | None = None
+    high: Expr | None = None
+
+    @property
+    def variable(self) -> bool:
+        return self.low is not None
+
+
+@dataclass(frozen=True)
+class Pattern(Node):
+    """One comma-separated sequence: ``nodes[0] edges[0] nodes[1] …``."""
+
+    nodes: tuple[PatternNode, ...]
+    edges: tuple[PatternEdge, ...]
+
+
+@dataclass(frozen=True)
+class GraphMatch(Node):
+    """``graph-match`` — or ``graph-shortest-paths`` when *shortest* is set."""
+
+    patterns: tuple[Pattern, ...]
+    project: tuple[NamedExpr, ...]
+    where: Expr | None = None
+    cycles: str = "unique_edges"
+    #: ``"any"`` or ``"all"`` for `graph-shortest-paths`; None for `graph-match`.
+    shortest: str | None = None
+
+
+@dataclass(frozen=True)
+class GraphToTable(Node):
+    """``graph-to-table nodes`` or ``graph-to-table edges``."""
+
+    kind: str
+
+
+@dataclass(frozen=True)
+class GraphSource(Source):
+    """A graph and the one operator that turns it back into a table."""
+
+    graph: MakeGraph
+    consumer: GraphMatch | GraphToTable
+
+
+@dataclass(frozen=True)
+class GraphVar(Expr):
+    """A pattern variable used whole: a node's or edge's bag, or a path."""
+
+    name: str
+
+
+@dataclass(frozen=True)
+class GraphProperty(Expr):
+    """``v.prop`` — a property of a node or (single) edge variable.
+
+    On a variable-length edge it means ``map(v, prop)``, which Kusto allows in
+    `project` and refuses in `where` (SEM1054).
+    """
+
+    var: str
+    prop: str
+
+
+@dataclass(frozen=True)
+class GraphElement(Expr):
+    """A bare name inside ``map``/``all``/``any``: the element's property.
+
+    Measured: the property wins over a `let` of the same name, and a name that
+    is no property reaches the `let`. *fallback* is that `let`, filled in by
+    the substitution pass.
+    """
+
+    name: str
+    fallback: Expr | None = None
+
+
+@dataclass(frozen=True)
+class GraphCall(Expr):
+    """A graph function.
+
+    ``map``/``all``/``any`` carry *body*, and *inner* for ``inner_nodes(p)``.
+    ``node_degree_in``/``node_degree_out``/``labels``/``node_id`` carry only
+    *var* — or none, inside a ``map``/``all``/``any`` body, meaning the element.
+    """
+
+    name: str
+    var: str | None = None
+    inner: bool = False
+    body: Expr | None = None

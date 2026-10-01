@@ -1,15 +1,20 @@
 # Proposal — graph semantics: `make-graph`, `graph-match` and the rest of the family
 
-> **Status: proposal, not implemented.** Phase 1 (transient graphs) is
-> designed in §3 and scheduled in §4; phase 2 (persistent graphs — graph
-> models, snapshots and the `graph()` function) is sketched in §5 and
-> deliberately comes second. Every claim about Kusto in §2 was measured on the
-> pinned Kusto Emulator on 2026-10-01, about 150 queries and management
-> commands in all, and each measurement is quoted next to the rule it
-> justifies. Three of them contradict Microsoft's documentation (§2.9); the
-> emulator wins all three. The SQL in §3 is a sketch, but the variable-length
-> core was run on DuckDB 1.5.5 against the documentation's own `inner_nodes()`
-> example and returned the documented five rows.
+> **Status: phase 1 implemented; phase 2 not started.** The normative rule is
+> [`TRANSLATION.md` R25](TRANSLATION.md); the trap tests are
+> `tests/test_graph.py` and `tests/test_grammar_graph.py`, and parser patch
+> `004` is in `grammar/UPSTREAM.md`. A sweep of 193 queries — every
+> measurement below plus the corpus's graph examples — through both engines
+> agrees on 146 answers and 19 refusals. Of the rest, 21 are refusals of ours
+> (hash ids, unmeasured names, shapes kept to the documentation, and corpus
+> examples blocked by functions outside graphs — `geo_distance_2points`,
+> `set_intersect`, `arg_max(*)`); 4 are the run-time type guards, refusing
+> where Kusto refuses at compile time; 2 are Kusto's own arbitrary choices
+> (§2.1, §2.7); and 1 is a pre-existing gap outside graphs, a `datetime()`
+> inside a `dynamic([...])` literal. Implementing it corrected two claims below, each marked
+> where it stands. Every claim about Kusto in §2 was measured on the pinned
+> Kusto Emulator on 2026-10-01; three contradict Microsoft's documentation
+> (§2.9), and the emulator wins all three.
 
 ## 1. The one-sentence version
 
@@ -64,7 +69,7 @@ the emulator raised the quoted semantic error.
 | Which ids are nodes? | The union of the node tables' ids and the edges' endpoints. A node-table row with no edges is a node (`graph-match (n)` returns it); an endpoint missing from the node tables is a node **without properties** (`isnull(n.age)` is true) |
 | Is a null id a node? | **Yes, and it joins.** `datatable(s:long, t:long)[1,2, long(null),3, 4,long(null)]` has five nodes, one of them null, and `(a)-->(b)-->(c)` finds `4 → null → 3`. With string ids, the empty string is likewise a node |
 | Duplicate ids in one node table | One node. The emulator kept the first row (`A,10` over `A,11`); the documentation says the choice is arbitrary |
-| The same id in two node tables | **The first table listed wins, whole.** `with P on pid, C on cid` gives `{"pid":"A","v":10}` with no `size`; listing `C` first gives `{"cid":"A","size":99}` with no `v`. The documentation says the properties are merged (§2.9) |
+| The same id in two node tables | **One table's row wins, whole — which one is arbitrary.** `with P on pid, C on cid` gave `{"pid":"A","v":10}` with no `size` in one run and `{"cid":"A","size":99}` with no `v` in the next. *Corrected during implementation: this row first said "the first table listed wins", from a single run.* The documentation says the properties are merged (§2.9); no run merged them |
 | A column name in both node tables | Same type: one property. **Different types: no property at all** — `a.v` is SEM1040 "node 'a' doesn't have property 'v'" |
 | Id types | Source and target must match (SEM1019), node ids must match the edges' (SEM1079, "StringBuffer and I64 found"), `dynamic` is refused (SEM1006). `int`, `long`, `real`, `string` and `datetime` all work |
 | `make-graph s -- t` (undirected) | The grammar accepts it; the emulator refuses with SEM0456 "KQL undirected graphs feature is not enabled". **Unmeasurable** |
@@ -170,8 +175,8 @@ gives `{"s":"A","t":"B"}`.
 
 1. **`make-graph` with two node tables.** The documentation: "If the same node
    ID appears in both … tables, a single node is created by merging their
-   properties." Measured: the first table listed wins, and the second
-   contributes nothing.
+   properties." Measured: one table's row wins whole, the other contributes
+   nothing, and which one varies between runs.
 2. **`graph-shortest-paths` without a variable-length edge.** The
    documentation: "Patterns must include at least one variable length edge."
    Measured: `(a)-->(b)` is accepted.
@@ -241,8 +246,9 @@ Each line of that is there because the obvious alternative is a wrong answer:
   disappears.
 - **A node is one whole row.** `QUALIFY row_number()` keeps one row per id;
   `any_value()` per column could assemble a node from two different rows.
-- **The first table wins whole** (§2.1), which is what the anti-join on the
-  second table gives — not a merge, and not a `COALESCE` of the two.
+- **One table wins whole** (§2.1), which is what the anti-join on the second
+  table gives — not a merge, and not a `COALESCE` of the two. Kusto's choice
+  of table is arbitrary; this one always picks the first.
 - **Id types are a refusal, not a cast.** SEM1019 and SEM1079 are compile-time
   in Kusto, but this schema has names, not types
   ([column types](column-types-proposal.md)). Left alone, DuckDB would
@@ -273,7 +279,7 @@ hidden variable of its own; a repeated variable becomes an
 |---|---|
 | `unique_edges` | `e1._eid <> e2._eid` for each pair of fixed edges, `NOT list_contains(p._eids, e._eid)` between a fixed and a variable-length edge, `NOT list_has_any(p._eids, q._eids)` between two variable-length edges |
 | `all` | nothing |
-| `none` | `IS DISTINCT FROM` between every pair of distinct node variables. With a variable-length edge in the pattern, **refused** in phase 1: §2.3 found a rule (`(a)-[p*1..3]->(a)` is empty) that the measurements so far do not explain |
+| `none` | `IS DISTINCT FROM` between every pair of distinct node variables; each variable-length edge a simple path (as `graph-shortest-paths` uses), whose inner nodes are none of the pattern's nodes nor another path's. *Corrected during implementation: this row first refused variable-length edges, but two of the documentation's own examples use them, and "each path is simple" explains the `(a)-[p*1..3]->(a)` measurement. Inner nodes shared between two paths are unmeasured, and excluded* |
 
 Several comma-separated sequences are one join graph over shared variables; a
 disconnected pattern is refused, as SEM1011 refuses it. No `ORDER BY` is

@@ -2147,6 +2147,11 @@ def query_parameters(kql: str) -> list[ParameterDeclaration]:
     return _lower_query_parameters(parse(kql).tree)
 
 
+#: Graph-valued `let`s of the query being lowered: name -> the pipeline's head
+#: and operators, as parse-tree nodes. Set for the duration of `lower`.
+_GRAPH_LETS: dict[str, tuple[Any, list[Any]]] = {}
+
+
 def lower(
     kql: str,
     entity_groups: ResolvedGroups | None = None,
@@ -2169,6 +2174,22 @@ def lower(
         KqlSyntaxError: the query does not parse.
         KqlUnsupportedError: it parses but uses a construct outside this wave.
     """
+    global _GRAPH_LETS
+    saved, _GRAPH_LETS = _GRAPH_LETS, {}
+    try:
+        return _lower(kql, entity_groups, functions, database, clusters)
+    finally:
+        _GRAPH_LETS = saved
+
+
+def _lower(
+    kql: str,
+    entity_groups: ResolvedGroups | None,
+    functions: ResolvedFunctions | None,
+    database: str | None,
+    clusters: Resolved | None,
+) -> ir.Query:
+    """:func:`lower`'s body."""
     tree = parse(kql).tree
 
     # These are NOT QueryStatements, so counting query statements alone would
@@ -2260,6 +2281,16 @@ def _lower_head(head: Any, rest: list[Any]) -> ir.Query:
     being modelled a second time, and every later stage sees one shape.
     """
     head = _collapse(head)
+    if _cls(head) in _NAME_KINDS and _GRAPH_LETS.get(_name_text(head) or "") is not None:
+        # A graph-valued `let` (`let G = E | make-graph …; G | graph-match …`)
+        # is not a CTE: it is spliced in front of the operators that use it.
+        bound_head, bound_rest = _GRAPH_LETS[_name_text(head) or ""]
+        return _lower_head(bound_head, bound_rest + rest)
+    from .lower_graph import lower_graph_head, make_graph_index
+
+    found = make_graph_index(rest)
+    if found is not None:
+        return lower_graph_head(head, rest[:found], rest[found], rest[found + 1:])
     if _cls(head) == "MacroExpandOperator":
         return _lower_macro_expand(head, _rule_children(head), rest)
     if _cls(head) == "UnionOperator":
@@ -2345,7 +2376,12 @@ def _resolve_in_subqueries(query: ir.Query, tabular_names: set[str]) -> ir.Query
         (name, recurse(bound) if isinstance(bound, ir.Query) else bound)
         for name, bound in query.lets
     ]
-    return ir.Query(query.source, ops, lets, list(query.parameters))
+    source = query.source
+    if isinstance(source, ir.GraphSource):
+        from .lower_graph import map_queries
+
+        source = map_queries(source, recurse)
+    return ir.Query(source, ops, lets, list(query.parameters))
 
 
 def _find_all(node: Any, class_name: str) -> list[Any]:
@@ -2755,6 +2791,14 @@ def _substitute_once(node: Any, scalars: Scalars, memo: dict[int, Any]) -> Any:
         )
     if isinstance(node, ir.SortKey):
         return dataclasses.replace(node, expr=_substitute(node.expr, scalars))
+    if isinstance(node, ir.GraphElement):
+        # Inside map()/all()/any() an element's property wins over a `let` of
+        # the same name, and any other name reaches the `let` — measured. Which
+        # it is depends on the element's properties, so both are kept.
+        fallback = scalars.get(node.name)
+        return node if fallback is None else dataclasses.replace(node, fallback=fallback)
+    if isinstance(node, ir.GraphCall) and node.body is not None:
+        return dataclasses.replace(node, body=_substitute(node.body, scalars))
     return node
 
 
@@ -2781,6 +2825,11 @@ def _substitute_query(query: ir.Query, scalars: Scalars) -> ir.Query:
             stop=_substitute(source.stop, scalars),
             step=_substitute(source.step, scalars),
         )
+    elif isinstance(source, ir.GraphSource):
+        from .lower_graph import map_expressions, map_queries
+
+        source = map_queries(source, lambda q: _substitute_query(q, scalars))
+        source = map_expressions(source, lambda e: _substitute(e, scalars))
     return ir.Query(
         source,
         [_substitute_operator(op, scalars) for op in query.operators],
@@ -2892,6 +2941,12 @@ def _lower_lets(
         declared.add(name)
         value = _collapse(kids[-1])
 
+        from .lower_graph import is_graph_value
+
+        if is_graph_value(value):
+            parts = _rule_children(_unparenthesize(value))
+            _GRAPH_LETS[name] = (parts[0], parts[1:])
+            continue
         if kind == "LetMaterializeDeclaration" or _is_tabular_value(value, scalars):
             # `materialize()` is a caching hint for a distributed engine; it
             # cannot change the result, so unwrapping it is correct.
@@ -3327,6 +3382,11 @@ def _mentions_cluster(query: ir.Query) -> bool:
     source = query.source
     if isinstance(source, ir.TableRef) and source.cluster is not None:
         return True
+    if isinstance(source, ir.GraphSource):
+        from .lower_graph import queries
+
+        if any(_mentions_cluster(q) for q in queries(source)):
+            return True
     for op in query.operators:
         if isinstance(op, (ir.Join, ir.Lookup)) and _mentions_cluster(op.right):
             return True
@@ -3366,6 +3426,12 @@ def _qualify_query(
         and database is not None
     ):
         source = dataclasses.replace(source, database=database)
+    elif isinstance(source, ir.GraphSource):
+        from .lower_graph import map_queries
+
+        source = map_queries(
+            source, lambda q: _qualify_query(q, database, scope, clusters)
+        )
 
     operators = [
         _qualify_operator(op, database, scope, clusters) for op in query.operators

@@ -183,6 +183,10 @@ def render_literal(lit: ir.Literal) -> str:
 
 
 def render_expr(node: ir.Expr) -> str:
+    if type(node).__name__ == "_Sql":
+        # Already SQL — `translate.graph` hands rendered columns to helpers
+        # such as `render_kql_tostring` that take an expression.
+        return node.sql  # type: ignore[attr-defined, no-any-return]
     bound = sharing.slot_for(node)
     if bound is not None:
         # This operator computes *node* once, in a derived table under its FROM,
@@ -191,6 +195,11 @@ def render_expr(node: ir.Expr) -> str:
 
     if isinstance(node, ir.Literal):
         return render_literal(node)
+
+    if isinstance(node, _GRAPH_EXPRESSIONS):
+        from .graph import render_graph_expr
+
+        return render_graph_expr(node)
 
     if isinstance(node, ir.Parameter):
         return render_parameter(node)
@@ -312,6 +321,10 @@ def render_expr(node: ir.Expr) -> str:
             raise KqlUnsupportedError(f"function:{node.name}", hint=str(e)) from None
 
     raise KqlUnsupportedError(f"expression:{type(node).__name__}")
+
+
+#: Expressions only `translate.graph` knows how to render.
+_GRAPH_EXPRESSIONS = (ir.GraphVar, ir.GraphProperty, ir.GraphElement, ir.GraphCall)
 
 
 def render_bin(node: ir.FunctionCall, name: str = "bin") -> str:
@@ -466,6 +479,11 @@ def render_source(source: ir.Source, schema: Schema | None = None) -> str:
 
     if isinstance(source, ir.DataTable):
         return render_datatable(source)
+
+    if isinstance(source, ir.GraphSource):
+        from .graph import render as render_graph
+
+        return render_graph(source, schema)
 
     raise KqlUnsupportedError(f"source:{type(source).__name__}")
 
@@ -3898,6 +3916,30 @@ def _render_strcat(node: ir.FunctionCall) -> str:
     return f"concat({', '.join(render_kql_tostring(a) for a in node.args)})"
 
 
+def _render_strcat_array(node: ir.FunctionCall) -> str:
+    """``strcat_array(array, delimiter)`` — the elements' string forms, joined.
+
+    Measured: a string element is unquoted, a bool is the JSON ``true`` (not
+    .NET's ``True``), a null is the empty string, a nested object or array is
+    its compact JSON, and a value that is no array is stringified whole —
+    `strcat_array(dynamic("abc"), "-")` is `abc`. The delimiter is read as a
+    string: `strcat_array(dynamic(["a","b"]), 5)` is `a5b`.
+    """
+    if len(node.args) != 2:
+        raise KqlUnsupportedError("function:strcat_array", hint="takes 2 arguments")
+    # `to_json`, not a CAST: a CAST re-parses a native string list as JSON text.
+    array = f"to_json({render_expr(node.args[0])})"
+    delimiter = render_kql_tostring(node.args[1])
+    elements = (
+        f"list_transform(CAST({array} AS JSON[]), _sa -> coalesce(_sa ->> '$', ''))"
+    )
+    return (
+        f"CASE WHEN json_type({array}) = 'ARRAY' "
+        f"THEN array_to_string({elements}, {delimiter}) "
+        f"ELSE coalesce({array} ->> '$', '') END"
+    )
+
+
 def _render_strcat_delim(node: ir.FunctionCall) -> str:
     """``strcat_delim(delim, a, b, …)`` — as `strcat`, joined by *delim*.
 
@@ -4357,6 +4399,7 @@ _SPECIAL_FORMS: dict[str, Callable[[ir.FunctionCall], str | None]] = {
     "case": _render_case,
     "strcat": _render_strcat,
     "strcat_delim": _render_strcat_delim,
+    "strcat_array": _render_strcat_array,
     "substring": _render_substring,
     "round": _render_round,
     "countof": _render_countof,

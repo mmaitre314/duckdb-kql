@@ -1166,6 +1166,40 @@ when no parameter is required, and is otherwise refused rather than read as the
 table. The obvious implementation — each function as a `let` prepended to the
 query — is lexical, and answers 7 where Kusto answers 100.
 
+### R25 — A graph is two relations, and its identity rules are Kusto's, not SQL's
+*Traps: `tests/test_graph.py`, `tests/test_grammar_graph.py`*
+
+`make-graph` builds nothing at run time. It lowers, with the graph operator
+after it, to one source whose SQL holds an **edge relation** — one row per edge
+row, numbered by `row_number()` in a `MATERIALIZED` CTE — and a **node
+relation**, one row per id. A fixed-length pattern is a join over those; a
+variable-length edge is a recursive CTE carrying its path. Each obvious SQL
+choice here answers wrongly, measured:
+
+```
+datatable(s:long, t:long)[1,2, long(null),3, 4,long(null)] | make-graph s --> t with_node_id=id
+  | graph-match (a)-->(b)-->(c) project a.id, b.id, c.id          4, null, 3   (`=` joins: nothing)
+["A","A"]  | graph-match (a)--(b)                                  (A,A) twice   (UNION: once)
+["A","B"]  | graph-match (a)--(b)--(c)                             empty         (an edge per orientation: A-B-A)
+["A","B",long(null)], ["B","C",1] | … all(p, w > 0), any(p, w > 0)  false, false (list_bool_and: true)
+```
+
+So: a null id is a node, and every id comparison is `IS NOT DISTINCT FROM`,
+every anti-join `NOT EXISTS`; every edge row is an edge, duplicates included;
+an undirected edge is **one** edge in both orientations, so `unique_edges`
+forbids walking it back — and that rule spans every edge of the match, fixed
+and variable-length together. `cycles=none` gives distinct variables distinct
+nodes and makes each variable-length edge a simple path avoiding the pattern's
+nodes. A node or edge used whole is a bag **without** its null and
+empty-string properties. `graph-shortest-paths` finds the shortest **simple**
+path within the range, after the `where` has chosen the eligible ones. Where
+Kusto's answer is arbitrary — which node table's row wins for an id in both
+(measured both ways), which tied path `output=any` returns, how components are
+numbered — any of its answers is right, and tests compare only what is fixed.
+Kusto's compile-time type refusals (SEM1019, SEM1079, SEM1006) are run-time
+guards here, because the schema carries names and not types: a cast would
+match `'1'` with `1`.
+
 ---
 
 ## 5. Tabular operator conventions

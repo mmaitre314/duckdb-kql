@@ -216,6 +216,10 @@ def _source_columns_unchecked(source: ir.Source, schema: Schema | None) -> list[
         from .translate import print_column_name
 
         return [print_column_name(e, i) for i, e in enumerate(source.expressions)]
+    if isinstance(source, ir.GraphSource):
+        from .translate.graph import output_columns as graph_columns
+
+        return graph_columns(source, schema)
     raise KqlSchemaError(type(source).__name__, hint="cannot determine columns")
 
 

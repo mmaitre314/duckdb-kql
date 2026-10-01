@@ -33,7 +33,7 @@ returns an approximate answer.
 
 ## Tabular operators
 
-22 of 42 supported.
+27 of 48 supported.
 
 ### Supported
 
@@ -61,11 +61,17 @@ returns an approximate answer.
 | `parse-where` | The same pattern as `parse`, dropping the rows it would have blanked — i.e. matched **and** every conversion succeeded. `parse-where kind=relaxed` is refused, as Kusto refuses it (SEM0477). |
 | `lookup` | Defaults to **`leftouter`**, not `join`'s `innerunique`, and only `leftouter` and `inner` exist — every other kind is refused, as Kusto refuses it. The right side's **key columns are dropped**, so there is no `Key1`; non-key collisions still get the `1` suffix (R14). Needs the input schema, like `join`. As with any outer join, an unmatched `string` column is null here but `''` in Kusto, so a downstream `!= ""` differs — `isempty()` is the portable test. |
 | `getschema` | Reports `ColumnName`, `ColumnOrdinal` (0-based), `DataType` and `ColumnType`, verified against the emulator including the non-obvious .NET names (`bool` is `System.SByte`, `decimal` is `System.Data.SqlTypes.SqlDecimal`). Types are DuckDB's, named as Kusto names them, so a DuckDB type with no Kusto counterpart reports as `dynamic` (composites) or `string` (everything else) rather than inventing a name. |
+| `make-graph` | Builds a graph that exists only inside the graph operator after it (R25). Every edge row is an edge, duplicates included; a node is every id seen in a node table or on an edge, and **a null id is a node that joins** — `4 → null → 3` is a path. Up to two node tables: one table's row wins whole for an id in both (Kusto's choice is arbitrary, and it does **not** merge them as documented), and an id seen only on edges has no properties. Mismatched id types (SEM1019/SEM1079) and a dynamic id (SEM1006) are refused at run time, since the schema carries names and not types. `partitioned-by` works around `graph-match` and `graph-shortest-paths`. Refused: an undirected `--` (switched off on the emulator, so unmeasurable). |
+| `graph-match` | A pattern is joins, a variable-length edge a bounded recursive CTE over its path. `cycles=unique_edges` (default) forbids reusing an edge **anywhere in the match**, and an undirected edge is one edge in both orientations; `all` allows it; `none` gives distinct variables distinct nodes and makes each variable-length edge a simple path that avoids the pattern's nodes. A whole node or edge is a bag **without its null and empty-string properties**. `map`/`all`/`any` over a path (a null condition counts as unsatisfied in both), `inner_nodes`, `node_degree_in`/`_out`, `labels` (always `[]` here) and `node_id`. Output names are measured spellings — `a_age`, `p_w`, `inner_nodes_p_id`, `Column1` — and an unaliased expression whose name has not been measured is refused rather than guessed. Refused as Kusto refuses them: no `project` (SEM0001), unknown property (SEM1040), an edge-table column in `where` (SEM0100), a path's property in `where` (SEM1054), disconnected patterns (SEM1011). |
+| `graph-shortest-paths` | Shortest **simple** paths, whatever `cycles=` says, within the range — not the shortest walk then filtered — and the `where` picks eligible paths before the shortest is chosen. `output=any` (default) keeps one tied path, the one with the earliest edges; `all` keeps every tied one. Only the documented shape, one variable-length edge between two nodes; comparing two pattern elements is refused (CRT0001). |
+| `graph-to-table` | `nodes` returns the node properties — every node table's columns, nulls where a table had none — and `edges` the edge columns. Refused: `with_node_id=`/`with_source_id=`/`with_target_id=`, which are KQL's `hash()` (xxhash64, not in DuckDB); several outputs with `as`; and a graph whose nodes have no properties, where Kusto returns zero columns. |
+| `graph-mark-components` | Adds `ComponentId` (or `with_component_id=`), zero-based and consecutive. Weak components are numbered by first appearance, as measured; Kusto's numbering is documented as arbitrary, and its strong numbering differs, so only the grouping is guaranteed. A reachability closure, so quadratic in a component's size. A property already named like the component id is refused: Kusto returns two columns of that name. |
 
 ### Not supported
 
 | Operator | Notes |
 |---|---|
+| `graph()` | A persisted graph model and its snapshots — phase 2 of [the graph proposal](graph-proposal.md). |
 | `project-keep` | Wildcard column selection against the input schema. The plumbing `project-away` uses would cover it. |
 | `project-reorder` | The same schema plumbing as `project-keep`, plus the trailing-column rules. |
 | `make-series` | Produces array-valued columns over a generated axis, with gap filling. A different result *shape*, not just a different aggregate. |
@@ -251,7 +257,7 @@ Not supported: `arg_max`, `arg_min`, `binary_all_*`, `buildschema`,
 
 ## Scalar functions
 
-114 supported, grouped by family.
+115 supported, grouped by family.
 
 ### Conditional
 
@@ -363,6 +369,7 @@ Not supported: `arg_max`, `arg_min`, `binary_all_*`, `buildschema`,
 | `replace` | Azure Monitor's spelling of `replace_string`. Kusto proper spells the regex form `replace_regex`. |
 | `reverse` | Reverses the value's KQL **string** form by character, whatever its type — `reverse(3h)` is `00:00:30` (R20). Applying it to a dynamic array is not supported. |
 | `split` | Returns a dynamic array. An empty separator and an out-of-range index both yield null rather than an error. |
+| `strcat_array` | — |
 | `strcat_delim` | Variadic after the delimiter. A null keeps its slot: `strcat_delim('-', 'a', int(null), 'b')` is `a--b`, not `a-b` (R20). |
 | `strcat` | Variadic. A null argument contributes the **empty string**, as in KQL — `strcat('a', int(null), 'b')` is `ab` — because `tostring` is total (R20). |
 | `strlen` | Counts **characters**, not bytes — a multi-byte string is shorter than its `octet_length`. |
@@ -459,4 +466,4 @@ starts passing fails the build and has to leave the list.
 
 Coverage against a published external subset:
 [Azure Monitor profile](azure-monitor-profile.md). The normative mapping spec,
-including the full text of R1–R21: [`TRANSLATION.md`](TRANSLATION.md).
+including the full text of R1–R25: [`TRANSLATION.md`](TRANSLATION.md).
