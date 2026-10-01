@@ -99,6 +99,32 @@ Labelled so the context-class name survives.
 single child, and `_collapse` steps through it exactly as it stepped through the
 bare alternative.
 
+### `004` — graph patterns, graph operator clauses, and `1..3`
+
+**Files:** `Kql.g4` (`graphMatchPattern`, `graphMatchPatternEdge`,
+`graphMatchPatternNode`, `graphMatchPatternNamedEdge`,
+`makeGraphTablesAndKeysClause`, `makeGraphTableAndKey`,
+`makeGraphPartitionedByClause`, `relaxedQueryOperatorParameter`) and
+`KqlTokens.g4` (`NonIntegerNumber`).
+
+**Problem.** Six documented constructs fail to parse: a graph pattern is one
+element per comma, so `(a)-->(b)` fails at the arrow; `()` and `-[*1..3]->`
+need names; `make-graph` takes one node table, not two; `partitioned-by`
+wants a dotted path; `with_node_id=` and `output=` are keywords that
+`relaxedQueryOperatorParameter` does not list; and `1..3` lexes as the real `1.`
+then `.3`, which breaks every graph range and `between (1..3)` alike.
+
+**Fix.** The rules as in the report, which is written up for upstream in
+[`upstream-report-graph-and-range.md`](upstream-report-graph-and-range.md).
+`NonIntegerNumber` gains a **lexer predicate** — `{self._input.LA(1) != 46}?`,
+a trailing-dot real may not be followed by a dot — which is Python and so ties
+the lexer to the one target this repo generates. ANTLR has no target-neutral
+negative lookahead.
+
+**Effect.** Generation clean. The 1,285 corpus blocks translate
+**byte-identically** (`tools/sql_snapshot.py`), and the re-harvest that the
+patch unlocked brought the graph pages' examples into the corpus.
+
 ## Known gaps *not* yet patched
 
 Deliberately left failing — they raise `KqlUnsupportedError` until their wave:
@@ -111,9 +137,9 @@ Deliberately left failing — they raise `KqlUnsupportedError` until their wave:
 | `table('Name')` as a source | 3 |
 | `project-by-names` | deferred (kql-to-sql defers it too) |
 
-Out of scope entirely, and therefore never to be patched: graph semantics
-(`make-graph`, `graph-match`, …), management commands (`.create`, `.ingest` — a
-*separate* upstream grammar), and cross-cluster references (`cluster(…)`).
+Out of scope entirely, and therefore never to be patched: management commands
+(`.create`, `.ingest` — a *separate* upstream grammar). Graph semantics were
+listed here until `004`; see `docs/graph-proposal.md`.
 
 ## Re-syncing with upstream
 

@@ -755,6 +755,15 @@ class KqlListener(ParseTreeListener):
         pass
 
 
+    # Enter a parse tree produced by KqlParser#graphMatchPatternEdge.
+    def enterGraphMatchPatternEdge(self, ctx:KqlParser.GraphMatchPatternEdgeContext):
+        pass
+
+    # Exit a parse tree produced by KqlParser#graphMatchPatternEdge.
+    def exitGraphMatchPatternEdge(self, ctx:KqlParser.GraphMatchPatternEdgeContext):
+        pass
+
+
     # Enter a parse tree produced by KqlParser#graphMatchPatternNode.
     def enterGraphMatchPatternNode(self, ctx:KqlParser.GraphMatchPatternNodeContext):
         pass
@@ -941,6 +950,15 @@ class KqlListener(ParseTreeListener):
 
     # Exit a parse tree produced by KqlParser#makeGraphTablesAndKeysClause.
     def exitMakeGraphTablesAndKeysClause(self, ctx:KqlParser.MakeGraphTablesAndKeysClauseContext):
+        pass
+
+
+    # Enter a parse tree produced by KqlParser#makeGraphTableAndKey.
+    def enterMakeGraphTableAndKey(self, ctx:KqlParser.MakeGraphTableAndKeyContext):
+        pass
+
+    # Exit a parse tree produced by KqlParser#makeGraphTableAndKey.
+    def exitMakeGraphTableAndKey(self, ctx:KqlParser.MakeGraphTableAndKeyContext):
         pass
 
 

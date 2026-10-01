@@ -378,8 +378,11 @@ fragment PlusOrMinus:
 fragment Exponent:
     ('e' | 'E') PlusOrMinus? ('0'..'9')+;
 
+// PATCH duckdb-kql/004 (see grammar/UPSTREAM.md): `1..3` is 1, `..`, 3 -- not
+// the real `1.` followed by `.3`. A trailing-dot real may not be followed by a
+// second dot. The predicate is Python, the one target this repo generates.
 fragment NonIntegerNumber:
-      ('0'..'9')+ '.' ('0'..'9')* Exponent?
+      ('0'..'9')+ '.' {self._input.LA(1) != 46}? ('0'..'9')* Exponent?
     | ('0'..'9')+ Exponent
 ;
 

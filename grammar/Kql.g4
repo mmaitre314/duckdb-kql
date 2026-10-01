@@ -377,20 +377,25 @@ graphMatchOperator:
     (ProjectClause=graphMatchProjectClause)?
     ;
 
+// PATCH duckdb-kql/004 (see grammar/UPSTREAM.md): a pattern is a sequence of
+// nodes joined by edges, not one element per comma; node and edge names are
+// optional (`()`, `-[*1..3]->`).
 graphMatchPattern:
-      Node=graphMatchPatternNode
-    | UnnamedEdge=graphMatchPatternUnnamedEdge
+    Nodes+=graphMatchPatternNode (Edges+=graphMatchPatternEdge Nodes+=graphMatchPatternNode)*;
+
+graphMatchPatternEdge:
+      UnnamedEdge=graphMatchPatternUnnamedEdge
     | NamedEdge=graphMatchPatternNamedEdge;
 
 graphMatchPatternNode:
-    '(' Name=identifierOrKeywordOrEscapedName ')';
+    '(' (Name=identifierOrKeywordOrEscapedName)? ')';
 
 graphMatchPatternUnnamedEdge:
     Direction=(DASHDASH_GREATERTHAN | LESSTHAN_DASHDASH | DASHDASH);
 
 graphMatchPatternNamedEdge:
     OpenBracket=(DASH_OPENBRACKET | LESSTHAN_DASH_OPENBRACKET)
-    Name=identifierOrKeywordOrEscapedName
+    (Name=identifierOrKeywordOrEscapedName)?
     (Range=graphMatchPatternRange)?
     CloseBracket=(CLOSEBRACKET_DASH_GREATERTHAN | CLOSEBRACKET_DASH)
     ;
@@ -466,11 +471,16 @@ makeGraphOperator:
 makeGraphIdClause:
     WITH_NODE_ID '=' Name=identifierOrKeywordOrEscapedName;
 
+// PATCH duckdb-kql/004: up to two node tables, `with N1 on Id1, N2 on Id2`.
 makeGraphTablesAndKeysClause:
-    WITH Table=invocationExpression ON Column=simpleNameReference;
+    WITH Tables+=makeGraphTableAndKey (',' Tables+=makeGraphTableAndKey)?;
 
+makeGraphTableAndKey:
+    Table=invocationExpression ON Column=simpleNameReference;
+
+// PATCH duckdb-kql/004: the partition column is a plain column name.
 makeGraphPartitionedByClause:
-    PARTITIONEDBY Entity=entityPathOrElementExpression '(' SubQuery=contextualSubExpression ')';   
+    PARTITIONEDBY Column=simpleNameReference '(' SubQuery=contextualSubExpression ')';   
 
 makeSeriesOperator:
     MAKESERIES 
@@ -826,6 +836,8 @@ strictQueryOperatorParameter:
     ;
 
 // allows any identifier
+// PATCH duckdb-kql/004: WITH_NODE_ID (`graph-to-table nodes with_node_id=X`) and
+// OUTPUT (`graph-shortest-paths output=all`).
 relaxedQueryOperatorParameter:
     NameToken=(
           IDENTIFIER
@@ -858,6 +870,8 @@ relaxedQueryOperatorParameter:
         | WITHSOURCE
         | WITH_SOURCE
         | WITHNOSOURCE__
+        | WITH_NODE_ID
+        | OUTPUT
         )
     '=' (NameValue=identifierOrKeywordName | LiteralValue=literalExpression)
     ;

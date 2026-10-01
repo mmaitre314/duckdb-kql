@@ -424,6 +424,11 @@ class KqlVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
+    # Visit a parse tree produced by KqlParser#graphMatchPatternEdge.
+    def visitGraphMatchPatternEdge(self, ctx:KqlParser.GraphMatchPatternEdgeContext):
+        return self.visitChildren(ctx)
+
+
     # Visit a parse tree produced by KqlParser#graphMatchPatternNode.
     def visitGraphMatchPatternNode(self, ctx:KqlParser.GraphMatchPatternNodeContext):
         return self.visitChildren(ctx)
@@ -526,6 +531,11 @@ class KqlVisitor(ParseTreeVisitor):
 
     # Visit a parse tree produced by KqlParser#makeGraphTablesAndKeysClause.
     def visitMakeGraphTablesAndKeysClause(self, ctx:KqlParser.MakeGraphTablesAndKeysClauseContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by KqlParser#makeGraphTableAndKey.
+    def visitMakeGraphTableAndKey(self, ctx:KqlParser.MakeGraphTableAndKeyContext):
         return self.visitChildren(ctx)
 
 
