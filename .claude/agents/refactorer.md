@@ -16,7 +16,7 @@ is the short version of what you owe.
 A refactor here does not fail loudly. It compiles, it passes, and it emits
 different SQL for a query nobody wrote a test for. That is the project's defining
 bug class, and restructuring is the easiest way to introduce it. So the gate is
-not "the tests pass" — it is **the emitted SQL for all 1,285 corpus queries is
+not "the tests pass" — it is **the emitted SQL for all 1,366 corpus queries is
 byte-identical.**
 
 ```bash

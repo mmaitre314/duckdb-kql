@@ -41,7 +41,7 @@ no acceptable non-empty diff for a refactoring commit. A line you believe is
   change with its trap test.
 
 Why the snapshot rather than the suite alone: `pytest` proves the ~900 cases
-someone thought to write. The snapshot covers **1,285 corpus queries**, including
+someone thought to write. The snapshot covers **1,366 corpus queries**, including
 the ones nobody has mapped yet — and it records *refusals* verbatim, so a
 restructuring that quietly converts `KqlUnsupportedError` into SQL shows up as a
 diff line instead of as a wrong answer in production.

@@ -157,7 +157,7 @@ python tools/sql_snapshot.py --compare /tmp/before.txt
 python tools/maintenance_metrics.py                  # what to work on, and did it move
 ```
 
-The snapshot translates all ~1,285 corpus queries and records the SQL — or the
+The snapshot translates all ~1,366 corpus queries and records the SQL — or the
 refusal — for each. A refactor that preserves behaviour produces a byte-identical
 snapshot; any diff line is either a bug it just introduced or a behaviour change
 that belongs in its own commit. The

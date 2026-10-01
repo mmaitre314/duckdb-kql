@@ -25,7 +25,7 @@ from duckdb_kql import fixtures
 
 # Established by the M0 spike + the in-subquery patch (docs/m0-grammar-spike.md).
 # This number may only ever go UP.
-BASELINE_PARSED = 1285
+BASELINE_PARSED = 1366
 
 CORPUS = Path(
     os.environ.get("DUCKDB_KQL_CORPUS", "tests/cases/docs/docs-corpus.json")
@@ -94,7 +94,7 @@ def test_self_contained_cases_are_a_meaningful_share() -> None:
 # --- frozen expectations (test-plan §5.2) ---------------------------------
 
 #: Established by the first full emulator run. May only go UP.
-BASELINE_FROZEN = 1036
+BASELINE_FROZEN = 1060
 
 
 def _frozen() -> tuple[dict, ...]:

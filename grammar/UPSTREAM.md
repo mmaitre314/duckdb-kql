@@ -122,8 +122,11 @@ the lexer to the one target this repo generates. ANTLR has no target-neutral
 negative lookahead.
 
 **Effect.** Generation clean. The 1,285 corpus blocks translate
-**byte-identically** (`tools/sql_snapshot.py`), and the re-harvest that the
-patch unlocked brought the graph pages' examples into the corpus.
+**byte-identically** (`tools/sql_snapshot.py`). Re-harvesting the same pinned
+docs commit then parses **1,366** blocks, 81 more. Most are graph examples this
+patch unlocked, 24 of which the emulator answers; 29 begin with a management
+command, which the parser has accepted since the control-command work but no
+re-harvest had picked up.
 
 ## Known gaps *not* yet patched
 

@@ -11,6 +11,7 @@ Only the mechanical claims are tested. Prose is not.
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
@@ -256,8 +257,15 @@ def test_readme_coverage_number_matches_the_baseline() -> None:
     )
     assert baseline, "tests/test_behavior.py no longer declares BASELINE_PASSING"
 
-    claimed = re.search(r"\*\*(\d+)\*\* of 1036", _read(README))
+    claimed = re.search(r"\*\*(\d+)\*\* of (\d+)", _read(README))
     assert claimed, "README no longer states a corpus coverage number"
+    # The denominator is the frozen count, read from the corpus rather than
+    # written here: a re-harvest grows it, and a hard-coded 1036 outlived one.
+    corpus = json.loads(Path("tests/cases/docs/docs-corpus.json").read_text(encoding="utf-8"))
+    frozen = sum(1 for c in corpus["cases"] if c.get("expected") is not None)
+    assert int(claimed.group(2)) == frozen, (
+        f"README says 'of {claimed.group(2)}', the corpus freezes {frozen}"
+    )
     assert int(claimed.group(1)) == int(baseline.group(1)), (
         f"README says {claimed.group(1)} passing corpus cases, the baseline "
         f"enforces {baseline.group(1)} — update the README table"

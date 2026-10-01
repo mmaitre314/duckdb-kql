@@ -55,7 +55,7 @@ python tools/gen_support_matrix.py            # if you touched the registry
 ```
 
 The snapshot is the gate that makes "behaviour-preserving" a claim instead of a
-hope: it covers ~1,285 corpus queries, against the handful anyone thinks to
+hope: it covers ~1,366 corpus queries, against the handful anyone thinks to
 test. **For a refactor it must come back byte-identical.** For a fix it will
 differ, and every differing line should be one you can explain.
 
