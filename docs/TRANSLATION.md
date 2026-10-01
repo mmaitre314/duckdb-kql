@@ -130,7 +130,7 @@ be opened and read.
 ---
 
 ### R1 — Conversions return **null**, never an error → `TRY_CAST`
-*Traps: `tests/test_countof_tobool.py`, `tests/test_substring_floor_todatetime.py`, `tests/test_parse.py`*
+*Traps: `tests/test_countof_tobool.py`, `tests/test_substring_floor_todatetime.py`, `tests/test_parse.py`, `tests/test_type_conversions.py`*
 
 KQL's `toint()`, `tolong()`, `todouble()`, `todatetime()`, `toguid()`,
 `totimespan()` return **null** on unparseable input. DuckDB's `CAST` **throws**.
@@ -139,6 +139,25 @@ KQL's `toint()`, `tolong()`, `todouble()`, `todatetime()`, `toguid()`,
 
 `CAST` is permitted only where the translator itself constructs a provably-valid
 value (e.g. typed null literals, §3).
+
+`TRY_CAST` is necessary and not sufficient: **what** converts, and to what, is
+KQL's, and differs from DuckDB's by input type. Measured, and each was a quiet
+wrong answer when the numeric functions were plain casts:
+
+| input | `tolong` | `toint` | DuckDB's cast |
+|---|---|---|---|
+| timespan `1d` | `864000000000` (ticks) | ticks wrapped to 32 bits: `711573504` | null |
+| datetime `2020-01-01` | `637134336000000000` (ticks since 0001-01-01) | wrapped | null |
+| string `"5.7"`, `"1e3"`, `"5."` | null — KQL's integer syntax is sign, digits or `0x` hex | null | `5`, `1000`, `5` |
+| long `9999999999` | itself | **wraps**: `1410065407` | null |
+| real `1e10` (rows) | `10000000000` | **saturates**: `2147483647` | null |
+| dynamic | as what it holds — `dynamic("5.7")` is null by the string rule | | |
+
+`todouble`/`toreal` give a timespan's and a datetime's ticks too. The dispatch
+is run-time `typeof`, for R20's reason: a column carries no type here. One
+case is refused rather than answered: a real **literal** outside the range,
+because Kusto's constant folder answers `toint(1e10)` with -2147483648 while
+its row engine saturates.
 
 ---
 
@@ -1026,8 +1045,15 @@ tick count** (`dynamic([1d])` is `[864000000000]`, though `pack_array(1d)`
 stringifies it), a guid as its lower-case string, `long(null)` as `null`,
 adjacent strings concatenated. **Residue:** Kusto keeps the element's type
 under the string, so `gettype(dynamic([datetime(…)])[0])` is `datetime` there
-and a string here; and `pack_array` of a timespan still spells it DuckDB's
-way (`1 day`, not `1.00:00:00`), as `tostring` of a timespan does.
+and a string here.
+
+**A timespan's string form is `[-][d.]hh:mm:ss[.fffffff]`** — measured
+`1.00:00:00`, `-02:00:00`, `00:00:01.5000000` — the day part only when there
+is one, the fraction only when non-zero and then seven digits. DuckDB's is
+`1 day`, which `tostring`, `strcat` and `pack_array` all answered. And
+**`gettype` names KQL's types**: `long`, `int`, `real`, `string`, `bool`,
+`datetime`, `timespan`, `guid` for a scalar — typed nulls included — and for a
+dynamic what it holds: `array`, `dictionary`, `null`, `long`, `double`.
 
 **Residue.** Sub-microsecond input truncates rather than rounds — KQL prints
 100ns ticks and DuckDB stores microseconds, so the seventh digit is always `0`.

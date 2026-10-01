@@ -26,31 +26,12 @@ from __future__ import annotations
 
 import json
 import re
-from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from . import ir
 from . import lower as L
+from .timespans import ticks
 
-#: Ticks per unit, keyed by the start of the unit's spelling, longest first so
-#: `ms`, `milli` and `micro` are not read as minutes.
-_TICKS = (
-    ("tick", Decimal(1)),
-    ("nano", Decimal("0.01")),
-    ("micro", Decimal(10)),
-    ("milli", Decimal(10_000)),
-    ("ms", Decimal(10_000)),
-    ("hr", Decimal(36_000_000_000)),
-    ("h", Decimal(36_000_000_000)),
-    ("d", Decimal(864_000_000_000)),
-    ("m", Decimal(600_000_000)),
-    ("s", Decimal(10_000_000)),
-)
-
-_SECOND = Decimal(10_000_000)
-
-_UNIT = re.compile(r"^(\d+(?:\.\d+)?)([a-z]+)$")
-_CLOCK = re.compile(r"^(-)?(?:(\d+)\.)?(\d{1,2}):(\d{2})(?::(\d{2})(?:\.(\d{1,7}))?)?$")
 _GUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 
 
@@ -218,39 +199,7 @@ def _number(node: Any, real: bool, out: list[str | ir.Expr]) -> bool:
 
 def _ticks(text: str) -> str:
     """A KQL timespan literal as a tick count, as Kusto stores it in a dynamic."""
-    lowered = text.lower()
-    if lowered.startswith(("time(", "timespan(")):
-        inner = _unwrap(text).strip()
-        if inner.lower() == "null":
-            raise _Unsupported("timespan(null) inside dynamic")
-        if inner.isdigit():
-            # Measured: `time(2)` is two days; `time(1.5)` is a syntax error.
-            return str(int(inner) * 864_000_000_000)
-        clock = _CLOCK.match(inner)
-        if clock is None:
-            return _ticks(inner)
-        negative, days, hours, minutes, seconds, fraction = clock.groups()
-        total = (
-            (int(days or 0) * 86_400 + int(hours) * 3_600 + int(minutes) * 60
-             + int(seconds or 0)) * 10_000_000
-            + int((fraction or "").ljust(7, "0"))
-        )
-        return str(-total if negative else total)
-    found = _UNIT.match(lowered)
-    if found is None:
-        raise _Unsupported(f"timespan {text!r}")
-    number, unit = found.groups()
-    for prefix, ticks in _TICKS:
-        if unit.startswith(prefix):
-            try:
-                value = Decimal(number)
-            except InvalidOperation:
-                break
-            if ticks < _SECOND and value != value.to_integral_value():
-                # Measured, and no rule fits: `1.5ticks` is 1, `0.5microseconds`
-                # 0 and `1.25microseconds` 10 — the fraction is lost before the
-                # unit applies, unlike `1.5h`. Refused rather than guessed.
-                raise _Unsupported(f"timespan {text!r}: a fraction of a sub-second unit")
-            # Measured: whole nanoseconds round down — 150 and 199 are one tick.
-            return str(int(value * ticks // 1))
-    raise _Unsupported(f"timespan {text!r}")
+    try:
+        return str(ticks(text))
+    except ValueError as exc:
+        raise _Unsupported(str(exc)) from None

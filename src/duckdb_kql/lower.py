@@ -290,7 +290,9 @@ def _typed_literal(
         text = _string_value(text)
 
     if text.lower() in ("null", ""):
-        return ir.Literal(None, "null")
+        # A **typed** null keeps its type: `gettype(long(null))` is `long`.
+        # It renders as NULL either way (render_literal).
+        return ir.Literal(None, kind)
 
     if kind == "datetime":
         text = _datetime_parts_to_iso(text)

@@ -289,7 +289,7 @@ Not supported: `arg_max`, `arg_min`, `binary_all_*`, `buildschema`,
 
 | Function | Limitations and gotchas |
 |---|---|
-| `gettype` | Reports the **KQL** type name, not DuckDB's. |
+| `gettype` | Reports the **KQL** type name, not DuckDB's: `long`, `int`, `real`, `string`, `bool`, `datetime`, `timespan`, `guid`, typed nulls included, and for a dynamic what it holds — `array`, `dictionary`, `null`, `long`, `double` (not `real`), `string`, `bool`. **Residue:** a decimal literal reports `real`, and a datetime stored inside a dynamic reports `string` — Kusto keeps its type there. |
 | `isempty` | True for null **or** the empty string — not the same as `isnull`. |
 | `isfinite` | — |
 | `isinf` | — |
@@ -376,7 +376,7 @@ Not supported: `arg_max`, `arg_min`, `binary_all_*`, `buildschema`,
 | `strrep` | — |
 | `substring` | **0-based**, and clamps out-of-range or negative input instead of erroring. SQL's `substring` is 1-based. |
 | `tolower` | A `dynamic` in a string context is its **unwrapped** text — `dynamic('x')` is `x`, not `"x"`, and `dynamic(null)` is the empty string. |
-| `tostring` | Uses .NET's spelling, which differs from DuckDB's for **bools** (`True`, not `true`), datetimes and dynamics, and it is **total** — a null of any type is the empty string, not null (R20). Getting it wrong changes every hash computed over it. |
+| `tostring` | Uses .NET's spelling, which differs from DuckDB's for **bools** (`True`, not `true`), datetimes, timespans (`1.00:00:00`, not `1 day`) and dynamics, and it is **total** — a null of any type is the empty string, not null (R20). Getting it wrong changes every hash computed over it. |
 | `toupper` | A `dynamic` in a string context is its **unwrapped** text — `dynamic('x')` is `x`, not `"x"`, and `dynamic(null)` is the empty string. |
 | `trim_start` | The first argument is a **regular expression**, not a set of characters to strip. `trim_start(' ', s)` strips one leading space, not all whitespace. |
 
@@ -413,11 +413,11 @@ Not supported: `arg_max`, `arg_min`, `binary_all_*`, `buildschema`,
 |---|---|
 | `tobool` | Text is `true`/`false` (case-insensitive, trimmed) **or an integer** — `'2'` is true and `'1.5'` is null. A *number* is its nonzero-ness, so `tobool(1.5)` is true and `tobool('1.5')` is not: the same value spelled two ways converts differently, and the two are told apart at run time. DuckDB's own boolean cast is wrong in both directions — it accepts `yes`/`no`/`y`/`n`/`t`/`f` and rejects `'2'` (R1). |
 | `toboolean` | Alias for `tobool`. |
-| `todouble` | Unparseable input yields **null**, never an error. |
+| `todouble` | A timespan or datetime is its tick count; a dynamic string parses as the string does. |
 | `toguid` | Returns null on a malformed GUID rather than raising (R1). |
-| `toint` | Unparseable input yields **null**, never an error. |
-| `tolong` | Unparseable input yields **null**, never an error. |
-| `toreal` | Unparseable input yields **null**, never an error. |
+| `toint` | As `tolong`, then to 32 bits the way Kusto does it: a long, timespan or datetime **wraps** (`toint(9999999999)` is 1410065407), a real **saturates**, and a string out of range is null. |
+| `tolong` | KQL's conversion by input type, not a cast (R1): a timespan is its ticks, a datetime its ticks since 0001-01-01, a string an integer only in KQL's syntax (`"5.7"` and `"1e3"` are null), a real truncates and saturates, a dynamic converts as what it holds. A real *literal* out of range is refused: Kusto folds it differently than it computes it over rows. |
+| `toreal` | Synonym for `todouble`. |
 
 ## Data types
 

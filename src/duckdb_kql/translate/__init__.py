@@ -159,6 +159,11 @@ def render_literal(lit: ir.Literal) -> str:
         # overflow at 2^31 (docs/TRANSLATION.md §2).
         return f"CAST({int(lit.value)} AS BIGINT)"
     if lit.kind in ("real", "decimal"):
+        value = float(lit.value)
+        if value != value or value in (float("inf"), float("-inf")):
+            # `real(nan)` reached DuckDB as the bare word `nan` — a column.
+            text = "NaN" if value != value else ("Infinity" if value > 0 else "-Infinity")
+            return f"CAST('{text}' AS DOUBLE)"
         return f"CAST({lit.value} AS DOUBLE)"
     if lit.kind == "datetime":
         # A `datetime(...)` literal accepts everything todatetime() does, so it
@@ -167,7 +172,7 @@ def render_literal(lit: ir.Literal) -> str:
         # KQL would. DuckDB constant-folds this, so there is no runtime cost.
         return _TODATETIME.format(quote_string(str(lit.value)))
     if lit.kind == "timespan":
-        return f"INTERVAL {quote_string(str(lit.value))}"
+        return _render_timespan_literal(str(lit.value))
     if lit.kind == "guid":
         return f"UUID {quote_string(str(lit.value))}"
     if lit.kind == "dynamic":
@@ -175,6 +180,33 @@ def render_literal(lit: ir.Literal) -> str:
             return "CAST(NULL AS JSON)"
         return f"CAST({quote_string(str(lit.value))} AS JSON)"
     raise KqlUnsupportedError(f"literal:{lit.kind}")
+
+
+def _render_timespan_literal(text: str) -> str:
+    """A timespan literal: DuckDB's own reading where it has one, ticks where not.
+
+    `INTERVAL '1d'` agrees with Kusto for every unit DuckDB parses — measured,
+    spelling by spelling — but DuckDB has no `tick`, `nanosecond` or bare
+    `milli`, nor the `d.hh:mm:ss` clock form, so `time(1.02:03:04)` and `1tick`
+    failed to translate at all. Those are converted to ticks here. A tick is
+    100 ns and DuckDB keeps microseconds, so a value that is not a whole number
+    of microseconds is refused: `1tick` as zero would be a wrong answer.
+    """
+    from ..timespans import needs_ticks, ticks
+
+    if not needs_ticks(text):
+        return f"INTERVAL {quote_string(text)}"
+    try:
+        count = ticks(text)
+    except ValueError as exc:
+        raise KqlUnsupportedError("literal:timespan", hint=str(exc)) from None
+    if count % 10:
+        raise KqlUnsupportedError(
+            "literal:timespan",
+            hint=f"{text} is {count} ticks of 100 ns; DuckDB keeps whole "
+            "microseconds, so it cannot be held exactly",
+        )
+    return f"to_microseconds(CAST({count // 10} AS BIGINT))"
 
 
 # ---------------------------------------------------------------------------
@@ -3761,8 +3793,40 @@ def render_kql_tostring(node: ir.Expr) -> str:
         f" WHEN 'BOOLEAN' THEN CASE CAST({rendered} AS VARCHAR)"
         f" WHEN 'true' THEN 'True' WHEN 'false' THEN 'False' END"
         f" WHEN 'TIMESTAMP' THEN {_kql_datetime_text(f'CAST({rendered} AS TIMESTAMP)')}"
+        f" WHEN 'INTERVAL' THEN {_kql_timespan_text(f'CAST({rendered} AS INTERVAL)')}"
         f" ELSE CAST({rendered} AS VARCHAR) END, '')"
     )
+
+
+def _kql_timespan_text(rendered: str) -> str:
+    """An INTERVAL as KQL prints it: ``[-][d.]hh:mm:ss[.fffffff]``.
+
+    Measured: `1.00:00:00`, `-02:00:00`, `00:00:01.5000000`, `-1.12:00:00`,
+    `100.00:00:00` — the day part only when there is one, the fraction only
+    when it is not zero, and then always seven digits. DuckDB's own spelling is
+    `1 day` and `02:03:04.5`, which `tostring`, `strcat` and `pack_array` all
+    answered. The seventh digit is always `0`: DuckDB keeps microseconds.
+
+    The microsecond count is bound once through a one-element list, rather than
+    substituting *rendered* into each of the eight places it is read.
+    """
+    a = "abs(_us)"
+    return (
+        f"list_transform([epoch_us({rendered})], _us -> "
+        f"CASE WHEN _us < 0 THEN '-' ELSE '' END"
+        f" || CASE WHEN {a} >= 86400000000 THEN CAST({a} // 86400000000 AS VARCHAR) || '.'"
+        f" ELSE '' END"
+        f" || lpad(CAST({a} // 3600000000 % 24 AS VARCHAR), 2, '0')"
+        f" || ':' || lpad(CAST({a} // 60000000 % 60 AS VARCHAR), 2, '0')"
+        f" || ':' || lpad(CAST({a} // 1000000 % 60 AS VARCHAR), 2, '0')"
+        f" || CASE WHEN {a} % 1000000 <> 0"
+        f" THEN '.' || lpad(CAST({a} % 1000000 AS VARCHAR), 6, '0') || '0' ELSE '' END)[1]"
+    )
+
+
+def _kql_ticks(rendered: str) -> str:
+    """An INTERVAL as KQL's tick count (100 ns): what `tolong(1d)` answers."""
+    return f"(epoch_us({rendered}) * 10)"
 
 
 def _kql_datetime_text(rendered: str) -> str:
@@ -4315,10 +4379,193 @@ def _dynamic_element(node: ir.Expr) -> str:
     """
     rendered = render_expr(node)
     return (
-        f"CASE WHEN typeof({rendered}) = 'TIMESTAMP' "
-        f"THEN to_json({_kql_datetime_text(f'CAST({rendered} AS TIMESTAMP)')}) "
+        f"CASE typeof({rendered}) "
+        f"WHEN 'TIMESTAMP' THEN to_json({_kql_datetime_text(f'CAST({rendered} AS TIMESTAMP)')}) "
+        f"WHEN 'INTERVAL' THEN to_json({_kql_timespan_text(f'CAST({rendered} AS INTERVAL)')}) "
         f"ELSE to_json({rendered}) END"
     )
+
+
+#: `json_type` -> what `gettype` calls a value inside a dynamic. Measured: an
+#: integer is `long`, a real is `double` (not `real`), an object `dictionary`.
+_DYNAMIC_GETTYPE = {
+    "ARRAY": "array", "OBJECT": "dictionary", "BIGINT": "long", "UBIGINT": "long",
+    "DOUBLE": "double", "VARCHAR": "string", "BOOLEAN": "bool",
+}
+
+
+#: A literal's kind -> its `gettype`. `dynamic(null)` is `null`; any other
+#: dynamic literal is decided by its content, at run time.
+_LITERAL_GETTYPE = {
+    "long": "long", "int": "int", "real": "real", "decimal": "decimal",
+    "string": "string", "bool": "bool", "datetime": "datetime",
+    "timespan": "timespan", "guid": "guid", "dynamic": "null",
+}
+
+
+def _render_gettype(node: ir.FunctionCall) -> str | None:
+    """`gettype(x)` — Kusto's type name, not DuckDB's.
+
+    It was `lower(json_type(x))`, which answered DuckDB's names (`ubigint`,
+    `varchar`, `boolean`) for a dynamic and nonsense for anything else.
+    Measured: a scalar is named by its type — `long`, `int`, `real`, `string`,
+    `bool`, `datetime`, `timespan`, `guid`, `decimal`, typed nulls included —
+    and a dynamic by what it holds: `array`, `dictionary`, `null`, `long`,
+    `double`, `string`, `bool`. The scalar names come from the table
+    `getschema` uses (`types.DUCKDB_TO_KQL`), so the two cannot disagree.
+
+    **Residue:** Kusto keeps a datetime, timespan or guid stored inside a
+    dynamic as that type; here it is JSON, so it reports as `string` or `long`.
+    """
+    if len(node.args) != 1:
+        return None
+    from ..types import kusto_type_sql
+
+    arg = node.args[0]
+    if isinstance(arg, ir.Literal) and arg.kind in _LITERAL_GETTYPE:
+        # A literal's IR carries its type, which its SQL may not: `int(1)` is
+        # emitted as a BIGINT, and a typed null as a bare NULL.
+        if arg.kind == "dynamic" and arg.value is not None:
+            pass
+        else:
+            return quote_string(_LITERAL_GETTYPE[arg.kind])
+    rendered = render_expr(arg)
+    content = " ".join(
+        f"WHEN {quote_string(j)} THEN {quote_string(k)}" for j, k in _DYNAMIC_GETTYPE.items()
+    )
+    held = f"coalesce(CASE json_type(to_json({rendered})) {content} END, 'null')"
+    return (
+        f"list_transform([{kusto_type_sql(f'typeof({rendered})')}], "
+        f"_k -> CASE WHEN _k = 'dynamic' THEN {held} ELSE _k END)[1]"
+    )
+
+
+#: KQL's integer syntax for `tolong`/`toint` of a string, measured: optional
+#: surrounding whitespace and sign, then decimal digits or `0x` hex. `"5.7"`,
+#: `"1e3"`, `"5."` and `"1_000"` are null — DuckDB's cast reads all four.
+_INTEGER_TEXT = r"^\s*[+-]?([0-9]+|0[xX][0-9a-fA-F]+)\s*$"
+
+#: Ticks from 0001-01-01 to the Unix epoch: `tolong(datetime(…))` counts from
+#: the former.
+_EPOCH_TICKS = 621355968000000000
+
+
+def _integer_from_text(text: str, sql_type: str) -> str:
+    return (
+        f"CASE WHEN regexp_matches({text}, {quote_string(_INTEGER_TEXT)}) "
+        f"THEN TRY_CAST(trim({text}) AS {sql_type}) END"
+    )
+
+
+def _integer_from_real(real: str, bits: int) -> str:
+    """Truncate toward zero, **saturating** at the type's bounds — measured over
+    rows: `toint(1e10)` is 2147483647, `tolong(1e30)` 9223372036854775807. NaN
+    and infinity are null. (Kusto's constant folder answers `toint(1e10)` with
+    -2147483648 instead; a literal real that large is not data anyone has.)"""
+    high, low = 2 ** (bits - 1) - 1, -(2 ** (bits - 1))
+    sql_type = "BIGINT" if bits == 64 else "INTEGER"
+    return (
+        f"CASE WHEN isnan({real}) OR isinf({real}) THEN NULL "
+        f"WHEN {real} >= {float(high + 1)!r} THEN CAST({high} AS {sql_type}) "
+        f"WHEN {real} <= {float(low)!r} THEN CAST({low} AS {sql_type}) "
+        f"ELSE CAST(trunc({real}) AS {sql_type}) END"
+    )
+
+
+def _wrap_int32(value: str) -> str:
+    """A long wrapped to 32 bits — measured: `toint(9999999999)` is 1410065407."""
+    return (
+        f"list_transform([({value} % 4294967296 + 4294967296) % 4294967296], "
+        f"_w -> CAST(CASE WHEN _w >= 2147483648 THEN _w - 4294967296 ELSE _w END "
+        f"AS INTEGER))[1]"
+    )
+
+
+def _render_tick_conversion(node: ir.FunctionCall) -> str | None:
+    """`tolong`, `toint`, `todouble`, `toreal` — KQL's conversions, by input type.
+
+    The registry's numeric casts were DuckDB's, and five answers differed from
+    Kusto's, all quietly. Measured:
+
+    * a **timespan** is its tick count (`tolong(1d)` 864000000000), and a
+      **datetime** its ticks since 0001-01-01 — both were null;
+    * a **string** is an integer only in KQL's syntax: `tolong("5.7")` is null,
+      not 5, and `"1e3"` null, not 1000;
+    * `toint` of a **long** wraps to 32 bits (`toint(9999999999)` 1410065407,
+      not null), while `toint` of a **real** saturates and of a string
+      overflows to null;
+    * a **dynamic** converts as what it holds — `tolong(dynamic("5.7"))` is
+      null by the string rule.
+
+    A column carries no type here, so the dispatch is DuckDB's run-time
+    `typeof`, bound once through a one-element list.
+    """
+    if len(node.args) != 1:
+        return None
+    name = node.name.lower()
+    arg = node.args[0]
+    bound = {"toint": 2**31, "tolong": 2**63}.get(name)
+    if (
+        bound is not None
+        and isinstance(arg, ir.Literal)
+        and isinstance(arg.value, float)
+        and arg.value == arg.value  # NaN is null both ways, measured
+        and not -bound <= arg.value < bound
+    ):
+        # Measured: Kusto's constant folder answers `toint(1e10)` with
+        # -2147483648 while its row engine saturates to 2147483647. A literal
+        # this large has two answers, so it gets none.
+        raise KqlUnsupportedError(
+            f"function:{name}",
+            hint=f"{name} of the constant {arg.value!r}, outside the type's range: "
+            "Kusto folds it to one value and computes another over rows",
+        )
+    v = "_v"
+    ticks_span = f"(epoch_us(CAST({v} AS INTERVAL)) * 10)"
+    ticks_time = f"(epoch_us(CAST({v} AS TIMESTAMP)) * 10 + {_EPOCH_TICKS})"
+    if name in ("todouble", "toreal"):
+        spec = lookup(name)
+        assert spec is not None
+        j = f"TRY_CAST({v} AS JSON)"
+        body = (
+            f"CASE typeof({v}) WHEN 'INTERVAL' THEN CAST({ticks_span} AS DOUBLE) "
+            f"WHEN 'TIMESTAMP' THEN CAST({ticks_time} AS DOUBLE) "
+            # A dynamic string parses as the string would: `todouble(dynamic(" 7 "))` is 7.
+            f"WHEN 'JSON' THEN CASE json_type({j}) WHEN 'VARCHAR' "
+            f"THEN TRY_CAST(trim({j} ->> '$') AS DOUBLE) ELSE {spec.render([v])} END "
+            f"ELSE {spec.render([v])} END"
+        )
+    else:
+        bits = 64 if name == "tolong" else 32
+        sql_type = "BIGINT" if bits == 64 else "INTEGER"
+
+        def from_long(value: str) -> str:
+            return value if bits == 64 else _wrap_int32(value)
+
+        j = f"TRY_CAST({v} AS JSON)"
+        text = f"({j} ->> '$')"
+        held = (
+            f"CASE json_type({j}) "
+            f"WHEN 'BIGINT' THEN {from_long(f'TRY_CAST({j} AS BIGINT)')} "
+            f"WHEN 'UBIGINT' THEN {from_long(f'TRY_CAST({j} AS BIGINT)')} "
+            f"WHEN 'DOUBLE' THEN {_integer_from_real(f'CAST({j} AS DOUBLE)', bits)} "
+            f"WHEN 'BOOLEAN' THEN CAST(CAST({j} AS BOOLEAN) AS {sql_type}) "
+            f"WHEN 'VARCHAR' THEN {_integer_from_text(text, sql_type)} "
+            f"END"
+        )
+        body = (
+            f"CASE WHEN typeof({v}) IN ('DOUBLE', 'FLOAT') OR typeof({v}) LIKE 'DECIMAL%' "
+            f"THEN {_integer_from_real(f'CAST({v} AS DOUBLE)', bits)} "
+            f"WHEN typeof({v}) = 'VARCHAR' "
+            f"THEN {_integer_from_text(f'CAST({v} AS VARCHAR)', sql_type)} "
+            f"WHEN typeof({v}) = 'JSON' THEN {held} "
+            f"WHEN typeof({v}) = 'INTERVAL' THEN {from_long(ticks_span)} "
+            f"WHEN typeof({v}) = 'TIMESTAMP' THEN {from_long(ticks_time)} "
+            f"WHEN typeof({v}) = 'BOOLEAN' THEN CAST(CAST({v} AS BOOLEAN) AS {sql_type}) "
+            f"WHEN typeof({v}) LIKE '%INT%' THEN {from_long(f'TRY_CAST({v} AS BIGINT)')} "
+            f"END"
+        )
+    return f"list_transform([{render_expr(node.args[0])}], {v} -> {body})[1]"
 
 
 def _render_bag_pack(node: ir.FunctionCall) -> str | None:
@@ -4418,6 +4665,11 @@ _SPECIAL_FORMS: dict[str, Callable[[ir.FunctionCall], str | None]] = {
     "reverse": _render_reverse,
     "pack_array": _render_pack_array,
     "bag_pack": _render_bag_pack,
+    "gettype": _render_gettype,
+    "tolong": _render_tick_conversion,
+    "toint": _render_tick_conversion,
+    "todouble": _render_tick_conversion,
+    "toreal": _render_tick_conversion,
     "pack": _render_bag_pack,
     "hash_md5": _render_hash,
     "hash_sha1": _render_hash,
