@@ -4287,7 +4287,7 @@ def _render_hash(node: ir.FunctionCall) -> str | None:
 
 def _render_array_concat(node: ir.FunctionCall) -> str:
     """`array_concat(...)` — variadic in KQL, binary in DuckDB, so folded."""
-    args = [f"CAST({render_expr(a)} AS JSON[])" for a in node.args]
+    args = [f"CAST(to_json({render_expr(a)}) AS JSON[])" for a in node.args]
     if not args:
         return "CAST('[]' AS JSON)"
     folded = args[0]
