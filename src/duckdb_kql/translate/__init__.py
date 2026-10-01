@@ -4297,10 +4297,38 @@ def _render_reverse(node: ir.FunctionCall) -> str | None:
 def _render_pack_array(node: ir.FunctionCall) -> str:
     """`pack_array(...)` — `json_array`, not `to_json([...])`.
 
-    `json_array()` takes mixed types, which `to_json([...])` cannot, and it
-    renders an INTERVAL the way KQL spells it (`"00:00:02"`).
+    `json_array()` takes mixed types, which `to_json([...])` cannot. Each
+    element goes through :func:`_dynamic_element` for a datetime's spelling.
     """
-    return f"json_array({', '.join(render_expr(a) for a in node.args)})"
+    return f"json_array({', '.join(_dynamic_element(a) for a in node.args)})"
+
+
+def _dynamic_element(node: ir.Expr) -> str:
+    """A value as it is stored inside a `dynamic`: a datetime as KQL spells it.
+
+    Measured: `tostring(pack_array(datetime(2020-01-01)))` is
+    `["2020-01-01T00:00:00.0000000Z"]`, the spelling a `dynamic([datetime(…)])`
+    literal stores too. DuckDB's JSON writes `"2020-01-01 00:00:00"` — a
+    plausible string that compares, sorts and round-trips through
+    `todatetime` differently. A column carries no type here, so the choice is
+    DuckDB's run-time `typeof`, as in :func:`render_kql_tostring`.
+    """
+    rendered = render_expr(node)
+    return (
+        f"CASE WHEN typeof({rendered}) = 'TIMESTAMP' "
+        f"THEN to_json({_kql_datetime_text(f'CAST({rendered} AS TIMESTAMP)')}) "
+        f"ELSE to_json({rendered}) END"
+    )
+
+
+def _render_bag_pack(node: ir.FunctionCall) -> str | None:
+    """`bag_pack(k, v, …)` / `pack(…)` — values as :func:`_dynamic_element`."""
+    if len(node.args) % 2:
+        return None
+    parts = []
+    for key, value in zip(node.args[::2], node.args[1::2], strict=True):
+        parts += [render_expr(key), _dynamic_element(value)]
+    return f"json_object({', '.join(parts)})"
 
 
 #: KQL hash function -> DuckDB's. Kept beside the renderer that reads it so the
@@ -4389,6 +4417,8 @@ _SPECIAL_FORMS: dict[str, Callable[[ir.FunctionCall], str | None]] = {
     "tostring": _render_tostring,
     "reverse": _render_reverse,
     "pack_array": _render_pack_array,
+    "bag_pack": _render_bag_pack,
+    "pack": _render_bag_pack,
     "hash_md5": _render_hash,
     "hash_sha1": _render_hash,
     "hash_sha256": _render_hash,

@@ -3100,6 +3100,13 @@ def _lower_dynamic_literal(node: Any) -> ir.Expr:
         # NULL, which lost the type — and with it `tostring(dynamic(null))`,
         # which is the empty string in Kusto and came back as null here.
         return ir.Literal(None, "dynamic")
+    from .lower_dynamic import lower as lower_dynamic
+
+    # A payload holding a datetime, timespan, guid, typed number or nested
+    # dynamic needs converting; plain JSON keeps the path below unchanged.
+    converted = lower_dynamic(values[0])
+    if converted is not None:
+        return converted
     return ir.Literal(_normalize_json(values[0].getText().strip()), "dynamic")
 
 

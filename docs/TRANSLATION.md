@@ -981,7 +981,7 @@ and `: dynamic`, which is the `todynamic` gap noted above rather than a `parse`
 one.
 
 ### R20 — A value's **string form** is .NET's, and `tostring` is total
-*Trap: `tests/test_tostring.py`*
+*Traps: `tests/test_tostring.py`, `tests/test_dynamic_literals.py`*
 
 R17 is about one type reaching a string context. This is the rule underneath
 it: every type has a KQL string form, and three of them are not SQL's.
@@ -1015,6 +1015,19 @@ VARCHAR form rather than testing the operand as a condition.
 R17's string-only function list. A wrong string form is not cosmetic there: the
 hash functions digest it, so the query returns a plausible digest that no
 cluster would ever produce.
+
+**Inside a `dynamic`, a datetime is stored as that string form.** Measured:
+`dynamic([datetime(2020-01-01)])` and `pack_array(datetime(2020-01-01))` are
+both `["2020-01-01T00:00:00.0000000Z"]`, and DuckDB's JSON writes
+`"2020-01-01 00:00:00"` — which `pack_array` answered, quietly, while the
+literal failed outright. The other non-JSON elements of a `dynamic(...)`
+literal are each stored their own way, also measured: a timespan as a **long
+tick count** (`dynamic([1d])` is `[864000000000]`, though `pack_array(1d)`
+stringifies it), a guid as its lower-case string, `long(null)` as `null`,
+adjacent strings concatenated. **Residue:** Kusto keeps the element's type
+under the string, so `gettype(dynamic([datetime(…)])[0])` is `datetime` there
+and a string here; and `pack_array` of a timespan still spells it DuckDB's
+way (`1 day`, not `1.00:00:00`), as `tostring` of a timespan does.
 
 **Residue.** Sub-microsecond input truncates rather than rounds — KQL prints
 100ns ticks and DuckDB stores microseconds, so the seventh digit is always `0`.
