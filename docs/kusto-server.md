@@ -338,6 +338,11 @@ change the line that sets them. On the wire the caller is a web UI that sends
 them on every single query, and refusing a request that asks for exactly what it
 is going to get would break the product while telling the truth about nothing.
 
+`query_results_cache_max_age` is judged by its value everywhere, the Python
+API and the `set` statement included: a zero age is a no-op, since nothing is
+cached, and any other is refused. The accepted spellings are in
+[the client's table](kusto-client.md#request-options).
+
 "Implemented" means the same thing here as there. `query_now` pins the clock,
 `servertimeout` interrupts the query when it runs over — the web UI sends four
 minutes on every request — and `request_readonly` / `request_readonly_hardline`

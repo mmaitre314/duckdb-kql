@@ -95,7 +95,7 @@ Neither ever accepts an option and ignores it.
 | `max_memory_consumption_per_query_per_node` | Refused | Same. |
 | `query_fanout_nodes_percent` | Refused | Fanout spreads a query over a cluster's nodes. There is one process here. |
 | `query_fanout_threads_percent` | Refused | DuckDB's threading is a connection setting, not a per-query one. |
-| `query_results_cache_max_age` | Refused | There is no results cache, so a max age would govern nothing. |
+| `query_results_cache_max_age` | No-op at zero | There is no results cache, so a zero age — return no cached result — is what already happens, and is accepted: `time(0s)`, `0s`, `timespan(0)`, `time(00:00:00)`, `'00:00:00'`, `'0'` and any other timespan literal or plain timespan string of zero ticks, or `datetime.timedelta(0)` through `set_option`. Any other age is refused, since it would govern a cache that does not exist; so is a spelling Kusto refuses (`0`, `time(null)`, `' 0s '`) or one this cannot read for certain (`'0 s'`). |
 | `query_results_cache_per_shard` | Refused | Follows `query_results_cache_max_age`: there is no results cache, so there are no shards of one to enable it for. |
 | `query_take_max_records` | Refused | Same as `truncationmaxrecords`: a result capped without saying so is indistinguishable from a short one. |
 | `maxoutputcolumns` | Refused | A limit Kusto enforces by refusing the query (measured: SEM0004 past it). Ignoring it would answer a query Kusto refuses. |

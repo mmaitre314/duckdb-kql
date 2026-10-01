@@ -299,13 +299,15 @@ def test_every_classified_option_has_a_real_reason() -> None:
             OptionSupport.IMPLEMENTED,
             OptionSupport.NO_OP,
             OptionSupport.REFUSED,
+            OptionSupport.CONDITIONAL,
         ), name
         assert len(reason) > 20, f"{name} needs an explanation, not a placeholder"
 
 
 @pytest.mark.parametrize(
     "name",
-    [n for n, (s, _) in OPTION_SUPPORT.items() if s == OptionSupport.REFUSED],
+    [n for n, (s, _) in OPTION_SUPPORT.items()
+     if s in (OptionSupport.REFUSED, OptionSupport.CONDITIONAL)],
 )
 def test_refused_options_raise_at_the_line_that_sets_them(name: str) -> None:
     with pytest.raises(KustoUnsupportedError):
@@ -314,7 +316,8 @@ def test_refused_options_raise_at_the_line_that_sets_them(name: str) -> None:
 
 @pytest.mark.parametrize(
     "name",
-    [n for n, (s, _) in OPTION_SUPPORT.items() if s != OptionSupport.REFUSED],
+    [n for n, (s, _) in OPTION_SUPPORT.items()
+     if s not in (OptionSupport.REFUSED, OptionSupport.CONDITIONAL)],
 )
 def test_accepted_options_are_accepted(name: str) -> None:
     props = ClientRequestProperties()

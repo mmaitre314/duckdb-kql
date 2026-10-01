@@ -304,6 +304,7 @@ def check_options(options: dict[str, Any]) -> list[str]:
         OPTION_SUPPORT,
         OptionSupport,
     )
+    from .options import accepts
 
     refusals = []
     for raw, value in options.items():
@@ -324,6 +325,8 @@ def check_options(options: dict[str, Any]) -> list[str]:
         )
         if support == OptionSupport.REFUSED:
             refusals.append(f"request option {raw!r}: {reason}")
+        elif support == OptionSupport.CONDITIONAL and not accepts(name, value):
+            refusals.append(f"request option {raw}={value!r}: {reason}")
     return refusals
 
 

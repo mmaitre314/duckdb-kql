@@ -28,7 +28,7 @@ from .exceptions import KustoUnsupportedError
 __all__ = ["ClientRequestProperties", "OPTION_SUPPORT", "OptionSupport"]
 
 
-from ..options import OPTION_SUPPORT, OptionSupport
+from ..options import OPTION_SUPPORT, OptionSupport, accepts
 
 
 class ClientRequestProperties:
@@ -92,6 +92,8 @@ class ClientRequestProperties:
         )
         if support == OptionSupport.REFUSED:
             raise KustoUnsupportedError(f"request option {name!r}", hint=reason)
+        if support == OptionSupport.CONDITIONAL and not accepts(name.lower(), value):
+            raise KustoUnsupportedError(f"request option {name}={value!r}", hint=reason)
         self._options[name] = value
 
     def has_option(self, name: str) -> bool:

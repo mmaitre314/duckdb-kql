@@ -2428,6 +2428,7 @@ def _apply_set_statements(tree: Any) -> None:
         SET_STATEMENT_NO_OP,
         SET_STATEMENT_ONLY_AT_EXECUTION,
         OptionSupport,
+        accepts,
     )
     from .translate import pin
 
@@ -2453,6 +2454,14 @@ def _apply_set_statements(tree: Any) -> None:
             )
         if support == OptionSupport.NO_OP or name in SET_STATEMENT_NO_OP:
             continue
+        if support == OptionSupport.CONDITIONAL:
+            if accepts(name, _set_statement_payload(value)):
+                continue
+            raise KqlUnsupportedError(
+                f"set {name}",
+                span=_span(statement),
+                hint=reason,
+            )
         if name == "query_now":
             pin(_read_query_now(statement, value))
             continue
@@ -2473,6 +2482,21 @@ def _read_set_statement(statement: Any) -> tuple[str, Any | None]:
     found = _find_names(kids[0])
     name = (found[0] if found else kids[0].getText()).lower()
     return name, kids[1] if len(kids) > 1 else None
+
+
+def _set_statement_payload(value: Any | None) -> Any:
+    """What `options.accepts` reads from a ``set`` value: a timespan literal's
+    text, wrapper removed, or a string literal's value — and None for anything
+    else, a number or a bare name, which no conditional option accepts."""
+    if value is None:
+        return None
+    try:
+        lowered = _lower_expr(_collapse(value))
+    except KqlError:
+        return None
+    if isinstance(lowered, ir.Literal) and lowered.kind in ("timespan", "string"):
+        return lowered.value if isinstance(lowered.value, str) else None
+    return None
 
 
 def _read_query_now(statement: Any, value: Any | None) -> _dt.datetime:

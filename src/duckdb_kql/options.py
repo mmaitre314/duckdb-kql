@@ -21,14 +21,18 @@ should hear about it.
 
 from __future__ import annotations
 
+import datetime as _dt
 from collections.abc import Mapping
 from typing import Any
+
+from .timespans import ticks
 
 __all__ = [
     "OPTION_SUPPORT",
     "SET_STATEMENT_NO_OP",
     "SET_STATEMENT_ONLY_AT_EXECUTION",
     "OptionSupport",
+    "accepts",
     "read_only_requested",
 ]
 
@@ -43,6 +47,9 @@ class OptionSupport:
     NO_OP = "no-op"
     #: We refuse it: honouring it is impossible or would need to be faked.
     REFUSED = "refused"
+    #: A no-op for the values that ask for what already happens here, refused
+    #: for every other; :func:`accepts` says which.
+    CONDITIONAL = "conditional"
 
 
 #: Every Kusto request option this client has an opinion about, and why.
@@ -247,9 +254,6 @@ _REFUSED_WITH_REASON = {
     "query_fanout_threads_percent": (
         "DuckDB's threading is a connection setting, not a per-query one."
     ),
-    "query_results_cache_max_age": (
-        "There is no results cache, so a max age would govern nothing."
-    ),
     # Both of these are in the frozen corpus, scraped from the product
     # documentation, which is how their spelling is known to be real. They
     # reached the generic "not one of the options this translator implements"
@@ -333,6 +337,47 @@ _REFUSED_WITH_REASON = {
 for _name, _reason in _REFUSED_WITH_REASON.items():
     OPTION_SUPPORT[_name] = (OptionSupport.REFUSED, _reason)
 del _name, _reason
+
+OPTION_SUPPORT["query_results_cache_max_age"] = (
+    OptionSupport.CONDITIONAL,
+    "Only a max age of zero is accepted, as a no-op: there is no results "
+    "cache, so returning no cached result is what already happens. Any other "
+    "age would govern a cache that does not exist.",
+)
+
+
+def accepts(name: str, value: Any) -> bool:
+    """Whether a CONDITIONAL option's *value* asks for what happens anyway.
+
+    *value* is what a caller passed — a `datetime.timedelta`, or a string as
+    the SDK and the wire carry it — or, from a ``set`` statement, the lowered
+    literal's payload: the text of a timespan literal (wrapper removed) or the
+    value of a string literal.
+    """
+    if name == "query_results_cache_max_age":
+        return _zero_timespan(value)
+    return False
+
+
+def _zero_timespan(value: Any) -> bool:
+    """Whether *value* is certainly a timespan of zero ticks.
+
+    Measured, Kusto accepts every timespan literal (`time(0s)`, `0s`,
+    `timespan(0)`, `time(00:00:00)`, `0tick`) and a string that reads as one
+    (`'0s'`, `'00:00:00'`, `'0'`), and refuses `0`, `-0s`, `time(null)`, a
+    missing value and `' 0s '`. This accepts only what it can read for
+    certain — Kusto's `TimeSpan` parse of a string is looser than the literal
+    syntax (`'0 s'`, `'-0s'` run there) — so a spelling outside it is refused,
+    never guessed at.
+    """
+    if isinstance(value, _dt.timedelta):
+        return value == _dt.timedelta(0)
+    if not isinstance(value, str) or value != value.strip() or "(" in value:
+        return False
+    try:
+        return ticks(value) == 0
+    except ValueError:
+        return False
 
 
 #: Options whose *request* form is implemented but whose ``set``-statement form

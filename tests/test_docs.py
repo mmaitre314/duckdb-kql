@@ -130,11 +130,12 @@ def test_documented_support_level_matches_the_code() -> None:
         "**Implemented**": OptionSupport.IMPLEMENTED,
         "No-op": OptionSupport.NO_OP,
         "Refused": OptionSupport.REFUSED,
+        "No-op at zero": OptionSupport.CONDITIONAL,
     }
 
     wrong = []
     for name, label in re.findall(
-        r"^\| `([a-z0-9_]+)` \| (\*\*Implemented\*\*|No-op|Refused) \|",
+        r"^\| `([a-z0-9_]+)` \| (\*\*Implemented\*\*|No-op at zero|No-op|Refused) \|",
         _option_table(),
         re.MULTILINE,
     ):
