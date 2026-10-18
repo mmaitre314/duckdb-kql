@@ -188,6 +188,15 @@ returns an approximate answer.
 The `in` family (`in`, `!in`, `in~`, `!in~`) is supported, including the
 subquery form `x in (T | project col)`.
 
+`toscalar(T)` is supported in any expression and in a scalar `let` (R26):
+the first column of the **first** row, in the body's order, computed once
+per query. An empty body is a typed null, and `""` for a string. Against
+one, `x in (s)` is membership when `s` is an array and typed equality
+otherwise, decided at run time. A name the body cannot resolve is an error,
+never a column of the row around it, and a function parameter bound to a
+row value is refused (CRT0018). An unnamed `toscalar` column is refused,
+since Kusto names it with a random GUID. `take toscalar(…)` is refused.
+
 `has_any` and `has_all` are supported. They share the `in` family's syntax
 but not its meaning: each item is a whole-**term** match like `has`, so
 `"errors" has_any ("error")` is **false** (R3). The right-hand side may be a
@@ -466,4 +475,4 @@ starts passing fails the build and has to leave the list.
 
 Coverage against a published external subset:
 [Azure Monitor profile](azure-monitor-profile.md). The normative mapping spec,
-including the full text of R1–R25: [`TRANSLATION.md`](TRANSLATION.md).
+including the full text of R1–R26: [`TRANSLATION.md`](TRANSLATION.md).

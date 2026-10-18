@@ -249,6 +249,16 @@ def render_expr(node: ir.Expr) -> str:
     if isinstance(node, ir.ColumnRef):
         return quote_ident(node.name)
 
+    if isinstance(node, ir.ToScalar):
+        return render_toscalar(node)
+
+    if isinstance(node, ir.RowContext):
+        raise KqlUnsupportedError(
+            f"toscalar:{node.name}",
+            hint=f"`{node.name}` is bound to a value of the row around this nested "
+            "query, which is evaluated once, outside any row (Kusto: CRT0018)",
+        )
+
     if isinstance(node, ir.RenderedAggregate):
         # Already SQL — see render_aggregate. Parenthesised at construction.
         return node.sql
@@ -438,9 +448,32 @@ def output_name(named: ir.NamedExpr, position: int) -> str:
         return named.name
     if isinstance(named.expr, ir.ColumnRef):
         return named.expr.name
+    _refuse_scalar_name(named.expr)
     # KQL numbers unnamed columns from ONE, per operator: `project x+1, x+2`
     # yields Column1, Column2. Zero-based would be off by one on every one.
     return f"Column{position + 1}"
+
+
+def _refuse_scalar_name(expr: ir.Expr) -> None:
+    """An unnamed column whose name Kusto would take from a `toscalar`.
+
+    Measured: `extend toscalar(…)`, `distinct toscalar(…)`, `by toscalar(…)`,
+    `extend tostring(toscalar(…))` and `max(toscalar(…))` are named
+    `__scalar_` and a fresh GUID, different on every run — no name here could
+    match. The name reaches through the same calls `_argument_name` follows,
+    and stops where they stop: `toscalar(…) + 1` is `Column1` and
+    `sum(i * toscalar(…))` is `sum_`, both measured, and neither is refused.
+    """
+    while isinstance(expr, ir.FunctionCall) and expr.args:
+        if expr.name.lower() not in _NAME_PRESERVING:
+            return
+        expr = expr.args[0]
+    if isinstance(expr, ir.ToScalar):
+        raise KqlUnsupportedError(
+            "toscalar",
+            hint="name this column (`x = toscalar(…)`): Kusto names it `__scalar_` "
+            "and a random GUID, so no name given here could match",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -495,11 +528,22 @@ def render_source(source: ir.Source, schema: Schema | None = None) -> str:
         return f"SELECT * FROM {render_wildcard(source, schema)}"
 
     if isinstance(source, ir.PrintSource):
-        cols = [
-            f"{render_expr(e.expr)} AS {quote_ident(print_column_name(e, i))}"
-            for i, e in enumerate(source.expressions)
-        ]
-        return "SELECT " + ", ".join(cols)
+        # A one-row input, so a `toscalar` can be bound to a column (see
+        # `sharing.bind_repeats`); nothing else is, as a print reads no rows.
+        scope = sharing.bind_repeats(
+            [e.expr for e in source.expressions], '(SELECT 1 AS "_one")', []
+        ) if _reads_toscalar(source.expressions) else None
+        try:
+            cols = [
+                f"{render_expr(e.expr)} AS {quote_ident(print_column_name(e, i))}"
+                for i, e in enumerate(source.expressions)
+            ]
+        finally:
+            if scope is not None:
+                sharing.release()
+        if scope is None or not scope.names:
+            return "SELECT " + ", ".join(cols)
+        return "SELECT " + ", ".join(cols) + f" FROM {scope.source}"
 
     if isinstance(source, ir.CommandSource):
         # Already SQL — see duckdb_kql.control. Wrapped so the operators after
@@ -938,6 +982,16 @@ class _CteNames:
     counter: int = 0
     #: The parameter placeholders rendered so far (`TranslationResult.slots`).
     slots: set[str] = dataclasses.field(default_factory=set)
+    #: Each scope's WITH list as it is built — its `let` CTEs in order, and the
+    #: `toscalar` bodies hoisted into it between them — one per scope.
+    withs: list[list[str]] = dataclasses.field(default_factory=list)
+    #: Per scope: a hoisted `toscalar` body's SQL -> its CTE, so that the same
+    #: body is evaluated once wherever it is read.
+    hoisted: list[dict[str, str]] = dataclasses.field(default_factory=list)
+    #: Per scope: the schema its pipeline renders with, `let`s included — what
+    #: a nested query read from an expression (`toscalar`, `in (T | …)`) needs
+    #: for a `join` or `lookup` of its own.
+    schemas: list[Schema | None] = dataclasses.field(default_factory=list)
 
     def binding_name(self, name: str) -> str:
         """A fresh CTE name for the binding *name*, free of every taken name."""
@@ -952,6 +1006,124 @@ class _CteNames:
 #: The statement being rendered, or None between statements. A module global
 #: like the clock and the sharing scopes, set and cleared by :func:`to_sql`.
 _NAMES: _CteNames | None = None
+
+
+def render_toscalar(node: ir.ToScalar) -> str:
+    """``toscalar(T)``: one row, computed once, read as a scalar subquery.
+
+    The body becomes a `MATERIALIZED` CTE rather than an inline subquery, for
+    two reasons, and either alone would be enough:
+
+    * **Once.** Kusto evaluates it once — measured, `let x = toscalar(R |
+      take 1); print x == x` is true — and a `let` is inlined at every use, so
+      inline it would be one evaluation per use, free to disagree.
+    * **No row around it.** A name the body cannot resolve is SEM0100 in
+      Kusto. Inline, DuckDB resolves it against the *outer* query instead —
+      `T | extend m = toscalar(U | where a == b)` with `b` a column of `T`
+      would correlate silently and answer per row. A CTE body has no outer row
+      to bind to, so it fails to bind, as Kusto fails to compile.
+
+    The CTE goes into the outermost scope that binds every table the body
+    reads, so one body read from a `let`'s body and from the query is still
+    one evaluation. The same body text in that scope is the same CTE: KQL
+    evaluating two copies separately could only agree or not, and agreeing is
+    one of its answers.
+    """
+    assert _NAMES is not None
+    target = _toscalar_scope(node.query)
+    body = str(to_sql(node.query, _nested_schema()))
+    cte = _NAMES.hoisted[target].get(body)
+    if cte is None:
+        cte = _NAMES.binding_name("scalar")
+        _NAMES.hoisted[target][body] = cte
+        _NAMES.withs[target].append(
+            f"{quote_ident(cte)} AS MATERIALIZED ({_first_value(body)})"
+        )
+    return f'(SELECT "v" FROM {quote_ident(cte)})'
+
+
+def _reads_toscalar(node: object) -> bool:
+    """Whether *node* holds a `toscalar` outside any nested query."""
+    stack: list[object] = [node]
+    while stack:
+        current = stack.pop()
+        if isinstance(current, ir.ToScalar):
+            return True
+        if isinstance(current, ir.Query):
+            continue
+        if isinstance(current, (list, tuple)):
+            stack.extend(current)
+        elif dataclasses.is_dataclass(current) and not isinstance(current, type):
+            stack.extend(getattr(current, f.name) for f in dataclasses.fields(current))
+    return False
+
+
+def _nested_schema() -> Schema | None:
+    """The schema a query nested in an expression of this scope renders with."""
+    return _NAMES.schemas[-1] if _NAMES is not None and _NAMES.schemas else None
+
+
+def _first_value(body: str) -> str:
+    """The first column of *body*'s first row, as a one-row relation.
+
+    Measured: more rows than one are fine, and the first is taken in the
+    body's order (`sort`, `top`); `LIMIT 1` over the ordered subquery keeps it.
+    An empty body is a null of the column's type — but KQL has no null string,
+    and there it is `""` (`isnull` false, `strlen` 0). The `LEFT JOIN` tells an
+    empty body from a null first value, and only the empty one is changed: a
+    null already in DuckDB data stays null, as it does everywhere else (R4).
+    The `''` literal takes the column's type, so the other types are untouched.
+    """
+    return (
+        "SELECT CASE WHEN typeof(_f._c1) = 'VARCHAR' AND _f._p IS NULL THEN '' "
+        'ELSE _f._c1 END AS "v" FROM (SELECT 1) AS _one LEFT JOIN '
+        f"(SELECT _c1, true AS _p FROM ({body}) AS _q(_c1) LIMIT 1) AS _f ON true"
+    )
+
+
+def _toscalar_scope(query: ir.Query) -> int:
+    """The scope a `toscalar` body is hoisted into: the innermost one binding
+    a table it reads, or the statement's when it reads none.
+
+    A name bound in two scopes on the stack is refused. A scalar `let` is
+    inlined where it is used, so its `toscalar` body is rendered there, and
+    a nested scope binding the same name would capture it — KQL scoping is
+    lexical, and the body means the binding where it was written.
+    """
+    assert _NAMES is not None
+    found = 0
+    for name in _free_table_names(query):
+        depths = [i for i, scope in enumerate(_NAMES.scopes) if name in scope]
+        if len(depths) > 1:
+            raise KqlUnsupportedError(
+                f"toscalar:{name}",
+                hint=f"`{name}` is bound by a let here and by another around it, "
+                "and which one this toscalar() reads depends on where it was "
+                "written; rename one of them",
+            )
+        if depths:
+            found = max(found, depths[0])
+    return found
+
+
+def _free_table_names(query: ir.Query) -> set[str]:
+    """Bare table names *query* reads that none of its own `let`s binds."""
+    names: set[str] = set()
+    bound: set[str] = set()
+    stack: list[object] = [query]
+    while stack:
+        current = stack.pop()
+        if isinstance(current, (list, tuple)):
+            stack.extend(current)
+            continue
+        if not dataclasses.is_dataclass(current) or isinstance(current, type):
+            continue
+        if isinstance(current, ir.Query):
+            bound.update(name for name, _ in current.lets)
+        if isinstance(current, ir.TableRef) and current.database is None:
+            names.add(current.name)
+        stack.extend(getattr(current, f.name) for f in dataclasses.fields(current))
+    return names - bound
 
 
 def _let_cte(name: str) -> str | None:
@@ -1027,11 +1199,17 @@ def _render_query(query: ir.Query, schema: Schema | None = None) -> TranslationR
     scope: dict[str, str] = {}
     _NAMES.scopes.append(scope)
     _NAMES.labels.append({})
+    _NAMES.withs.append([])
+    _NAMES.hoisted.append({})
+    _NAMES.schemas.append(schema)
     try:
         return _render_scoped(query, schema, scope)
     finally:
         _NAMES.scopes.pop()
         _NAMES.labels.pop()
+        _NAMES.withs.pop()
+        _NAMES.hoisted.pop()
+        _NAMES.schemas.pop()
 
 
 def _render_scoped(
@@ -1049,7 +1227,8 @@ def _render_scoped(
     # Each binding is rendered, and its columns learned, seeing only the ones
     # declared before it — sequential, as Kusto's `let` is. The body then sees
     # them all.
-    let_ctes = []
+    # Shared with `render_toscalar`, which hoists bodies into it as they render.
+    let_ctes = _NAMES.withs[-1]
     schema = dict(schema) if schema is not None else None
     for name, bound in query.lets:
         if not isinstance(bound, ir.Query):
@@ -1059,6 +1238,7 @@ def _render_scoped(
         _NAMES.labels[-1][name] = _alias_label(bound)
         scope[name] = cte
         schema = _schema_with_let(schema, name, bound)
+    _NAMES.schemas[-1] = schema
     query = _promote_fuzzy_source(query, schema)
     # A source has no input columns, so its let-bound names are their values.
     query = ir.Query(
@@ -1473,6 +1653,7 @@ def _argument_name(expr: ir.Expr) -> str | None:
     """
     if isinstance(expr, ir.ColumnRef):
         return expr.name
+    _refuse_scalar_name(expr)
     if isinstance(expr, ir.FunctionCall) and expr.args:
         if expr.name.lower() in _NAME_PRESERVING:
             return _argument_name(expr.args[0])
@@ -2285,16 +2466,29 @@ def _render_in_list(node: ir.InList, value: str) -> str:
         # The alias list picks the first column **without needing the schema**:
         # DuckDB accepts fewer aliases than there are columns and applies them
         # left to right, so `AS _q(_c1)` names column one whatever it is called.
-        inner = f"SELECT _c1 FROM ({to_sql(node.subquery)}) AS _q(_c1)"
+        inner = f"SELECT _c1 FROM ({to_sql(node.subquery, _nested_schema())}) AS _q(_c1)"
         if node.case_insensitive:
             # Lower BOTH sides: comparing a lowered value against un-lowered
             # rows would silently miss matches.
             value = f"lower({value})"
             inner = (
                 f"SELECT lower(CAST(_c1 AS VARCHAR)) "
-                f"FROM ({to_sql(node.subquery)}) AS _q(_c1)"
+                f"FROM ({to_sql(node.subquery, _nested_schema())}) AS _q(_c1)"
             )
         sql = f"({value} IN ({inner}))"
+        return _in_result(sql, node, value)
+
+    scalars = [i for i in node.items if isinstance(i, ir.ToScalar)]
+    if scalars:
+        # Measured: `id in (allowed, "z")` with `allowed` an array is a list of
+        # its elements and "z" — each `toscalar` is tested on its own, the rest
+        # as the plain list they are.
+        tests = [_in_toscalar(node, value, render_expr(i)) for i in scalars]
+        rest = [i for i in node.items if not isinstance(i, ir.ToScalar)]
+        if rest:
+            plain = dataclasses.replace(node, items=tuple(rest), negated=False)
+            tests.append(_render_in_list(plain, value))
+        sql = tests[0] if len(tests) == 1 else "(" + " OR ".join(tests) + ")"
         return _in_result(sql, node, value)
 
     # `x in (dynamic([...]))` tests membership in an ARRAY, not equality with
@@ -2314,6 +2508,34 @@ def _render_in_list(node: ir.InList, value: str) -> str:
         items = [f"lower({i})" for i in items]
     sql = f"({value} IN ({', '.join(items)}))"
     return _in_result(sql, node, value)
+
+
+def _in_toscalar(node: ir.InList, value: str, item: str) -> str:
+    """``x in (s)`` where *s* is a `toscalar`, whose type only DuckDB knows.
+
+    Measured: membership in it when it is an array (`make_set`, `make_list`),
+    equality when it is a scalar — typed, `2 in (2.0)` is true — and a
+    dynamic scalar compares as its value. Each branch reads *s* through
+    `to_json`, so every branch binds whatever the type turns out to be; only
+    the one taken runs.
+    """
+    json = f"to_json({item})"
+    needle = f"CAST({value} AS VARCHAR)"
+    members = f"CAST({json} AS VARCHAR[])"
+    scalar = f"json_extract_string({json}, '$')"
+    # `=`, not `IN (…)`: DuckDB reads `x IN ((SELECT …))` as an IN-subquery,
+    # plans it as a join that runs whatever the CASE says, and refuses to bind
+    # it against a list — `make_set` is one.
+    typed = f"({value} = {item})"
+    if node.case_insensitive:
+        needle = f"lower({needle})"
+        members = f"list_transform({members}, v -> lower(v))"
+        scalar = f"lower({scalar})"
+        typed = f"({needle} = lower(CAST({item} AS VARCHAR)))"
+    return (
+        f"(CASE WHEN json_type({json}) = 'ARRAY' THEN list_contains({members}, {needle}) "
+        f"WHEN typeof({item}) = 'JSON' THEN {needle} = {scalar} ELSE {typed} END)"
+    )
 
 
 def render_between(node: ir.Between) -> str:
@@ -2423,6 +2645,10 @@ def _render_has_list(node: ir.HasList, value: str) -> str:
 
     parts = []
     for item in node.items:
+        if isinstance(item, ir.ToScalar):
+            # An array of needles or one needle — which, only DuckDB knows.
+            parts.append(_has_toscalar(node, value, render_expr(item)))
+            continue
         if _is_dynamic(item):
             unrolled = _unrolled_needles(node, value, item)
             if unrolled is not None:
@@ -2453,6 +2679,21 @@ def _render_has_list(node: ir.HasList, value: str) -> str:
     return _has_list_result(sql, node)
 
 
+def _has_toscalar(node: ir.HasList, value: str, item: str) -> str:
+    """One `has_any`/`has_all` item that is a `toscalar`: its elements when it
+    is an array, measured, and itself as one needle otherwise."""
+    json = f"to_json({item})"
+    arr = f"CAST({json} AS VARCHAR[])"
+    matched = f"len(list_filter({arr}, t -> {term_match_sql(value, 't')}))"
+    many = f"({matched} = len({arr}))" if node.require_all else f"({matched} > 0)"
+    one = term_match_sql(
+        value,
+        f"(CASE WHEN typeof({item}) = 'JSON' THEN json_extract_string({json}, '$') "
+        f"ELSE CAST({item} AS VARCHAR) END)",
+    )
+    return f"(CASE WHEN json_type({json}) = 'ARRAY' THEN {many} ELSE {one} END)"
+
+
 def _render_has_subquery(node: ir.HasList, subquery: ir.Query, value: str) -> str:
     """``x has_any (T)`` / ``x has_all (T)`` — a **tabular** right-hand side.
 
@@ -2476,7 +2717,7 @@ def _render_has_subquery(node: ir.HasList, subquery: ir.Query, value: str) -> st
     ``bool_and`` over zero rows gave NULL and the coalesce turned it into false.
     ``NOT EXISTS`` over nothing is true, which is the measured answer.
     """
-    inner = str(to_sql(subquery))
+    inner = str(to_sql(subquery, _nested_schema()))
     needle = "CAST(_needle AS VARCHAR)"
     # Sound because `has` implies `contains`, case-insensitively (R3).
     prefilter = f"contains(lower({value}), lower({needle}))"

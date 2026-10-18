@@ -391,6 +391,38 @@ class RenderedAggregate(Expr):
 
 
 @dataclass(frozen=True)
+class ToScalar(Expr):
+    """``toscalar(T)``: the first column of T's first row, evaluated once.
+
+    Measured: not a SQL scalar subquery's "exactly one row" — more rows are
+    fine and the first is taken, in T's order when it has one; an empty T is
+    a null of the column's type, except a string, which is ``""``. The body
+    is its own query, with its own columns: a name it cannot resolve is an
+    error (SEM0100), never a column of the row around it. A scalar argument,
+    ``toscalar(1)``, is lowered to itself and never reaches this node.
+    """
+
+    query: Query
+
+
+@dataclass(frozen=True)
+class RowContext(Expr):
+    """A value from the row around a nested query, inside that query's body.
+
+    A scalar function's parameter is bound to its argument, and when the
+    argument reads the caller's row — `extend c = f(i)` — the parameter cannot
+    reach a `toscalar` or `in (T)` body, which is evaluated once, outside any
+    row. Measured, Kusto refuses: CRT0018, "can't use 'i' as it is defined
+    outside its row-context scope". Left as the argument's column reference,
+    the body would bind it to a column of its *own* that happens to share the
+    name. Rendering one is that refusal; it never renders when a column of the
+    body's input takes the name first (R23).
+    """
+
+    name: str
+
+
+@dataclass(frozen=True)
 class InList(Expr):
     """``x in (a, b, ...)`` and its negated / case-insensitive variants."""
 

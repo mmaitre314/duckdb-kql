@@ -258,7 +258,36 @@ def _lower_expr(node: Any) -> ir.Expr:
             if op in ("not", "!"):
                 return ir.UnaryOp("not", operand)
 
+    if kind == "ToScalarExpression":
+        return _lower_toscalar(node)
+
     raise _unsupported(node, f"expression:{kind}")
+
+
+def _lower_toscalar(node: Any) -> ir.Expr:
+    """``toscalar(T)`` — see `ir.ToScalar` for what was measured.
+
+    A scalar argument is its value (`toscalar(1)` is 1, measured) but still
+    evaluated **once**: measured, `toscalar(rand(1000))` read twice is one
+    number where `rand(1000)` read twice is two. So it is `toscalar(print e)`,
+    and the node's CTE does the rest. A bare name is lowered as a table,
+    because which it is is not known here; substitution makes it the scalar
+    form when a scalar `let` binds it (`_substitute_once`).
+    """
+    # `toscalar kind=nooptimization (…)` is a hint to Kusto's planner, and
+    # measured, it answers the same. (Inside the brackets it is SYN0002 there,
+    # and a syntax error here too.)
+    value = node.Expression
+    if value is None:
+        raise _unsupported(node, "toscalar")
+    if _is_tabular_value(value, {}):
+        return ir.ToScalar(_lower_query_node(value))
+    return _scalar_toscalar(_lower_expr(value))
+
+
+def _scalar_toscalar(expr: ir.Expr) -> ir.ToScalar:
+    """`toscalar(e)` for a scalar *e*: the one row of `print e`."""
+    return ir.ToScalar(ir.Query(ir.PrintSource((ir.NamedExpr(expr),)), []))
 
 
 def _literal_text(node: Any) -> str:
@@ -2336,7 +2365,13 @@ def _resolve_in_subqueries(query: ir.Query, tabular_names: set[str]) -> ir.Query
                     items=(),
                     subquery=ir.Query(ir.TableRef(node.items[0].name)),
                 )
-            return node
+            # Deeper too: a `toscalar` item's body, and a tabular one's own
+            # `x in (T)` — `y in (A | where x in (T))`.
+            return dataclasses.replace(
+                node,
+                items=tuple(fix(i) for i in node.items),
+                subquery=None if node.subquery is None else recurse(node.subquery),
+            )
         if isinstance(node, ir.BinaryOp):
             return dataclasses.replace(node, left=fix(node.left), right=fix(node.right))
         if isinstance(node, ir.UnaryOp):
@@ -2347,6 +2382,10 @@ def _resolve_in_subqueries(query: ir.Query, tabular_names: set[str]) -> ir.Query
             return dataclasses.replace(
                 node, value=fix(node.value), low=fix(node.low), high=fix(node.high)
             )
+        if isinstance(node, ir.LetRef):
+            return dataclasses.replace(node, value=fix(node.value))
+        if isinstance(node, ir.ToScalar):
+            return dataclasses.replace(node, query=recurse(node.query))
         return node
 
     def recurse(inner: ir.Query) -> ir.Query:
@@ -2362,6 +2401,19 @@ def _resolve_in_subqueries(query: ir.Query, tabular_names: set[str]) -> ir.Query
                 expressions=tuple(
                     dataclasses.replace(e, expr=fix(e.expr)) for e in op.expressions
                 ),
+            ))
+        elif isinstance(op, ir.Summarize):
+            # `summarize n = countif(x in (T))`, and a `toscalar` in either list.
+            ops.append(dataclasses.replace(
+                op,
+                aggregates=tuple(
+                    dataclasses.replace(a, expr=fix(a.expr)) for a in op.aggregates
+                ),
+                by=tuple(dataclasses.replace(b, expr=fix(b.expr)) for b in op.by),
+            ))
+        elif isinstance(op, ir.Sort):
+            ops.append(dataclasses.replace(
+                op, keys=tuple(dataclasses.replace(k, expr=fix(k.expr)) for k in op.keys)
             ))
         elif isinstance(op, (ir.Join, ir.Lookup)):
             ops.append(dataclasses.replace(op, right=recurse(op.right)))
@@ -2383,6 +2435,14 @@ def _resolve_in_subqueries(query: ir.Query, tabular_names: set[str]) -> ir.Query
         from .lower_graph import map_queries
 
         source = map_queries(source, recurse)
+    elif isinstance(source, ir.PrintSource):
+        # `print v = toscalar(T | where k in (U) | count)`
+        source = dataclasses.replace(
+            source,
+            expressions=tuple(
+                dataclasses.replace(e, expr=fix(e.expr)) for e in source.expressions
+            ),
+        )
     return ir.Query(source, ops, lets, list(query.parameters))
 
 
@@ -2798,10 +2858,33 @@ def _substitute_once(node: Any, scalars: Scalars, memo: dict[int, Any]) -> Any:
         # `let areas = dynamic(['a','b']); T | where State has_any (areas)` is
         # real corpus KQL. Without HasList here the name stayed a ColumnRef and
         # the generated SQL referenced a column that does not exist.
+        #
+        # The tabular form's body is a query of its own, and it was never
+        # reached: `let k = 2; … | where a in (T | where b > k)` failed to bind
+        # — and over an input with a column `k`, DuckDB bound the body's `k`
+        # to *that*, the outer row's, and answered. Measured: Kusto reads the
+        # `let`, `[3]`; here every row.
         return dataclasses.replace(
             node,
             value=_substitute(node.value, scalars),
             items=tuple(_substitute(i, scalars) for i in node.items),
+            subquery=None if node.subquery is None
+            else _substitute_query(node.subquery, _body_scope(scalars)),
+        )
+    if isinstance(node, ir.ToScalar):
+        query = node.query
+        source = query.source
+        if (
+            not query.operators
+            and isinstance(source, ir.TableRef)
+            and source.database is None
+            and source.cluster is None
+            and source.name in scalars
+        ):
+            # `toscalar(c)` over a scalar `let` is its value — measured.
+            return _substitute(_scalar_toscalar(ir.ColumnRef(source.name)), scalars)
+        return dataclasses.replace(
+            node, query=_substitute_query(query, _body_scope(scalars))
         )
     if isinstance(node, ir.Between):
         # `let Start = datetime(...); let End = Start + 7d;
@@ -2826,6 +2909,39 @@ def _substitute_once(node: Any, scalars: Scalars, memo: dict[int, Any]) -> Any:
     if isinstance(node, ir.GraphCall) and node.body is not None:
         return dataclasses.replace(node, body=_substitute(node.body, scalars))
     return node
+
+
+def _body_scope(scalars: Scalars) -> Scalars:
+    """*scalars* as a nested query's body reads them — `toscalar(T | …)`,
+    `x in (T | …)`.
+
+    The body is a pipeline of its own, so a column of *its* input shadows a
+    binding (R23) and each is a `LetRef`, whatever the scope around it does.
+    A binding whose value reads the row around the body — a scalar function's
+    parameter bound to `i` in `extend c = f(i)` — becomes `ir.RowContext`:
+    the body is evaluated once, outside any row, and Kusto refuses (CRT0018).
+    """
+    scope: Scalars = {}
+    for name, value in scalars.items():
+        inner = value.value if isinstance(value, ir.LetRef) else value
+        scope[name] = ir.LetRef(name, ir.RowContext(name) if _reads_row(inner) else inner)
+    return scope
+
+
+def _reads_row(expr: ir.Expr) -> bool:
+    """Whether *expr* reads a column, outside any nested query of its own."""
+    stack: list[object] = [expr]
+    while stack:
+        current = stack.pop()
+        if isinstance(current, (ir.Query, ir.RowContext)):
+            continue
+        if isinstance(current, ir.ColumnRef):
+            return True
+        if isinstance(current, (list, tuple)):
+            stack.extend(current)
+        elif dataclasses.is_dataclass(current) and not isinstance(current, type):
+            stack.extend(getattr(current, f.name) for f in dataclasses.fields(current))
+    return False
 
 
 def _substitute_query(query: ir.Query, scalars: Scalars) -> ir.Query:
@@ -3542,6 +3658,15 @@ def _qualify_expr(
     clusters: Resolved | None,
 ) -> ir.Expr:
     """Only subqueries carry table references; everything else is passed through."""
+    if isinstance(expr, ir.ToScalar):
+        return dataclasses.replace(
+            expr, query=_qualify_query(expr.query, database, scope, clusters)
+        )
+    if isinstance(expr, ir.LetRef):
+        # Every inlined scalar `let` arrives as one, `toscalar` bodies included.
+        return dataclasses.replace(
+            expr, value=_qualify_expr(expr.value, database, scope, clusters)
+        )
     if isinstance(expr, (ir.InList, ir.HasList)):
         if expr.subquery is not None:
             return dataclasses.replace(

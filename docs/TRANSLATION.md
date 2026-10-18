@@ -1164,7 +1164,8 @@ declare query_parameters(Value:long); datatable(Value:long)[7] | extend k = Valu
 ```
 
 R22's substitution used to be unconditional and answered 5 for the first. It
-holds in `invoke` bodies and tabular `let` bodies too, which are pipelines. It
+holds in `invoke` bodies and tabular `let` bodies too, which are pipelines, and
+in the body of a `toscalar(T | …)` or `x in (T | …)` (R26). It
 does **not** hold for a scalar function's closure, parameters and locals — they
 win over a column (`let K = 7; let F = (x:long) { x + K }` gives `F(1)` = 8 over
 a `K` column of 100) — nor for a `let`'s own value, which binds where it is
@@ -1260,6 +1261,54 @@ table on the walks and probes the edges; anchored on an edge, a CTE without
 statistics estimated the walks as a cross product and every hop hashed the
 whole edge relation. Neither change alters a row: a property not carried is one
 nothing reads, and each edge's start is exactly one node.
+
+### R26 — `toscalar` is computed **once**, outside any row, from the **first** row
+*Trap: `tests/test_toscalar.py`*
+
+`toscalar(T)` is the first column of T's first row — not SQL's scalar
+subquery, which wants at most one row and keeps no order. Measured:
+
+```
+toscalar(datatable(a:long, b:string)[1,"x", 2,"y"])       1        (first row, first column)
+toscalar(datatable(a:long)[3,1,2] | sort by a desc)       3        (the body's order)
+toscalar(datatable(x:long)[])                             null of type long
+toscalar(datatable(x:string)[])                           ""       (isnull false, strlen 0)
+let x = toscalar(range i from 1 to 100000 step 1 | take 1); print x == x     true
+toscalar(1), toscalar(c + 1)                              the value, also computed once
+```
+
+R22 substitutes a scalar `let` at every use, so a `toscalar` bound by one would
+be evaluated once per use if it were rendered inline. It is a `MATERIALIZED`
+CTE instead, with exactly one row: in the outermost scope that binds every
+table its body reads, so a body read from a `let`'s body and from the query is
+still one evaluation, and the same body text there is the same CTE. The CTE
+also has no outer row: a name the body cannot resolve is SEM0100 in Kusto, and
+inline DuckDB would resolve it against the row around the subquery and
+correlate, silently. A scalar function's parameter bound to a row value reaching
+the body is CRT0018 there, and refused here — inlined, it would bind to a
+column of the body's own that shares its name. Kusto's scoping is lexical, so a
+`let` name bound twice on the scope stack around an inlined body is refused
+rather than chosen.
+
+The value is read as a column of a derived table under the operator, never as a
+subquery in place: DuckDB refuses a subquery inside a lambda's body, and the
+run-time type dispatch of `gettype`, `tostring` and others puts its operand
+there. Its type is known only to DuckDB, so `x in (s)` decides at run time:
+membership when `s` is an array (`make_set`, `make_list`, flattened among other
+items), typed equality when it is a scalar (`2 in (2.0)` is true), and every
+branch reads `s` through `to_json` so that each binds whatever the type is. `=`,
+never `IN ((SELECT …))`, which DuckDB plans as a semi-join that runs whatever a
+`CASE` around it says. `has_any`/`has_all` take an array's elements the same way.
+
+An unnamed `toscalar` column is `__scalar_` and a random GUID in Kusto — in
+`extend`, `project`, `distinct`, `summarize by` and an aggregate's name, and
+through `tostring` — so it is refused; `toscalar(…) + 1` is `Column1` and
+`sum(i * toscalar(…))` is `sum_`, measured, and are not.
+
+The quiet sibling: scalar `let`s never reached the body of `x in (T | …)` or
+`x has_any (T | …)`. That failed to bind — unless the outer row had a column of
+the same name, which DuckDB then read: `let k = 2; … | where a in (T | where b >
+k)` over a `k` column was every row, where Kusto answers `[3]`.
 
 ---
 

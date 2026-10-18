@@ -569,6 +569,15 @@ def build() -> str:
     a("The `in` family (`in`, `!in`, `in~`, `!in~`) is supported, including the")
     a("subquery form `x in (T | project col)`.")
     a("")
+    a("`toscalar(T)` is supported in any expression and in a scalar `let` (R26):")
+    a("the first column of the **first** row, in the body's order, computed once")
+    a("per query. An empty body is a typed null, and `\"\"` for a string. Against")
+    a("one, `x in (s)` is membership when `s` is an array and typed equality")
+    a("otherwise, decided at run time. A name the body cannot resolve is an error,")
+    a("never a column of the row around it, and a function parameter bound to a")
+    a("row value is refused (CRT0018). An unnamed `toscalar` column is refused,")
+    a("since Kusto names it with a random GUID. `take toscalar(…)` is refused.")
+    a("")
     a("`has_any` and `has_all` are supported. They share the `in` family's syntax")
     a("but not its meaning: each item is a whole-**term** match like `has`, so")
     a('`\"errors\" has_any (\"error\")` is **false** (R3). The right-hand side may be a')
@@ -701,7 +710,7 @@ def build() -> str:
     a("")
     a("Coverage against a published external subset:")
     a("[Azure Monitor profile](azure-monitor-profile.md). The normative mapping spec,")
-    a("including the full text of R1–R25: [`TRANSLATION.md`](TRANSLATION.md).")
+    a("including the full text of R1–R26: [`TRANSLATION.md`](TRANSLATION.md).")
 
     return "\n".join(lines) + "\n"
 

@@ -193,14 +193,24 @@ def bind_repeats(
     _ACTIVE.append(scope)
     try:
         for node in _postorder(exprs):  # a node is planned after what it reads
-            if counts[id(node)] < 2 or not _bindable(node):
-                continue
-            guard = guards[id(node)]
-            if not _rebuildable(node, guard):
-                continue
-            sql = render_expr(node)  # already reading the slots planned above
-            if (counts[id(node)] - 1) * len(sql) < MIN_SAVING:
-                continue
+            if isinstance(node, ir.ToScalar):
+                # Always a column, read once or not: DuckDB refuses a subquery
+                # inside a lambda's body ("subqueries in lambda expressions are
+                # not supported"), and the run-time type dispatch of `gettype`,
+                # `tostring` and the rest puts its operand there. One value,
+                # evaluated once in its CTE, so computing it on every row is
+                # safe behind any branch and the guard is not needed.
+                sql = render_expr(node)
+                guard: Path = ()
+            else:
+                if counts[id(node)] < 2 or not _bindable(node):
+                    continue
+                guard = guards[id(node)]
+                if not _rebuildable(node, guard):
+                    continue
+                sql = render_expr(node)  # already reading the slots planned above
+                if (counts[id(node)] - 1) * len(sql) < MIN_SAVING:
+                    continue
             name = f"{prefix}{len(scope.names)}"
             bound = _under_guard(sql, guard, render_expr)
             scope.slots[id(node)] = name
@@ -464,7 +474,15 @@ def _postorder(exprs: Sequence[object]) -> list[Any]:
 
 
 def _children(node: Any) -> Iterable[tuple[object, Step | None]]:
-    """*node*'s children, each with the branch step that reaches it, if any."""
+    """*node*'s children, each with the branch step that reaches it, if any.
+
+    None below a nested query — a `toscalar` or `in (T | …)` body. It is
+    rendered behind :func:`barrier`, with its own columns, so nothing in it can
+    be bound out here; walked into, a `let` its body reads twice was planned
+    as a column of the *outer* stage, where it is not even resolved.
+    """
+    if isinstance(node, ir.Query):
+        return
     if isinstance(node, ir.FunctionCall):
         name = node.name.lower()
         opaque = _OPAQUE_FROM.get(name)
