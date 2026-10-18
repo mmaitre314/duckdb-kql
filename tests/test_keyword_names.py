@@ -98,7 +98,7 @@ def test_a_function_name_is_not_read_as_a_column(con) -> None:
     lookup is only used where the grammar allows nothing but names.
     """
     sql = str(duckdb_kql.to_sql("datatable(t:long)[1] | summarize c = count() by bin(t, 2)"))
-    assert "floor" in sql  # bin() was translated as a function
+    assert "_bin.v // _bin.r" in sql  # bin() was translated as a function
     assert '"bin"' not in sql  # ... not quoted as a column
 
 

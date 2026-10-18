@@ -155,7 +155,8 @@ def _lower_expr(node: Any) -> ir.Expr:
             return ir.ColumnRef(name)
 
     if kind in ("LongLiteralExpression", "IntLiteralExpression"):
-        return _typed_literal(node, "long" if kind[0] == "L" else "int", int)
+        bits = 64 if kind[0] == "L" else 32
+        return _typed_literal(node, "long" if bits == 64 else "int", _integer_literal(bits))
 
     if kind in ("RealLiteralExpression", "DecimalLiteralExpression"):
         return _typed_literal(node, "real", float)
@@ -319,8 +320,8 @@ def _typed_literal(
         text = _string_value(text)
 
     if text.lower() in ("null", ""):
-        # A **typed** null keeps its type: `gettype(long(null))` is `long`.
-        # It renders as NULL either way (render_literal).
+        # A **typed** null keeps its type: `gettype(long(null))` is `long`,
+        # so it renders as `CAST(NULL AS BIGINT)` (render_literal).
         return ir.Literal(None, kind)
 
     if kind == "datetime":
@@ -328,8 +329,52 @@ def _typed_literal(
 
     try:
         return ir.Literal(convert(text), kind)
+    except _Unparseable as e:
+        raise KqlUnsupportedError(
+            f"literal:{kind}", span=_span(node),
+            hint=f"{e} could not be parsed as a literal of type '{kind}' (Kusto: SYN0002)",
+        ) from None
     except (ValueError, TypeError) as e:
         raise _unsupported(node, f"literal:{kind}") from e
+
+
+class _Unparseable(ValueError):
+    """An integer literal Kusto refuses to parse — measured, SYN0002."""
+
+
+_DECIMAL = r"[+-]?[0-9]+"
+_HEX_DIGITS = r"0[xX][0-9a-fA-F]+"
+
+
+def _integer_literal(bits: int) -> Callable[[str], int]:
+    """The value of an `int(…)` (32-bit) or `long(…)` (64-bit) literal.
+
+    Measured: decimal digits must fit the type — `int(2147483648)` and
+    `long(9223372036854775808)` are SYN0002, as is `int(1.0)` — and a leading
+    zero is decimal (`int(010)` is 10). Hex is read **unsigned** and wraps:
+    `int(0xFFFFFFFF)` is -1, `long(0x10)` is 16, and a signed one,
+    `int(-0x10)`, is SYN0002. Python's `int()` read none of the hex forms and
+    range-checked nothing, so `int(-2147483649)` answered where Kusto refuses.
+    """
+
+    def convert(text: str) -> int:
+        body = text.strip()
+        unsigned = body.lstrip("+-")
+        hexadecimal = unsigned[:2].lower() == "0x"
+        # Python's int() also reads `1_0` and non-ASCII digits; Kusto refuses
+        # both (SYN0002, measured), so the digits are checked first.
+        if not re.fullmatch(_HEX_DIGITS if hexadecimal else _DECIMAL, body):
+            raise _Unparseable(repr(body))
+        value = int(unsigned[2:], 16) if hexadecimal else int(body, 10)
+        if hexadecimal:
+            if value >= 1 << bits:
+                raise _Unparseable(repr(body))
+            return value - (1 << bits) if value >= 1 << (bits - 1) else value
+        if not -(1 << (bits - 1)) <= value < 1 << (bits - 1):
+            raise _Unparseable(repr(body))
+        return value
+
+    return convert
 
 
 #: `datetime(2025, 6)` and `datetime(2025, 6, 14)` — year/month/day as separate

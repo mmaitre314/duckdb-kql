@@ -25,6 +25,7 @@ from .functions import (
     _TODATETIME,
     _TOTIMESPAN,
     BINARY_OPERATORS,
+    long_or_wider,
     lookup,
     lookup_aggregate,
     term_match_sql,
@@ -147,17 +148,66 @@ def render_parameter(param: ir.Parameter) -> str:
     return f"CAST(${param.slot} AS {TYPE_MAP[param.kind]})"
 
 
+#: Literal kinds whose typed null keeps its type in a column. Measured: `print
+#: a = long(null) | project gettype(a)` is `long`, and so for each of these —
+#: a bare NULL was DuckDB's `"NULL"` type, which every one reported as `string`.
+_TYPED_NULLS = frozenset(
+    {"int", "long", "real", "decimal", "datetime", "timespan", "bool", "guid"}
+)
+
+
+#: The operators Kusto computes in `long` when both operands are `int`.
+_ARITHMETIC = frozenset({"+", "-", "*", "/", "%"})
+
+
+def _widen_int(node: ir.Expr, sql: str) -> str:
+    """*sql* as a BIGINT when *node* is statically an `int`.
+
+    Measured: `int` arithmetic is `long` in Kusto — `int + int`, `*`, `/`,
+    `%` and unary `-` over rows are all `long`, and `int(2147483647) +
+    int(1)` is 2147483648. DuckDB keeps `INTEGER + INTEGER` an INTEGER and
+    raises an overflow at 2^31, so an operand known to be an `int` is widened
+    first. Known only where the IR says so (`_is_int_expr`): a column of type
+    int still meets DuckDB's rule, which is `docs/column-types-proposal.md`'s.
+    """
+    return f"CAST({sql} AS BIGINT)" if _is_int_expr(node) else sql
+
+
+def _is_int_expr(node: ir.Expr) -> bool:
+    """Whether *node* is certainly a 32-bit `int`: an `int(…)` literal, a
+    `toint()`, or `iff`/`coalesce`/`max_of`/`min_of` over those — measured,
+    each of those stays `int` in Kusto, and in DuckDB stays INTEGER."""
+    if isinstance(node, (ir.Literal, ir.Parameter)):
+        return node.kind == "int"
+    if isinstance(node, ir.FunctionCall):
+        name, args = node.name.lower(), node.args
+        if name == "toint":
+            return True
+        if name in ("iff", "iif"):
+            return len(args) == 3 and _is_int_expr(args[1]) and _is_int_expr(args[2])
+        if name in ("coalesce", "max_of", "min_of"):
+            return bool(args) and all(_is_int_expr(a) for a in args)
+    return False
+
+
 def render_literal(lit: ir.Literal) -> str:
+    if lit.value is None and lit.kind in _TYPED_NULLS:
+        return f"CAST(NULL AS {TYPE_MAP[lit.kind]})"
     if lit.kind == "null" or lit.value is None:
         return "NULL"
     if lit.kind == "bool":
         return "TRUE" if lit.value else "FALSE"
     if lit.kind == "string":
         return quote_string(str(lit.value))
-    if lit.kind in ("long", "int"):
+    if lit.kind == "long":
         # KQL's default integer is 64-bit; don't let DuckDB infer INTEGER and
         # overflow at 2^31 (docs/TRANSLATION.md §2).
         return f"CAST({int(lit.value)} AS BIGINT)"
+    if lit.kind == "int":
+        # `int(…)` is 32-bit — measured, an Int32 column whose `gettype` is
+        # `int`. It was BIGINT, so every such column said `long`. Arithmetic
+        # on it is promoted back to long, as Kusto's is (`_widen_int`).
+        return f"CAST({int(lit.value)} AS INTEGER)"
     if lit.kind in ("real", "decimal"):
         value = float(lit.value)
         if value != value or value in (float("inf"), float("-inf")):
@@ -265,7 +315,7 @@ def render_expr(node: ir.Expr) -> str:
 
     if isinstance(node, ir.UnaryOp):
         if node.op == "-":
-            return f"(-{render_expr(node.operand)})"
+            return f"(-{_widen_int(node.operand, render_expr(node.operand))})"
         if node.op in ("not", "!"):
             return f"(NOT {render_expr(node.operand)})"
         raise KqlUnsupportedError(f"unary:{node.op}")
@@ -314,6 +364,8 @@ def render_expr(node: ir.Expr) -> str:
             if node.op == "matches regex"
             else render_expr(node.right)
         )
+        if node.op in _ARITHMETIC:
+            left, right = _widen_int(node.left, left), _widen_int(node.right, right)
 
         def build(sqls: Sequence[str]) -> str:
             rendered = _render_term_operator(node, sqls) or spec.template.format(*sqls)
@@ -387,7 +439,7 @@ def render_bin(node: ir.FunctionCall, name: str = "bin") -> str:
     v, r = render_expr(value), render_expr(round_to)
 
     if not (isinstance(round_to, ir.Literal) and round_to.kind == "timespan"):
-        return f"(floor({v} / {r}) * {r})"
+        return _numeric_bin(v, r)
 
     # A timespan bin size means the value is temporal — but binning a *timespan*
     # yields a timespan, while binning a datetime yields a datetime. The
@@ -396,6 +448,47 @@ def render_bin(node: ir.FunctionCall, name: str = "bin") -> str:
     if _is_timespan_expr(value):
         return f"to_seconds(CAST({floored} AS BIGINT))"
     return f"to_timestamp({floored}) AT TIME ZONE 'UTC'"
+
+
+_INTEGER_SQL_TYPES = (
+    "('TINYINT', 'SMALLINT', 'INTEGER', 'BIGINT', 'HUGEINT', "
+    "'UTINYINT', 'USMALLINT', 'UINTEGER', 'UBIGINT', 'UHUGEINT')"
+)
+
+
+def _numeric_bin(v: str, r: str) -> str:
+    """Numeric ``bin(v, r)``: a `long` for integers, a `real` otherwise.
+
+    Measured over rows: `bin(7, 5)` is the long 5, `bin(-7, 5)` is -10 and
+    `bin(9007199254740993, 1)` is exact, so integers are not binned through a
+    double; one real operand makes it `floor(v / r) * r` in doubles (`bin(0.3,
+    0.1)` is 0.2). A zero size is null for integers and NaN for reals; an `int`
+    or `bool` is binned as a `long`. ``floor(v / r) * r`` answered the double
+    5.0 for `bin(7, 5)`, and lost every integer above 2^53.
+
+    The operand types are known only at run time, and CASE unifies its branch
+    types, so the branches are written to keep the operand's type rather than
+    chosen by it: ``//`` truncates integers and divides doubles, ``q - q % 1``
+    truncates a double without turning an integer into one, and ``'NaN'``
+    adapts to the branch type it is only ever selected under. Kusto's integer
+    path adjusts the *dividend* when the signs differ — `(v - r + 1) / r * r`
+    for a negative value and a positive size — and wraps where that overflows:
+    `bin(-9223372036854775806, 4)` is 9223372036854775804 there. The same
+    expression overflows loudly here instead of answering the mathematically
+    right value, which would disagree just as silently. The lambda evaluates
+    each operand once.
+    """
+    q = "(_bin.v // _bin.r)"
+    body = (
+        f"CASE WHEN typeof({q}) IN {_INTEGER_SQL_TYPES} THEN "
+        "(CASE WHEN (_bin.v < 0) <> (_bin.r < 0) THEN _bin.v + sign(_bin.r) - _bin.r "
+        "ELSE _bin.v END) // _bin.r * _bin.r "
+        "WHEN _bin.r = 0 AND _bin.v IS NOT NULL THEN 'NaN' "
+        f"WHEN isinf({q}) OR isnan({q}) THEN {q} * _bin.r "
+        f"ELSE ({q} - {q} % 1 - CASE WHEN {q} % 1 < 0 THEN 1 ELSE 0 END) * _bin.r END"
+    )
+    pair = f"struct_pack(v := {long_or_wider(v)}, r := {long_or_wider(r)})"
+    return f"list_transform([{pair}], _bin -> {body})[1]"
 
 
 def _is_timespan_expr(node: ir.Expr) -> bool:
@@ -4035,6 +4128,10 @@ def render_kql_tostring(node: ir.Expr) -> str:
         f" WHEN 'true' THEN 'True' WHEN 'false' THEN 'False' END"
         f" WHEN 'TIMESTAMP' THEN {_kql_datetime_text(f'CAST({rendered} AS TIMESTAMP)')}"
         f" WHEN 'INTERVAL' THEN {_kql_timespan_text(f'CAST({rendered} AS INTERVAL)')}"
+        # Measured: a NaN is `NaN` in Kusto; DuckDB writes `nan`, or `-nan`
+        # when the sign bit is set, as `bin(1.0, real(+inf))` leaves it.
+        f" WHEN 'DOUBLE' THEN CASE CAST({rendered} AS VARCHAR)"
+        f" WHEN 'nan' THEN 'NaN' WHEN '-nan' THEN 'NaN' ELSE CAST({rendered} AS VARCHAR) END"
         f" ELSE CAST({rendered} AS VARCHAR) END, '')"
     )
 

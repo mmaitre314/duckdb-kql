@@ -140,7 +140,7 @@ SPECIFIC_GOTCHAS: dict[str, str] = {
     "isnotempty": "The negation of `isempty`, so a null is *not* non-empty.",
     "isnull": "True only for null. An empty string is not null; use `isempty` for that.",
     "isnotnull": "False for null, true for the empty string.",
-    "gettype": "Reports the **KQL** type name, not DuckDB's: `long`, `int`, `real`, `string`, `bool`, `datetime`, `timespan`, `guid`, typed nulls included, and for a dynamic what it holds — `array`, `dictionary`, `null`, `long`, `double` (not `real`), `string`, `bool`. **Residue:** a decimal literal reports `real`, and a datetime stored inside a dynamic reports `string` — Kusto keeps its type there.",
+    "gettype": "Reports the **KQL** type name, not DuckDB's: `long`, `int`, `real`, `string`, `bool`, `datetime`, `timespan`, `guid`, typed nulls included, and for a dynamic what it holds — `array`, `dictionary`, `null`, `long`, `double` (not `real`), `string`, `bool`. **Residue:** a decimal literal reports `real`, arithmetic over `int` *columns* reports `int` where Kusto computes a `long`, and a datetime stored inside a dynamic reports `string` — Kusto keeps its type there.",
     "tolong": "KQL's conversion by input type, not a cast (R1): a timespan is its ticks, a datetime its ticks since 0001-01-01, a string an integer only in KQL's syntax (`\"5.7\"` and `\"1e3\"` are null), a real truncates and saturates, a dynamic converts as what it holds. A real *literal* out of range is refused: Kusto folds it differently than it computes it over rows.",
     "toint": "As `tolong`, then to 32 bits the way Kusto does it: a long, timespan or datetime **wraps** (`toint(9999999999)` is 1410065407), a real **saturates**, and a string out of range is null.",
     "todouble": "A timespan or datetime is its tick count; a dynamic string parses as the string does.",
@@ -168,6 +168,8 @@ SPECIFIC_GOTCHAS: dict[str, str] = {
     "reverse": "Reverses the value's KQL **string** form by character, whatever its type — `reverse(3h)` is `00:00:30` (R20). Applying it to a dynamic array is not supported.",
     "iff": "Both branches must be the **same type**, as in KQL — even `long` and `real` do not mix. Checked for literal branches, which refuse cleanly; a mismatch between two *columns* still reaches DuckDB, since column types are not carried. `iif` is the same function.",
     "iif": "Alias for `iff`.",
+    "sign": "Always a `real`, and 0.0 — not null — for a null or a NaN, as Kusto answers.",
+    "abs": "An `int` or `bool` gives a `long`, as in Kusto. **Not supported:** a timespan, which DuckDB's `abs` does not take.",
     "binary_shift_left": "The shift count is taken as given; KQL masks it to 6 bits, so a count above 63 differs.",
     "binary_shift_right": "The shift count is taken as given; KQL masks it to 6 bits, so a count above 63 differs.",
 }
@@ -346,7 +348,7 @@ def family_of(name: str) -> str:
 #: Supported but not registry rows — the shapes a `{0}`-style template cannot
 #: express. Listing them here is what stops the doc from under-reporting.
 SPECIAL_NOTES: dict[str, str] = {
-    "bin": "Floors to a multiple of the bin size **from the epoch origin**, and works on numbers as well as datetimes. Weeks and months are pinned against the emulator rather than mapped to `date_trunc`.",
+    "bin": "Floors to a multiple of the bin size **from the epoch origin**, and works on numbers as well as datetimes. Weeks and months are pinned against the emulator rather than mapped to `date_trunc`. A number keeps its type: two integers bin to an exact `long` (a zero size is null), one real makes it a `real` (a zero size is NaN), and an `int` or `bool` bins as a `long`. **Residue:** near ±2^63, where Kusto's integer arithmetic wraps, it is an overflow error here; a `decimal` bins as a `real`; a timespan binned by a number is refused.",
     "case": "Variadic `case(pred, val, …, else)`.",
     "countof": "Both kinds, and they differ on **overlap**: the default `normal` (substring) kind counts overlapping occurrences — `countof('aaaa', 'aa')` is **3** — while `regex` does not, answering 2. Counted over start positions, since no DuckDB function overlaps and RE2 has no lookahead. An empty needle is 0 and a null haystack is 0, not null. **Residue:** a non-literal search term is accepted here and rejected by a cluster.",
     "tobool": "Text is `true`/`false` (case-insensitive, trimmed) **or an integer** — `'2'` is true and `'1.5'` is null. A *number* is its nonzero-ness, so `tobool(1.5)` is true and `tobool('1.5')` is not: the same value spelled two ways converts differently, and the two are told apart at run time. DuckDB's own boolean cast is wrong in both directions — it accepts `yes`/`no`/`y`/`n`/`t`/`f` and rejects `'2'` (R1).",
@@ -670,7 +672,7 @@ def build() -> str:
     a("| KQL | DuckDB | Limitations and gotchas |")
     a("|---|---|---|")
     a("| `bool` | `BOOLEAN` | — |")
-    a("| `int` | `INTEGER` | 32-bit, as in KQL. |")
+    a("| `int` | `INTEGER` | 32-bit, as in KQL; arithmetic on two of them is a `long`, as Kusto computes it. **Residue:** over an `int` *column* it stays INTEGER and overflows at 2^31, loudly. |")
     a("| `long` | `BIGINT` | KQL's default integer. Integer literals are cast explicitly so DuckDB does not infer `INTEGER` and overflow at 2^31. |")
     a("| `real` | `DOUBLE` | — |")
     a("| `decimal` | `DECIMAL(38,9)` | KQL's `decimal` is a 128-bit type; the scale here is fixed. |")

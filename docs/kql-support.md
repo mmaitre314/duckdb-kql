@@ -298,7 +298,7 @@ Not supported: `arg_max`, `arg_min`, `binary_all_*`, `buildschema`,
 
 | Function | Limitations and gotchas |
 |---|---|
-| `gettype` | Reports the **KQL** type name, not DuckDB's: `long`, `int`, `real`, `string`, `bool`, `datetime`, `timespan`, `guid`, typed nulls included, and for a dynamic what it holds — `array`, `dictionary`, `null`, `long`, `double` (not `real`), `string`, `bool`. **Residue:** a decimal literal reports `real`, and a datetime stored inside a dynamic reports `string` — Kusto keeps its type there. |
+| `gettype` | Reports the **KQL** type name, not DuckDB's: `long`, `int`, `real`, `string`, `bool`, `datetime`, `timespan`, `guid`, typed nulls included, and for a dynamic what it holds — `array`, `dictionary`, `null`, `long`, `double` (not `real`), `string`, `bool`. **Residue:** a decimal literal reports `real`, arithmetic over `int` *columns* reports `int` where Kusto computes a `long`, and a datetime stored inside a dynamic reports `string` — Kusto keeps its type there. |
 | `isempty` | True for null **or** the empty string — not the same as `isnull`. |
 | `isfinite` | — |
 | `isinf` | — |
@@ -333,7 +333,7 @@ Not supported: `arg_max`, `arg_min`, `binary_all_*`, `buildschema`,
 | Function | Limitations and gotchas |
 |---|---|
 | `ago` | `ago(x)` is `now() - x`, with `now()` evaluated once per query. |
-| `bin` | Floors to a multiple of the bin size **from the epoch origin**, and works on numbers as well as datetimes. Weeks and months are pinned against the emulator rather than mapped to `date_trunc`. |
+| `bin` | Floors to a multiple of the bin size **from the epoch origin**, and works on numbers as well as datetimes. Weeks and months are pinned against the emulator rather than mapped to `date_trunc`. A number keeps its type: two integers bin to an exact `long` (a zero size is null), one real makes it a `real` (a zero size is NaN), and an `int` or `bool` bins as a `long`. **Residue:** near ±2^63, where Kusto's integer arithmetic wraps, it is an overflow error here; a `decimal` bins as a `real`; a timespan binned by a number is refused. |
 | `datetime_add` | Takes a **period**: year, quarter, month, week, day, hour, minute, second, millisecond, microsecond. Not `week_of_year` or `dayofyear`, which are ordinals rather than durations — a different list from `datetime_part`'s, and Kusto refuses the wrong one (SEM0235). |
 | `datetime_diff` | Returns a whole number of periods, truncated toward zero. Same period list as `datetime_add`, which is **not** `datetime_part`'s. |
 | `datetime_part` | Reads a **field**: year, quarter, month, week_of_year, day, dayofyear, hour, minute, second, millisecond, microsecond. Note `week_of_year` and `dayofyear` are here and bare `week` is not — the mirror image of `datetime_add`'s list. `nanosecond` is **refused**: KQL keeps 100 ns ticks and DuckDB stores microseconds, so the digit asked for does not exist. |
@@ -393,7 +393,7 @@ Not supported: `arg_max`, `arg_min`, `binary_all_*`, `buildschema`,
 
 | Function | Limitations and gotchas |
 |---|---|
-| `abs` | — |
+| `abs` | An `int` or `bool` gives a `long`, as in Kusto. **Not supported:** a timespan, which DuckDB's `abs` does not take. |
 | `binary_and` | — |
 | `binary_not` | — |
 | `binary_or` | — |
@@ -413,7 +413,7 @@ Not supported: `arg_max`, `arg_min`, `binary_all_*`, `buildschema`,
 | `notnull` | Null-aware: `isempty` (null **or** empty string) is not the same as `isnull`, and arithmetic propagates null. |
 | `pow` | — |
 | `round` | Both arities. The value is cast to DOUBLE first: DuckDB's two-argument `round` returns DECIMAL and rounds the decimal value, so `round(1.005, 2)` is `1.01` there and `1.0` in Kusto, which rounds the double `1.005` actually is. |
-| `sign` | — |
+| `sign` | Always a `real`, and 0.0 — not null — for a null or a NaN, as Kusto answers. |
 | `sqrt` | — |
 
 ### Conversion
@@ -433,7 +433,7 @@ Not supported: `arg_max`, `arg_min`, `binary_all_*`, `buildschema`,
 | KQL | DuckDB | Limitations and gotchas |
 |---|---|---|
 | `bool` | `BOOLEAN` | — |
-| `int` | `INTEGER` | 32-bit, as in KQL. |
+| `int` | `INTEGER` | 32-bit, as in KQL; arithmetic on two of them is a `long`, as Kusto computes it. **Residue:** over an `int` *column* it stays INTEGER and overflows at 2^31, loudly. |
 | `long` | `BIGINT` | KQL's default integer. Integer literals are cast explicitly so DuckDB does not infer `INTEGER` and overflow at 2^31. |
 | `real` | `DOUBLE` | — |
 | `decimal` | `DECIMAL(38,9)` | KQL's `decimal` is a 128-bit type; the scale here is fixed. |

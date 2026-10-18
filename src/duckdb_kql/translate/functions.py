@@ -15,7 +15,7 @@ from typing import Any
 __all__ = [
     "FunctionSpec", "SCALAR_FUNCTIONS", "lookup", "BINARY_OPERATORS", "BinarySpec",
     "AggregateSpec", "AGGREGATE_FUNCTIONS", "lookup_aggregate", "term_match_sql",
-    "is_term_char", "can_fold_term_boundary",
+    "is_term_char", "can_fold_term_boundary", "long_or_wider",
 ]
 
 
@@ -122,6 +122,28 @@ _TOTIMESPAN = (
     "ELSE TRY_CAST({0} AS INTERVAL) END"
 )
 
+
+def long_or_wider(sql: str) -> str:
+    """*sql* widened to at least a ``long``, decided by its type **at run time**.
+
+    Kusto computes `abs`, `bin` and the `binary_*` family of an `int` (or a
+    `bool`) as a `long` — measured, `gettype(binary_and(int(1), 3))` and
+    `gettype(abs(int(-3)))` are `long`, and `binary_shift_left(int(5), 40)` is
+    5497558138880. DuckDB keeps INTEGER, so `5::INTEGER << 40` is an
+    out-of-range error and the type reads `int`.
+
+    A static cast would be wrong for the commonest operand there is, a column
+    whose type the IR does not carry: `CAST(x AS BIGINT)` rounds a real.
+    CASE's type unification is a cast chosen per operand type instead — an
+    integer narrower than BIGINT, or a BOOLEAN, widens to BIGINT; BIGINT,
+    DOUBLE and JSON keep their type and a DECIMAL its scale; a TIMESTAMP,
+    INTERVAL or VARCHAR fails to bind, which is loud. The dead branch is never
+    evaluated.
+    """
+    return f"(CASE WHEN false THEN CAST(NULL AS BIGINT) ELSE {sql} END)"
+
+
+_L0, _L1 = long_or_wider("{0}"), long_or_wider("{1}")
 
 #: Wave 1 scalar and aggregate functions.
 SCALAR_FUNCTIONS: dict[str, FunctionSpec] = {
@@ -272,7 +294,7 @@ SCALAR_FUNCTIONS: dict[str, FunctionSpec] = {
         _f("hash_sha1", "native", "sha1(CAST({0} AS VARCHAR))", (1,), ("R20",)),
         _f("hash_sha256", "native", "sha256(CAST({0} AS VARCHAR))", (1,), ("R20",)),
         # --- math -----------------------------------------------------------
-        _f("abs", "native", "abs({0})", (1,)),
+        _f("abs", "template", f"abs({long_or_wider('{0}')})", (1,)),
         _f("ceiling", "native", "ceil({0})", (1,)),
         # KQL's `floor` IS `bin` — the emulator refuses `floor(7.9)` with
         # "SEM0219: bin(): function expects 2 argument(s)", and `floor(-7, 5)`
@@ -285,7 +307,11 @@ SCALAR_FUNCTIONS: dict[str, FunctionSpec] = {
         _f("log2", "native", "log2({0})", (1,)),
         _f("sqrt", "native", "sqrt({0})", (1,)),
         _f("pow", "native", "power({0}, {1})", (2,)),
-        _f("sign", "native", "sign({0})", (1,)),
+        # Measured: `sign` is a real for every input type, `bool` included,
+        # and 0.0 — not null — for a null or a NaN, folded or over rows.
+        # DuckDB's is a TINYINT, null for null, already 0 for NaN, and has no
+        # BOOLEAN overload.
+        _f("sign", "template", f"CAST(coalesce(sign({_L0}), 0) AS DOUBLE)", (1,)),
         # Rendered by translate._render_round: two arities, and both need a
         # DOUBLE cast to match Kusto. Registered so `round` is a known
         # scalar function and reports its arities.
@@ -294,12 +320,13 @@ SCALAR_FUNCTIONS: dict[str, FunctionSpec] = {
         _f("exp2", "template", "pow(CAST(2 AS DOUBLE), {0})", (1,)),
         _f("exp10", "template", "pow(CAST(10 AS DOUBLE), {0})", (1,)),
         # --- bitwise ---------------------------------------------------------
-        _f("binary_and", "template", "({0} & {1})", (2,)),
-        _f("binary_or", "template", "({0} | {1})", (2,)),
-        _f("binary_xor", "template", "xor({0}, {1})", (2,)),
-        _f("binary_not", "template", "(~{0})", (1,)),
-        _f("binary_shift_left", "template", "({0} << {1})", (2,)),
-        _f("binary_shift_right", "template", "({0} >> {1})", (2,)),
+        # Over `long` whatever the operand width — `long_or_wider`.
+        _f("binary_and", "template", f"({_L0} & {_L1})", (2,)),
+        _f("binary_or", "template", f"({_L0} | {_L1})", (2,)),
+        _f("binary_xor", "template", f"xor({_L0}, {_L1})", (2,)),
+        _f("binary_not", "template", f"(~{_L0})", (1,)),
+        _f("binary_shift_left", "template", f"({_L0} << {_L1})", (2,)),
+        _f("binary_shift_right", "template", f"({_L0} >> {_L1})", (2,)),
         # --- conditional -----------------------------------------------------
         _f("max_of", "template", "greatest({})", (), (), "variadic"),
         _f("min_of", "template", "least({})", (), (), "variadic"),

@@ -73,7 +73,7 @@ SELECT * FROM _s3
 | KQL type | DuckDB type | Notes |
 |---|---|---|
 | `bool` | `BOOLEAN` | |
-| `int` | `INTEGER` | 32-bit |
+| `int` | `INTEGER` | 32-bit; arithmetic on two of them is a `long` (R13) |
 | `long` | `BIGINT` | 64-bit; KQL's default integer type |
 | `real` | `DOUBLE` | |
 | `decimal` | `DECIMAL(38,9)` | the scale is rendered, so `1` reads as `1.000000000` — which is why `todecimal` and `parse … : decimal` are refused rather than mapped |
@@ -108,6 +108,8 @@ carrying real tick precision is not round-trippable here at all.
 | `"text"` / `'text'` | `'text'` (escape `'` → `''`) |
 | `true` / `false` | `TRUE` / `FALSE` |
 | `123` | `123::BIGINT` |
+| `int(5)` | `CAST(5 AS INTEGER)` |
+| `0xFF`, `int(0xFFFFFFFF)` | hex is **unsigned and wraps** to the type: `255`, `-1` |
 | `1.5` | `1.5::DOUBLE` |
 | `datetime(2024-01-01)` | `TIMESTAMP '2024-01-01'` |
 | `datetime(null)` | `CAST(NULL AS TIMESTAMP)` |
@@ -117,7 +119,14 @@ carrying real tick precision is not round-trippable here at all.
 | `guid(...)` | `UUID '…'` |
 
 Typed nulls (`int(null)`, `long(null)`, …) map to `CAST(NULL AS <type>)` — never a
-bare `NULL`, which would lose type information in a `UNION`.
+bare `NULL`, which would lose type information in a `UNION`, and which `gettype`
+reported as `string` for every one of them.
+
+An integer literal Kusto cannot parse is refused, as Kusto refuses it (SYN0002,
+measured): out of range for its type (`int(2147483648)`), a sign before hex
+(`int(-0x10)`), a fraction (`int(1.0)`), and `1_0` or non-ASCII digits, which
+Python's `int()` would otherwise have read. A leading zero is decimal:
+`int(010)` is 10.
 
 ## 4. Semantic invariants — the golden rules
 
@@ -401,7 +410,7 @@ reads as a table. `let a` and `let A` are two bindings, as in Kusto.
 ---
 
 ### R8 — datetime is UTC; binning has an origin
-*Trap: `tests/test_datetime_traps.py`*
+*Traps: `tests/test_datetime_traps.py`, `tests/test_int_and_bin.py`*
 
 - `datetime` is **always UTC**; never emit `TIMESTAMPTZ` or apply a local zone.
 - `now()` and `ago(ts)` must be **evaluated once per query**, not per row, so
@@ -410,7 +419,18 @@ reads as a table. `let a` and `let A` are two bindings, as in Kusto.
   origin** — `time_bucket` / `date_trunc` are close but the origin and
   week/month cases differ. Pin every unit against the oracle before use.
 - `bin()` also applies to **numeric** values (`bin(x, 10)` → floor to multiple of
-  10), not just datetimes.
+  10), and **keeps the operand's type**, measured: two integers bin to an exact
+  `long` (`bin(7, 5)` is 5, `bin(-7, 5)` is -10, `bin(9007199254740993, 1)` is
+  itself), one real makes it `floor(v / r) * r` in doubles (`bin(0.3, 0.1)` is
+  0.2). A zero size is null for integers and NaN for reals; an `int` or `bool`
+  bins as a `long`. `floor(v / r) * r` for everything answered `5.0` and lost
+  every integer above 2^53. The types are known only at run time, so each
+  branch of the emitted CASE is written to keep its operand's type rather than
+  chosen by it. **Residue:** Kusto's integer path adjusts the dividend when the
+  signs differ and wraps where that overflows, near ±2^63 —
+  `bin(-9223372036854775806, 4)` is 9223372036854775804 there — and that is an
+  overflow error here; a `decimal` bins as a `real`; and `bin(1d, 2)`, a
+  timespan by a number, is refused.
 
 ---
 
@@ -514,7 +534,7 @@ positional name. See the support matrix.
 
 ### R13 — `/` on two integers is **integer** division
 
-*Trap: `tests/test_division.py`*
+*Traps: `tests/test_division.py`, `tests/test_int_and_bin.py`*
 
 `7 / 2` is `3`, not `3.5`, and it **truncates toward zero**: `-7 / 2` is `-3`,
 not `-4`. One real operand makes the whole expression real. Division by zero is
@@ -531,6 +551,20 @@ The one place `/` is still emitted is when an operand is *visibly* a real — a
 literal, `todouble`/`toreal`, or arithmetic involving one — because `//` returns
 null for a zero divisor where KQL's float division returns `±Infinity`. Under a
 bare real column that residue remains; see the support matrix.
+
+**Two `int`s compute in `long`.** Measured: `int(2147483647) + int(1)` is
+2147483648, and `+ - * / %` over two ints are all `long` — so are `abs`, `bin`
+and the `binary_*` family of one (`binary_shift_left(int(5), 40)` is
+5497558138880). DuckDB keeps `INTEGER + INTEGER` an INTEGER and overflows at
+2^31. The functions widen at run time (`functions.long_or_wider`): a static
+`CAST(x AS BIGINT)` would *round* a real column. Arithmetic cannot do the same,
+because that widening refuses to mix with a TIMESTAMP and `T + 1d` would stop
+binding, so `+ - * / %` widen an operand only where the IR proves it an `int` —
+an `int(…)` literal, `toint`, or `iff`/`coalesce`/`max_of`/`min_of` over those,
+which stay `int` themselves. **Residue:**
+an `int` *column* under arithmetic is still DuckDB's INTEGER — `gettype` says
+`int` and the sum overflows at 2^31, loudly — until column types are carried
+(`docs/column-types-proposal.md`).
 
 ---
 
@@ -1003,7 +1037,7 @@ one.
 *Traps: `tests/test_tostring.py`, `tests/test_dynamic_literals.py`*
 
 R17 is about one type reaching a string context. This is the rule underneath
-it: every type has a KQL string form, and three of them are not SQL's.
+it: every type has a KQL string form, and four of them are not SQL's.
 
 | expression | Kusto | `CAST(… AS VARCHAR)` |
 |---|---|---|
@@ -1011,6 +1045,7 @@ it: every type has a KQL string form, and three of them are not SQL's.
 | `tostring(datetime(2020-01-02 03:04:05.6))` | `2020-01-02T03:04:05.6000000Z` | **`2020-01-02 03:04:05.6`** |
 | `tostring(dynamic('x'))` | `x` | **`"x"`** (R17) |
 | `tostring(int(null))` | `''`, `strlen` 0, `isnull` **false** | **null** |
+| `tostring(real(nan))` | `NaN` | **`nan`**, or **`-nan`** with the sign bit set |
 
 The last row is the one that is easy to miss. `tostring` is **total**: it
 returns the empty string for a null of *every* type — bool, int, long, real,
