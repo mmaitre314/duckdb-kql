@@ -19,16 +19,9 @@ def pyproject() -> dict[str, Any]:
 
 
 def read_pyproject() -> dict[str, Any]:
-    """Parse ``pyproject.toml``.
+    """Parse ``pyproject.toml``."""
+    import tomllib
 
-    ``tomllib`` arrived in 3.11 and the package supports 3.10, so the older
-    interpreter needs ``tomli`` — which the ``dev`` extra installs for exactly
-    this. Skipping rather than failing keeps a bare checkout usable.
-    """
-    try:
-        import tomllib
-    except ImportError:  # Python 3.10
-        tomllib = pytest.importorskip("tomli")
     parsed: dict[str, Any] = tomllib.loads(
         Path("pyproject.toml").read_text(encoding="utf-8")
     )

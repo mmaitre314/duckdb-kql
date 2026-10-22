@@ -39,7 +39,7 @@ import duckdb_kql
 
 duckdb = pytest.importorskip("duckdb")
 
-MOMENT = dt.datetime(2020, 1, 2, 3, 4, 5, tzinfo=dt.timezone.utc)
+MOMENT = dt.datetime(2020, 1, 2, 3, 4, 5, tzinfo=dt.UTC)
 
 
 @pytest.fixture

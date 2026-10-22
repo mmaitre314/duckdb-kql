@@ -40,7 +40,7 @@ import duckdb_kql
 
 duckdb = pytest.importorskip("duckdb")
 
-FIXED = dt.datetime(2020, 1, 2, 12, tzinfo=dt.timezone.utc)
+FIXED = dt.datetime(2020, 1, 2, 12, tzinfo=dt.UTC)
 #: What it becomes once read: KQL datetimes are naive UTC (R8).
 NAIVE = dt.datetime(2020, 1, 2, 12)
 

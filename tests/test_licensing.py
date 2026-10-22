@@ -35,9 +35,6 @@ def _notices() -> str:
 
 
 def _pyproject() -> dict[str, Any]:
-    # ``tomllib`` is 3.11+; conftest holds the 3.10 fallback, as test_docs.py
-    # does. Importing it here rather than at module scope keeps a collection
-    # error from taking the whole file down on the older interpreter.
     from conftest import read_pyproject
 
     return read_pyproject()

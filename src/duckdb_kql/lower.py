@@ -3200,7 +3200,7 @@ def _lower_in_list(node: Any, rules: list[Any]) -> ir.Expr:
         # The PERF203 suppression below: the handler is per-item on purpose —
         # one rule failing to lower is what identifies the tabular form, so it
         # cannot be hoisted out of the loop.
-        except KqlUnsupportedError:  # noqa: PERF203 - per-item, see above
+        except KqlUnsupportedError:
             # The right-hand side may be a whole tabular expression rather than
             # a value list -- `x in (T | project col)`. That is what the vendored
             # grammar patch (grammar/UPSTREAM.md, PATCH 001) exists to accept.
@@ -3260,7 +3260,7 @@ def _lower_has_list(node: Any, rules: list[Any], op: str) -> ir.Expr:
     for r in rules[1:]:
         try:
             items.append(_lower_expr(r))
-        except KqlUnsupportedError:  # noqa: PERF203 - per-item, as in `in` above
+        except KqlUnsupportedError:
             # Same shape as the `in` case: a tabular right-hand side rather than
             # a value list. `x has_any (T | project col)` is accepted by Kusto.
             if len(rules) != 2:

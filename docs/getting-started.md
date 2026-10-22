@@ -25,7 +25,7 @@ pip install 'duckdb-kql[kusto]'     # Layer 2 — via the azure-kusto-data API
 pip install 'duckdb-kql[all]'       # everything, plus Arrow output
 ```
 
-Python 3.10 or newer.
+Python 3.11 or newer.
 
 `[duckdb]` also installs **pytz**, which is DuckDB's requirement rather than
 this package's: its Python wheel declares no dependencies, but converting a

@@ -75,7 +75,7 @@ def test_every_probe_is_a_real_query() -> None:
     for _, kql, _ in gen.OPERATORS + gen.SOURCES:
         try:
             duckdb_kql.to_sql(kql, schema=gen.PROBE_SCHEMA)
-        except KqlSyntaxError:  # noqa: PERF203 - one probe per operator, by design
+        except KqlSyntaxError:
             broken.append(kql)
         except Exception:  # noqa: BLE001 - unsupported is the expected outcome
             pass

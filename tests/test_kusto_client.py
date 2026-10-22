@@ -129,7 +129,7 @@ def test_datetime_is_stored_as_an_iso_string(client) -> None:
     """
     table = client.execute("db", "print t = datetime(2020-01-02 03:04:05)").primary_results[0]
     assert table.raw_rows[0][0] == "2020-01-02T03:04:05.000000Z"
-    assert table[0]["t"] == dt.datetime(2020, 1, 2, 3, 4, 5, tzinfo=dt.timezone.utc)
+    assert table[0]["t"] == dt.datetime(2020, 1, 2, 3, 4, 5, tzinfo=dt.UTC)
 
 
 def test_timespan_is_stored_in_dotnet_format(client) -> None:

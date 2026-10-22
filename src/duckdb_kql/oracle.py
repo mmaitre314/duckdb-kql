@@ -142,7 +142,7 @@ class KustoEmulator:
             try:
                 self.query("print ready = 1")
                 return
-            except EmulatorError as e:  # noqa: PERF203 - retry loop
+            except EmulatorError as e:
                 last = e
                 time.sleep(interval)
         raise EmulatorError(

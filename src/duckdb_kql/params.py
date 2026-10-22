@@ -271,7 +271,7 @@ def _as_naive_utc(value: _dt.datetime) -> _dt.datetime:
     """
     if value.tzinfo is None:
         return value
-    return value.astimezone(_dt.timezone.utc).replace(tzinfo=None)
+    return value.astimezone(_dt.UTC).replace(tzinfo=None)
 
 
 #: KQL's timespan literal spelling: ``1d``, ``2.5h``, ``100ms``, ``1.02:03:04``.

@@ -53,7 +53,7 @@ JsonTable = dict[str, Any]
 WireRow = list[Any]
 
 
-class WellKnownDataSet(str, Enum):
+class WellKnownDataSet(str, Enum):  # noqa: UP042 - StrEnum would change str(member)
     """Categorizes data tables according to the role they play in a result."""
 
     PrimaryResult = "PrimaryResult"
@@ -192,7 +192,7 @@ def _jsonable(value: Any) -> Any:
 def _iso(value: dt.datetime) -> str:
     """ISO-8601 in UTC with a ``Z``, which is how Kusto writes a datetime."""
     if value.tzinfo is not None:
-        value = value.astimezone(dt.timezone.utc).replace(tzinfo=None)
+        value = value.astimezone(dt.UTC).replace(tzinfo=None)
     text = value.isoformat(timespec="microseconds")
     return f"{text}Z"
 

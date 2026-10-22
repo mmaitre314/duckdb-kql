@@ -486,7 +486,7 @@ def _as_datetime(v: Any) -> _dt.datetime | None:
     else:
         return None
     if dt.tzinfo is not None:
-        dt = dt.astimezone(_dt.timezone.utc).replace(tzinfo=None)
+        dt = dt.astimezone(_dt.UTC).replace(tzinfo=None)
     return dt
 
 
@@ -526,7 +526,7 @@ def _scalar_key(v: Any) -> Any:
     if isinstance(v, _dt.timedelta):
         return v
     if isinstance(v, _dt.datetime):
-        return v.astimezone(_dt.timezone.utc).replace(tzinfo=None) if v.tzinfo else v
+        return v.astimezone(_dt.UTC).replace(tzinfo=None) if v.tzinfo else v
     if isinstance(v, _uuid.UUID):
         return str(v)
     if isinstance(v, (list, dict, tuple)):

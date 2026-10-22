@@ -94,9 +94,9 @@ def test_nothing_imports_a_stdlib_module_newer_than_the_floor() -> None:
     """The other half of the matrix claim: the floor lane has to *work*.
 
     Running the suite on a newer interpreter cannot see this. `tomllib` arrived
-    in 3.11, the floor is 3.10, and a module-scope `import tomllib` in a test
-    file is not a skipped test — it is a collection error that takes the whole
-    file down. That reached `main` once; this is why it cannot again.
+    in 3.11 while the floor was 3.10, and a module-scope `import tomllib` in a
+    test file is not a skipped test — it is a collection error that takes the
+    whole file down. That reached `main` once; this is why it cannot again.
 
     Module scope only. Importing inside a function with a fallback is the
     sanctioned pattern — `conftest.read_pyproject` is exactly that.

@@ -664,7 +664,7 @@ class KustoClient:
             ],
             "Rows": [
                 [
-                    to_wire(dt.datetime.now(dt.timezone.utc), "datetime"),
+                    to_wire(dt.datetime.now(dt.UTC), "datetime"),
                     crid,
                     str(uuid.uuid4()),
                     str(uuid.uuid4()),

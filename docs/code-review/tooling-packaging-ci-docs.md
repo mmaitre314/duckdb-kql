@@ -83,9 +83,9 @@ These are the "easy to miss" gates; a review confirms the *code change* and the
   that's been made conditional, `continue-on-error`, or narrowed (a matrix leg
   dropped, a path filter that now skips the job on the changed files). Green
   because it didn't run is the CI equivalent of a weakened test.
-- [ ] **The support matrix (3.10 floor / 3.13 ceiling)** is preserved — the mypy
-  config depends on running both ends (PEP 695 stubs need 3.12+; 3.10-only code
-  must fail on the 3.10 leg). Dropping a Python leg reduces real coverage.
+- [ ] **The support matrix (3.11 floor / 3.14 ceiling)** is preserved — the mypy
+  config depends on running both ends (PEP 695 stubs need 3.12+; code the floor
+  cannot run must fail on the floor leg). Dropping a Python leg reduces real coverage.
 - [ ] **The emulator/oracle job's role is dev-and-CI only** — never a runtime
   dependency, never redistributed, and no timing/perf numbers published from it
   (licence, `docs/licensing.md` §5). A workflow that prints benchmark numbers

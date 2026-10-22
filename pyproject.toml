@@ -18,7 +18,7 @@ license = { file = "LICENSE" }
 # the license — naming it is not the same as providing it. Before this, `pip
 # install duckdb-kql` delivered the derived parser and no notice at all.
 license-files = ["LICENSE", "THIRD-PARTY-NOTICES.md", "licenses/*.txt"]
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 authors = [{ name = "Matthieu Maitre" }]
 keywords = [
     "kql", "kusto", "duckdb", "sql", "analytics", "transpiler",
@@ -33,7 +33,6 @@ classifiers = [
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3 :: Only",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
@@ -89,8 +88,6 @@ dev = [
     # pandas ships no py.typed, so without these `df()` resolves to Any and the
     # consumer-view test in tests/test_typing.py cannot tell the difference.
     "pandas-stubs",
-    # tests/test_docs.py reads pyproject.toml; tomllib arrived in 3.11.
-    "tomli; python_version < '3.11'",
     # tests/test_workflows.py reads the GitHub Actions definitions.
     "pyyaml",
     "types-PyYAML",
@@ -220,14 +217,14 @@ files = ["src/duckdb_kql"]
 # a type for those would claim knowledge the code does not have. They are
 # declared Any and commented, rather than inferred Any and unremarked.
 #
-# There is deliberately **no `python_version`**. Pinning it to the floor (3.10)
+# There is deliberately **no `python_version`**. Pinning it to the floor (3.11)
 # looks right — one run would prove the source works there — but it also makes
-# mypy parse every third-party stub with 3.10's grammar, and modern stubs use
+# mypy parse every third-party stub with 3.11's grammar, and modern stubs use
 # PEP 695 `type` statements, which are 3.12+. numpy 2.5 broke CI exactly this
 # way, and the next dependency to adopt the syntax would do it again. Letting
 # each interpreter check against itself is more robust *and* better coverage:
-# CI runs the floor and the ceiling, so 3.10-incompatible code fails on the
-# 3.10 lane while the newest semantics are exercised on the newest one.
+# CI runs the floor and the ceiling, so code the floor cannot run fails on the
+# floor lane while the newest semantics are exercised on the newest one.
 disallow_untyped_defs = true
 disallow_incomplete_defs = true
 disallow_untyped_calls = true

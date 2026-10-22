@@ -95,7 +95,7 @@ CLUSTER_NAME = "duckdb-kql"
 
 def _iso(value: dt.datetime) -> str:
     if value.tzinfo is not None:
-        value = value.astimezone(dt.timezone.utc).replace(tzinfo=None)
+        value = value.astimezone(dt.UTC).replace(tzinfo=None)
     return value.isoformat(timespec="microseconds") + "Z"
 
 
@@ -195,7 +195,7 @@ def v2_response(result: Result, client_request_id: str) -> list[dict[str, Any]]:
     `QueryCompletionInformation` — and a response missing the bookends is
     reported to the user as a failed query rather than as an empty one.
     """
-    now = _iso(dt.datetime.now(dt.timezone.utc))
+    now = _iso(dt.datetime.now(dt.UTC))
     activity = str(uuid.uuid4())
     return [
         {

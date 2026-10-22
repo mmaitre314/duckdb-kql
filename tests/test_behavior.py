@@ -207,7 +207,7 @@ def _is_reproducible(sql: object, first: dict, attempts: int = 3) -> bool:
                 return False
         # PERF203 is suppressed below: catching per attempt *is* the
         # measurement — the loop exists to see whether one of N runs differs.
-        except Exception:  # noqa: BLE001, PERF203 - an inconsistent failure is instability too
+        except Exception:  # noqa: BLE001 - an inconsistent failure is instability too
             return False
     return True
 
