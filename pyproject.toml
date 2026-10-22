@@ -167,7 +167,15 @@ exclude = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-filterwarnings = ["error"]
+filterwarnings = [
+    "error",
+    # pandas 3.1 deprecates `inplace=`, and DuckDB's own TIMESTAMPTZ -> pandas
+    # conversion inside `.df()` calls `DataFrame.drop(inplace=True)` — DuckDB
+    # 1.5.6 and 2.0.0 alike, so nothing this package emits can avoid it. Narrow
+    # on purpose: every other new deprecation still fails the suite. Drop the
+    # line when DuckDB stops making the call.
+    "ignore:The inplace keyword in DataFrame.drop is deprecated:DeprecationWarning",
+]
 # Parallel by default: the suite is CPU-bound and nothing in it shares state
 # across files. `loadfile` rather than the default per-test distribution because
 # several files build an expensive module-level fixture once — the corpus sweep
