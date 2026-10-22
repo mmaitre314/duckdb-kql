@@ -318,7 +318,7 @@ def test_a_nested_query_does_not_read_the_outer_binding() -> None:
     """The barrier. A nested query has its own FROM and no `_kqlbind0` in it."""
     from duckdb_kql.translate import sharing
 
-    assert sharing._ACTIVE == [], "a scope leaked out of an earlier test"
+    assert sharing._ACTIVE_STATE.get() == [], "a scope leaked out of an earlier test"
 
     query = (
         f"{F} let Other = {T} | project s;\n"
@@ -326,7 +326,7 @@ def test_a_nested_query_does_not_read_the_outer_binding() -> None:
     )
     with duckdb_kql.connect() as con:
         assert duckdb_kql.kql(con, query).fetchall() == [("abc",), ("zz",)]
-    assert sharing._ACTIVE == [], "the scope stack is not balanced"
+    assert sharing._ACTIVE_STATE.get() == [], "the scope stack is not balanced"
 
 
 def test_the_emitted_shape_is_pinned() -> None:

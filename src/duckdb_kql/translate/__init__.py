@@ -19,6 +19,7 @@ from collections.abc import Callable, Iterator
 from typing import TYPE_CHECKING, Any
 
 from .. import ir
+from .._state import State
 from ..errors import KqlUnsupportedError
 from . import sharing
 from .functions import (
@@ -143,6 +144,7 @@ def render_parameter(param: ir.Parameter) -> str:
     to infer from; stating the declared type keeps a parameter behaving exactly
     like the literal it stands in for.
     """
+    _NAMES = _NAMES_STATE.get()
     if _NAMES is not None:
         _NAMES.slots.add(param.slot)
     return f"CAST(${param.slot} AS {TYPE_MAP[param.kind]})"
@@ -756,11 +758,12 @@ class Clock:
     used: bool = False
 
 
-#: The clock in force. A module global rather than an argument threaded through
-#: every renderer, for the same reason `_NAMED_GROUPS` is one in `lower`: `now()`
-#: can appear anywhere an expression can, including inside a nested query, and
-#: every one of them has to see the same value.
-_ACTIVE_CLOCK: Clock | None = None
+#: The clock in force. Per-statement state (`duckdb_kql._state`) rather than an
+#: argument threaded through every renderer, for the same reason the entity
+#: groups are in `lower`: `now()` can appear anywhere an expression can,
+#: including inside a nested query, and every one of them has to see the same
+#: value.
+_ACTIVE_CLOCK_STATE: State[Clock | None] = State("translate.clock", lambda: None)
 
 
 @contextlib.contextmanager
@@ -774,13 +777,9 @@ def clock(moment: dt.datetime | None) -> Iterator[Clock]:
     right side or inside a `toscalar` is the same instant as one in the outer
     query, which is the whole point of pinning it.
     """
-    global _ACTIVE_CLOCK
-    outer = _ACTIVE_CLOCK
-    _ACTIVE_CLOCK = Clock(moment)
-    try:
-        yield _ACTIVE_CLOCK
-    finally:
-        _ACTIVE_CLOCK = outer
+    active = Clock(moment)
+    with _ACTIVE_CLOCK_STATE.bound(active):
+        yield active
 
 
 def pin(moment: dt.datetime) -> None:
@@ -789,6 +788,7 @@ def pin(moment: dt.datetime) -> None:
     A no-op with no clock context open, which cannot happen through `to_sql` but
     keeps a direct caller of the emitter from having to care.
     """
+    _ACTIVE_CLOCK = _ACTIVE_CLOCK_STATE.get()
     if _ACTIVE_CLOCK is not None:
         _ACTIVE_CLOCK.moment = moment
 
@@ -802,6 +802,7 @@ def render_clock() -> str:
     reference is then visibly the same value rather than several literals a
     reader has to compare.
     """
+    _ACTIVE_CLOCK = _ACTIVE_CLOCK_STATE.get()
     if _ACTIVE_CLOCK is None or _ACTIVE_CLOCK.moment is None:
         return WALL_CLOCK
     _ACTIVE_CLOCK.used = True
@@ -1023,18 +1024,15 @@ def to_sql(query: ir.Query, schema: Schema | None = None) -> TranslationResult:
     The outermost call also decides the generated CTE names for the whole
     statement, since a nested query sees every CTE around it (:class:`_CteNames`).
     """
-    global _NAMES
-    if _NAMES is not None:
+    if _NAMES_STATE.get() is not None:
         with sharing.barrier():
             return _render_query(query, schema)
-    _NAMES = _CteNames(_table_names(query, schema))
-    try:
+    names = _CteNames(_table_names(query, schema))
+    with _NAMES_STATE.bound(names):
         with sharing.barrier():
             result = _render_query(query, schema)
-        result.slots = frozenset(_NAMES.slots)
+        result.slots = frozenset(names.slots)
         return result
-    finally:
-        _NAMES = None
 
 
 @dataclasses.dataclass
@@ -1097,9 +1095,9 @@ class _CteNames:
         return f"{prefix}{index}_{name}"
 
 
-#: The statement being rendered, or None between statements. A module global
+#: The statement being rendered, or None between statements. Per-statement state
 #: like the clock and the sharing scopes, set and cleared by :func:`to_sql`.
-_NAMES: _CteNames | None = None
+_NAMES_STATE: State[_CteNames | None] = State("translate.names", lambda: None)
 
 
 def render_toscalar(node: ir.ToScalar) -> str:
@@ -1123,6 +1121,7 @@ def render_toscalar(node: ir.ToScalar) -> str:
     evaluating two copies separately could only agree or not, and agreeing is
     one of its answers.
     """
+    _NAMES = _NAMES_STATE.get()
     assert _NAMES is not None
     target = _toscalar_scope(node.query)
     body = str(to_sql(node.query, _nested_schema()))
@@ -1154,6 +1153,7 @@ def _reads_toscalar(node: object) -> bool:
 
 def _nested_schema() -> Schema | None:
     """The schema a query nested in an expression of this scope renders with."""
+    _NAMES = _NAMES_STATE.get()
     return _NAMES.schemas[-1] if _NAMES is not None and _NAMES.schemas else None
 
 
@@ -1184,6 +1184,7 @@ def _toscalar_scope(query: ir.Query) -> int:
     a nested scope binding the same name would capture it — KQL scoping is
     lexical, and the body means the binding where it was written.
     """
+    _NAMES = _NAMES_STATE.get()
     assert _NAMES is not None
     found = 0
     for name in _free_table_names(query):
@@ -1222,6 +1223,7 @@ def _free_table_names(query: ir.Query) -> set[str]:
 
 def _let_cte(name: str) -> str | None:
     """The CTE of the innermost tabular `let` named exactly *name*, if one is in scope."""
+    _NAMES = _NAMES_STATE.get()
     if _NAMES is None:
         return None
     for scope in reversed(_NAMES.scopes):
@@ -1233,6 +1235,7 @@ def _let_cte(name: str) -> str | None:
 def _let_label(name: str) -> tuple[bool, str | None]:
     """``(bound, label)`` for *name*: whether a `let` in scope binds it, and
     the table it aliases if it is only an alias."""
+    _NAMES = _NAMES_STATE.get()
     if _NAMES is None:
         return False, None
     for labels in reversed(_NAMES.labels):
@@ -1289,6 +1292,7 @@ def _table_names(query: ir.Query, schema: Schema | None) -> frozenset[str]:
 
 def _render_query(query: ir.Query, schema: Schema | None = None) -> TranslationResult:
     """:func:`to_sql`'s body, once the enclosing binding scopes are hidden."""
+    _NAMES = _NAMES_STATE.get()
     assert _NAMES is not None
     scope: dict[str, str] = {}
     _NAMES.scopes.append(scope)
@@ -1310,6 +1314,7 @@ def _render_scoped(
     query: ir.Query, schema: Schema | None, scope: dict[str, str]
 ) -> TranslationResult:
     """Render *query* with its own tabular `let`s entering *scope* in order."""
+    _NAMES = _NAMES_STATE.get()
     from ..schema import (
         let_ref_names,
         output_columns,

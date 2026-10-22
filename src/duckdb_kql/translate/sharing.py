@@ -68,6 +68,7 @@ from collections.abc import Iterable, Iterator, Sequence
 from typing import Any
 
 from .. import ir
+from .._state import State
 
 #: KQL functions whose value may differ between two evaluations in one row.
 #: Binding one would turn N draws into one. None of these has a DuckDB mapping
@@ -144,7 +145,9 @@ class Scope:
     source: str = ""
 
 
-_ACTIVE: list[Scope] = []
+#: The scopes open in the statement being rendered, innermost last —
+#: per-statement state (`duckdb_kql._state`); :func:`barrier` starts a fresh list.
+_ACTIVE_STATE: State[list[Scope]] = State("sharing.scopes", list)
 
 
 def slot_for(node: object) -> str | None:
@@ -154,6 +157,7 @@ def slot_for(node: object) -> str | None:
     a bound node — an argument, an operand, a regex position — picks the column
     up without each renderer having to know this module exists.
     """
+    _ACTIVE = _ACTIVE_STATE.get()
     if not _ACTIVE:
         return None
     return _ACTIVE[-1].slots.get(id(node))
@@ -177,6 +181,7 @@ def bind_repeats(
 
     The caller renders under the returned scope and then calls :func:`release`.
     """
+    _ACTIVE = _ACTIVE_STATE.get()
     from . import render_expr  # circular at module scope: render_expr needs this
 
     scope = Scope(source=prev)
@@ -310,6 +315,7 @@ def _selects_on_match(owner: ir.FunctionCall, index: int) -> bool:
 
 def release() -> None:
     """Pop the scope :func:`bind_repeats` pushed. Always paired with it."""
+    _ACTIVE = _ACTIVE_STATE.get()
     _ACTIVE.pop()
 
 
@@ -324,12 +330,8 @@ def barrier() -> Iterator[None]:
     sides of the `toscalar` to happen at all, and would therefore have been
     found by a user rather than by this test suite.
     """
-    global _ACTIVE
-    outer, _ACTIVE = _ACTIVE, []
-    try:
+    with _ACTIVE_STATE.bound([]):
         yield
-    finally:
-        _ACTIVE = outer
 
 
 def _prefix(reserved: set[str]) -> str:

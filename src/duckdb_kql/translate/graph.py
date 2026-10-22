@@ -23,6 +23,7 @@ from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
 from .. import ir
+from .._state import State
 from ..errors import KqlUnsupportedError
 
 if TYPE_CHECKING:
@@ -78,17 +79,15 @@ class _Match:
     element: tuple[str, str] | None = None
 
 
-_CTX: _Match | None = None
+#: The match being rendered, for `render_graph_expr` — per-statement state
+#: (`duckdb_kql._state`), set by `_context` around one `graph-match`.
+_CTX_STATE: State[_Match | None] = State("graph.match", lambda: None)
 
 
 @contextmanager
 def _context(match: _Match) -> Iterator[None]:
-    global _CTX
-    saved, _CTX = _CTX, match
-    try:
+    with _CTX_STATE.bound(match):
         yield
-    finally:
-        _CTX = saved
 
 
 def _quote(name: str) -> str:
@@ -288,8 +287,9 @@ def render(source: ir.GraphSource, schema: Schema | None) -> str:
 
 def _prefix() -> str:
     """``_g0_``, ``_g1_``… — free of every name the statement reads."""
-    from . import _NAMES
+    from . import _NAMES_STATE
 
+    _NAMES = _NAMES_STATE.get()
     if _NAMES is None:
         return "_g0_"
     index = _NAMES.counter
@@ -1249,6 +1249,7 @@ def _render(expr: ir.Expr) -> str:
 
 def render_graph_expr(node: ir.Expr) -> str:
     """`render_expr` for the graph expression nodes."""
+    _CTX = _CTX_STATE.get()
     if isinstance(node, _Sql):
         return node.sql
     ctx = _CTX

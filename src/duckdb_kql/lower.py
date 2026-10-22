@@ -20,6 +20,7 @@ from typing import Any
 
 from . import ir
 from ._antlr.KqlParser import KqlParser
+from ._state import State
 from .clusters import Resolved
 from .entity_groups import Entity, ResolvedGroups, resolve_group
 from .errors import KqlError, KqlSchemaError, KqlUnsupportedError, SourceSpan
@@ -604,6 +605,7 @@ def _lower_function_call(node: Any) -> ir.Expr:
 
     Shape: ``NamedFunctionCallExpression -> SimpleNameReference '(' Argument* ')'``.
     """
+    _LET_FUNCTIONS = _LET_FUNCTIONS_STATE.get()
     kids = _rule_children(node)
     if not kids:
         return ir.FunctionCall(node.getText().rstrip("()"))
@@ -695,6 +697,7 @@ def _lower_named(node: Any) -> ir.NamedExpr:
 
 
 def _lower_source(node: Any) -> ir.Source:
+    _SCOPE = _SCOPE_STATE.get()
     node = _collapse(node)
     kind = _cls(node)
 
@@ -1034,14 +1037,14 @@ def _reparse_distinct(node: Any, kids: list[Any]) -> tuple[ir.NamedExpr, ...]:
 # implements, rather than introducing a second way to combine branches.
 
 #: The scope name in force while a macro-expand body is being lowered, and the
-#: entity it stands for. A module-level binding rather than a parameter
-#: threaded through `_lower_source`: the scope is *lexically* scoped to one
+#: entity it stands for. Per-statement state (`duckdb_kql._state`) rather than
+#: a parameter threaded through `_lower_source`: the scope is *lexically* scoped to one
 #: operator, but the lowering entry points that would have to carry it number
 #: about a dozen, and a parameter that is None in all but one caller is a worse
 #: description of the situation than a save-and-restore around the one place it
 #: is true. Kusto refuses a nested macro-expand (SEM0611) and so does this, so
 #: the binding never needs to stack.
-_SCOPE: tuple[str, Entity] | None = None
+_SCOPE_STATE: State[tuple[str, Entity] | None] = State("lower.scope", lambda: None)
 
 #: `let`-bound entity groups, and the caller's named-group mapping, in force
 #: for the query being lowered.
@@ -1050,10 +1053,10 @@ _SCOPE: tuple[str, Entity] | None = None
 #: inlines the body at each call site. A name is registered only *after* its own
 #: body is lowered, so a function cannot see itself — which is Kusto's rule too,
 #: measured: a recursive `let` fails with SEM0260, "Unknown function".
-_LET_FUNCTIONS: dict[str, LetFunction] = {}
+_LET_FUNCTIONS_STATE: State[dict[str, LetFunction]] = State("lower.let_functions", dict)
 
-_LET_GROUPS: dict[str, tuple[Entity, ...]] = {}
-_NAMED_GROUPS: ResolvedGroups | None = None
+_LET_GROUPS_STATE: State[dict[str, tuple[Entity, ...]]] = State("lower.let_groups", dict)
+_NAMED_GROUPS_STATE: State[ResolvedGroups | None] = State("lower.named_groups", lambda: None)
 
 
 @contextlib.contextmanager
@@ -1069,30 +1072,25 @@ def _macro_context(
     A `let` that outlives its query is a wrong answer to a query that never
     declared it.
     """
-    global _LET_GROUPS, _NAMED_GROUPS, _LET_FUNCTIONS
-    previous = (_LET_GROUPS, _NAMED_GROUPS, _LET_FUNCTIONS)
-    _LET_GROUPS, _NAMED_GROUPS, _LET_FUNCTIONS = let_groups, named, {}
-    try:
+    with (
+        _LET_GROUPS_STATE.bound(let_groups),
+        _NAMED_GROUPS_STATE.bound(named),
+        _LET_FUNCTIONS_STATE.bound({}),
+    ):
         yield
-    finally:
-        _LET_GROUPS, _NAMED_GROUPS, _LET_FUNCTIONS = previous
 
 
 @contextlib.contextmanager
 def _scope_binding(name: str, entity: Entity) -> Iterator[None]:
-    global _SCOPE
-    if _SCOPE is not None:
+    if _SCOPE_STATE.get() is not None:
         # Kusto: "SEM0611: macro '<name>' name is invalid. Make sure that the
         # macro is used in macro-expand query." Nesting is refused there, and a
         # guess at what it would mean is not worth the ambiguity here.
         raise KqlUnsupportedError(
             "macro-expand", hint="a nested macro-expand is refused, as Kusto refuses it"
         )
-    _SCOPE = (name, entity)
-    try:
+    with _SCOPE_STATE.bound((name, entity)):
         yield
-    finally:
-        _SCOPE = None
 
 
 # ---------------------------------------------------------------------------
@@ -1137,7 +1135,7 @@ class _FunctionScope:
     scalars: Scalars = dataclasses.field(default_factory=dict)
 
 
-_FN: _FunctionScope | None = None
+_FN_STATE: State[_FunctionScope | None] = State("lower.fn", lambda: None)
 
 
 @contextlib.contextmanager
@@ -1148,19 +1146,15 @@ def _function_scope(
     kql: str,
 ) -> Iterator[None]:
     """Stored functions in force for one statement."""
-    global _FN
-    previous = _FN
     texts = (kql, *(f.command for fns in (functions or {}).values() for f in fns.values()))
-    _FN = _FunctionScope(functions, current, clusters, texts)
-    try:
+    with _FN_STATE.bound(_FunctionScope(functions, current, clusters, texts)):
         yield
-    finally:
-        _FN = previous
 
 
 @contextlib.contextmanager
 def _nested_scope() -> Iterator[None]:
     """A scope whose `let`s and calls do not outlive it: a body."""
+    _FN = _FN_STATE.get()
     if _FN is None:
         yield
         return
@@ -1175,6 +1169,7 @@ def _nested_scope() -> Iterator[None]:
 
 def _drain_pending() -> list[tuple[str, ir.Query]]:
     """The bindings calls produced in this scope so far, to be placed now."""
+    _FN = _FN_STATE.get()
     if _FN is None or not _FN.pending[-1]:
         return []
     out = list(_FN.pending[-1])
@@ -1183,12 +1178,14 @@ def _drain_pending() -> list[tuple[str, ir.Query]]:
 
 
 def _see_tabular(name: str) -> None:
+    _FN = _FN_STATE.get()
     if _FN is not None:
         _FN.visible = _FN.visible | {name}
 
 
 def _stored(name: str, database: str | None) -> StoredFunction | None:
     """The definition *name* resolves to in *database* (None: the context's)."""
+    _FN = _FN_STATE.get()
     if _FN is None or not _FN.functions:
         return None
     try:
@@ -1200,6 +1197,8 @@ def _stored(name: str, database: str | None) -> StoredFunction | None:
 
 def _stored_call_source(node: Any) -> ir.Source | None:
     """``F(...)`` at a source position, if it names a stored function."""
+    _LET_FUNCTIONS = _LET_FUNCTIONS_STATE.get()
+    _FN = _FN_STATE.get()
     if _FN is None:
         return None
     kids = _rule_children(node)
@@ -1224,6 +1223,7 @@ def _stored_bare_source(node: Any, name: str, database: str | None = None) -> ir
     function has the name: Kusto resolves a bare name to the function first,
     whichever was created first (measured).
     """
+    _FN = _FN_STATE.get()
     if _FN is None or (database is None and name in _FN.visible):
         return None
     function = _stored(name, database)
@@ -1243,6 +1243,7 @@ def _stored_bare_source(node: Any, name: str, database: str | None = None) -> ir
 
 def _stored_qualified_source(node: Any) -> ir.Source | None:
     """``database('D').F(...)`` or ``cluster('c').database('d').F(...)``."""
+    _FN = _FN_STATE.get()
     if _FN is None:
         return None
     parts = _rule_children(node)
@@ -1283,6 +1284,7 @@ def _stored_qualified_source(node: Any) -> ir.Source | None:
 
 def _stored_qualified_bare(node: Any, table: ir.TableRef) -> ir.Source | None:
     """``database('D').F`` — a qualified bare name — if D has a function F."""
+    _FN = _FN_STATE.get()
     if _FN is None or not _FN.functions:
         return None
     database = table.database
@@ -1309,6 +1311,7 @@ def _unknown_function(node: Any, name: str, database: str | None) -> KqlUnsuppor
     not map (`external_table`) and an unregistered stored function look the same
     from here, and the first is what unsupported means.
     """
+    _FN = _FN_STATE.get()
     assert _FN is not None
     where = database if database is not None else _FN.context
     known = registered_names(_FN.functions, where, _FN.current)
@@ -1338,6 +1341,8 @@ def _stored_parameters(function: StoredFunction) -> list[tuple[str, ir.Expr | No
 
 def _expand(node: Any, function: StoredFunction, arg_nodes: list[Any]) -> ir.TableRef:
     """Expand one call into a binding of its own, and stand the call in for it."""
+    _LET_FUNCTIONS = _LET_FUNCTIONS_STATE.get()
+    _FN = _FN_STATE.get()
     assert _FN is not None
     key = (function.database, function.name)
     if key in _FN.expanding:
@@ -1401,6 +1406,7 @@ def _bind_stored_arguments(
     node: Any, function: StoredFunction, arg_nodes: list[Any]
 ) -> Scalars:
     """Positional arguments, lowered in the **caller's** scope, plus defaults."""
+    _FN = _FN_STATE.get()
     assert _FN is not None
     for arg in arg_nodes:
         if _find_all(arg, "NamedExpressionNameClause"):
@@ -1439,6 +1445,7 @@ def _fresh_name(function: str) -> str:
     could spell would let that query read the expansion. None of the source
     texts contains this one, and an identifier can only be spelled from them.
     """
+    _FN = _FN_STATE.get()
     assert _FN is not None
     while True:
         name = f"{function}()#{_FN.counter}"
@@ -1496,6 +1503,7 @@ def _declare_let_function(decl: Any, scalars: Scalars) -> None:
     one where a table is expected is a different feature from substituting an
     expression into a scalar position.
     """
+    _LET_FUNCTIONS = _LET_FUNCTIONS_STATE.get()
     kids = _rule_children(decl)
     if len(kids) < 2:
         raise _unsupported(decl, "let function")
@@ -1586,6 +1594,7 @@ def _lower_invoke(node: Any, kids: list[Any]) -> list[ir.Operator]:
 
     Scalar arguments bind exactly as they do for a scalar call.
     """
+    _LET_FUNCTIONS = _LET_FUNCTIONS_STATE.get()
     calls = _find_all(node, "NamedFunctionCallExpression")
     if not calls:
         raise _unsupported(node, "invoke")
@@ -1646,6 +1655,7 @@ def _declare_tabular_function(
     what the operator does, and it requires the body to start **at** the tabular
     parameter — anything else is a query this cannot splice into.
     """
+    _LET_FUNCTIONS = _LET_FUNCTIONS_STATE.get()
     inner: list[Any] = []
     locals_: list[Any] = []
     for kid in _rule_children(body_node):
@@ -1897,6 +1907,8 @@ def _lower_macro_expand(node: Any, kids: list[Any], rest: list[Any]) -> ir.Query
 
 def _resolve_macro_group(node: Any) -> tuple[Entity, ...]:
     """The entity list, from an inline group, a `let`-bound one, or a name."""
+    _LET_GROUPS = _LET_GROUPS_STATE.get()
+    _NAMED_GROUPS = _NAMED_GROUPS_STATE.get()
     inline = _find_all(node, "EntityGroupExpression")
     if inline:
         return _lower_entity_group_expression(inline[0])
@@ -1938,6 +1950,7 @@ def _lower_macro_body(nodes: list[Any], scope: str, entity: Entity) -> ir.Query:
 
 def _lower_scoped_table(node: Any) -> ir.TableRef | None:
     """``scope.T`` inside a macro-expand body -> that entity's ``T``."""
+    _SCOPE = _SCOPE_STATE.get()
     if _SCOPE is None:
         return None
     scope, entity = _SCOPE
@@ -2225,7 +2238,7 @@ def query_parameters(kql: str) -> list[ParameterDeclaration]:
 
 #: Graph-valued `let`s of the query being lowered: name -> the pipeline's head
 #: and operators, as parse-tree nodes. Set for the duration of `lower`.
-_GRAPH_LETS: dict[str, tuple[Any, list[Any]]] = {}
+_GRAPH_LETS_STATE: State[dict[str, tuple[Any, list[Any]]]] = State("lower.graph_lets", dict)
 
 
 def lower(
@@ -2250,12 +2263,8 @@ def lower(
         KqlSyntaxError: the query does not parse.
         KqlUnsupportedError: it parses but uses a construct outside this wave.
     """
-    global _GRAPH_LETS
-    saved, _GRAPH_LETS = _GRAPH_LETS, {}
-    try:
+    with _GRAPH_LETS_STATE.bound({}):
         return _lower(kql, entity_groups, functions, database, clusters)
-    finally:
-        _GRAPH_LETS = saved
 
 
 def _lower(
@@ -2356,6 +2365,7 @@ def _lower_head(head: Any, rest: list[Any]) -> ir.Query:
     — measured — so the leading form becomes the piped one here rather than
     being modelled a second time, and every later stage sees one shape.
     """
+    _GRAPH_LETS = _GRAPH_LETS_STATE.get()
     head = _collapse(head)
     if _cls(head) in _NAME_KINDS and _GRAPH_LETS.get(_name_text(head) or "") is not None:
         # A graph-valued `let` (`let G = E | make-graph …; G | graph-match …`)
@@ -2729,6 +2739,7 @@ def _is_tabular_value(node: Any, scalars: Scalars) -> bool:
     construct PipeExpression" — an error about the pipeline, when the only
     problem was the brackets around it.
     """
+    _LET_FUNCTIONS = _LET_FUNCTIONS_STATE.get()
     node = _unparenthesize(node)
     kind = _cls(node)
     if kind in _TABULAR_VALUE:
@@ -3089,6 +3100,8 @@ def _lower_lets(
     so scalars are substituted as they are collected. *seed* pre-populates the
     scalar scope — query parameters live there, since a ``let`` may read one.
     """
+    _FN = _FN_STATE.get()
+    _GRAPH_LETS = _GRAPH_LETS_STATE.get()
     scalars: Scalars = dict(seed or {})
     tabulars: list[tuple[str, ir.Query]] = []
     #: Names bound by a `let` in this context, for the SEM0079 check. Not
