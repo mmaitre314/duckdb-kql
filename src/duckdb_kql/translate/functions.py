@@ -607,11 +607,15 @@ BINARY_OPERATORS: dict[str, BinarySpec] = {
         # information the translator does not have. Measured across 17 forms:
         # `//` matches 14, `/` matched 5. See translate.render_expr for the one
         # case that needs `/` back.
-        BinarySpec("/", "({0} // {1})"),
+        #
+        # The NULLIF keeps an integer divided by zero null, as KQL's is. DuckDB
+        # 2.0 raises on it instead (`error_on_division_by_zero`); earlier
+        # versions answered null themselves, so this reads the same on both.
+        BinarySpec("/", "({0} // NULLIF({1}, 0))"),
         # KQL's % is a MATHEMATICAL modulo: the result takes the sign of
         # nothing -- it is always non-negative. SQL's % takes the dividend's
         # sign, so `-10 % 4` is 2 in KQL and -2 in DuckDB. Measured, not assumed.
-        BinarySpec("%", "((({0} % {1}) + abs({1})) % abs({1}))", ("R11",),
+        BinarySpec("%", "((({0} % NULLIF({1}, 0)) + abs({1})) % NULLIF(abs({1}), 0))", ("R11",),
                    "always non-negative, unlike SQL"),
         BinarySpec("<", "({0} < {1})"),
         BinarySpec("<=", "({0} <= {1})"),

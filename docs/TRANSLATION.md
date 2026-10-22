@@ -542,7 +542,10 @@ not `-4`. One real operand makes the whole expression real. Division by zero is
 
 Rendered with DuckDB's `//`, which despite the spelling is not floor division —
 it truncates toward zero on integers and behaves as ordinary division on floats
-(`7.5 // 2` is `3.75`). DuckDB decides which from the operand types, which is
+(`7.5 // 2` is `3.75`). The divisor is `NULLIF(…, 0)`: DuckDB 2.0 *raises* on
+a division by zero (`error_on_division_by_zero`), so the null is written into
+the SQL rather than left to a session setting `to_sql()`'s caller would not
+have. *Trap: `tests/test_duckdb2.py`.* DuckDB decides which from the operand types, which is
 exactly the type information the translator does not have. SQL's plain `/`
 promotes to double and answers `3.5`: a silently wrong number in the most
 ordinary arithmetic in the language.
@@ -1291,11 +1294,12 @@ match that used to exhaust that budget now fits in 256 MB without spilling.
 What a graph's relations carry is what its consumer can observe: the
 properties it reads (a whole element reads all of its kind), and a node
 numbering only for `graph-mark-components` and `graph-to-table nodes`. A walk
-starts as a zero-length stub at a node, so that DuckDB builds each step's hash
-table on the walks and probes the edges; anchored on an edge, a CTE without
-statistics estimated the walks as a cross product and every hop hashed the
-whole edge relation. Neither change alters a row: a property not carried is one
-nothing reads, and each edge's start is exactly one node.
+starts as a zero-length stub at a node; anchored on an edge, a CTE without
+statistics estimated the walks as a cross product and DuckDB 1.x hashed the
+whole edge relation at every hop. (DuckDB 2.0 hashes a recursive step's edges
+once and keeps them across hops, whichever way the walk is anchored.) Neither
+change alters a row: a property not carried is one nothing reads, and each
+edge's start is exactly one node.
 
 ### R26 — `toscalar` is computed **once**, outside any row, from the **first** row
 *Trap: `tests/test_toscalar.py`*

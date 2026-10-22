@@ -59,8 +59,8 @@ def test_generation_is_deterministic() -> None:
 
 
 def test_row_counts(con) -> None:
-    assert con.sql("SELECT count(*) FROM StormEvents").fetchone()[0] == fixtures.ROWS
-    assert con.sql("SELECT count(*) FROM PopulationData").fetchone()[0] == len(
+    assert con.sql("SELECT count(*) FROM StormEvents").fetchall()[0][0] == fixtures.ROWS
+    assert con.sql("SELECT count(*) FROM PopulationData").fetchall()[0][0] == len(
         fixtures.STATES
     )
 
@@ -74,7 +74,7 @@ def test_sort_keys_are_unique(con) -> None:
     dupes = con.sql(
         "SELECT count(*) FROM (SELECT StartTime FROM StormEvents "
         "GROUP BY 1 HAVING count(*) > 1)"
-    ).fetchone()[0]
+    ).fetchall()[0][0]
     assert dupes == 0, f"{dupes} duplicate StartTime values will make sort ties ambiguous"
 
 
@@ -97,7 +97,7 @@ def test_sort_keys_are_unique(con) -> None:
 def test_corpus_predicates_are_not_vacuous(con, column: str, value: str) -> None:
     n = con.sql(
         f'SELECT count(*) FROM StormEvents WHERE "{column}" = ?', params=[value]
-    ).fetchone()[0]
+    ).fetchall()[0][0]
     assert n > 0, f"no rows with {column}={value!r} — cases filtering on it prove nothing"
 
 
@@ -107,7 +107,7 @@ def test_substring_predicates_are_not_vacuous(con) -> None:
         n = con.sql(
             "SELECT count(*) FROM StormEvents WHERE State ILIKE '%' || ? || '%'",
             params=[needle],
-        ).fetchone()[0]
+        ).fetchall()[0][0]
         assert n > 0, f"no State contains {needle!r}"
 
 
@@ -120,7 +120,7 @@ def test_numeric_predicates_select_a_subset(con) -> None:
         "SELECT count(*) FROM StormEvents WHERE InjuriesDirect > 0",
         "SELECT count(*) FROM PopulationData WHERE Population > 5000000",
     ):
-        n = con.sql(sql).fetchone()[0]
+        n = con.sql(sql).fetchall()[0][0]
         assert 0 < n < total, f"{sql} selected {n} of {total} — not a discriminating filter"
 
 

@@ -145,8 +145,10 @@ def test_a_shared_connection_still_needs_external_serialization(con) -> None:
 
     # Not asserting that it *does* fail — that would be a flaky test of a race.
     # Asserting the shape: any failure here is DuckDB's concurrency complaint,
-    # never a wrong answer.
-    assert all(name == "InvalidInputException" for name in errors), set(errors)
+    # never a wrong answer. DuckDB 2.0 names it ResourceInUseException ("connection
+    # is busy with another call"); earlier versions, InvalidInputException.
+    complaints = {"InvalidInputException", "ResourceInUseException"}
+    assert all(name in complaints for name in errors), set(errors)
 
 
 # ---------------------------------------------------------------------------

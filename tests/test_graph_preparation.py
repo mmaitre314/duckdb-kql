@@ -20,9 +20,11 @@ Now a relation carries the properties the consumer reads and no others; the
 raw edges are read once, by the numbered copy; nodes are numbered only for an
 operator that can see the order; a step reads the node relation only for an
 inner node's properties; and a walk starts as a zero-length stub at a node,
-so DuckDB builds on the walks and probes the edges. At full scale the query
-answers in about 9 s, of which about 5 s is the KQL's own key expression,
-`tostring(pack_array(...))` over every edge.
+so no hop hashes the edges again: DuckDB 1.x then builds on the walks and
+probes the edges, and DuckDB 2.0 hashes the edges once and keeps them across
+hops. At full scale the query answers in about 13 s on DuckDB 2.0, of which
+about 5 s is the KQL's own key expression, `tostring(pack_array(...))` over
+every edge.
 
 The traps, every expectation measured on the emulator:
 
@@ -116,12 +118,23 @@ def test_through_the_sdk_shaped_client(budgeted) -> None:
     assert (row["Start"], row["End"], list(row["EdgeIds"]), row["Hops"]) == EXPECTED[0]
 
 
-def test_each_step_builds_on_the_walks_and_probes_the_edges(tmp_path: Path) -> None:
-    """The second failure, pinned where it happens: in DuckDB's plan the
-    build side of a hash join is its second child. Anchored on an edge, that
-    child was the edge relation, at every one of the five hops."""
+def test_no_hop_reads_the_edges_again(tmp_path: Path) -> None:
+    """The second failure, pinned where it happens: every hop hashing every edge.
+
+    In DuckDB's plan the build side of a hash join is its second child. Under
+    DuckDB 1.x, anchored on an edge, that child was the edge relation at every
+    one of the five hops, and anchoring the walk on a stub made it the walks.
+    DuckDB 2.0 builds a recursive step on its non-recursive side whichever way
+    the walk is anchored, and keeps that table across iterations — measured on
+    this fixture, the edge relation is read once (8,000 rows) over the six
+    iterations, while the walks, read again at every hop, total six. So what
+    is pinned is the outcome: the step probes with the walks, and no hop reads
+    the edges again. At the reported scale the query answers in about 13 s on
+    2.0, where the SQL from before the fix still runs out of memory.
+    """
+    edges = 8_000
     con = duckdb_kql.connect()
-    _fixture(con, 2_000, 8_000)
+    _fixture(con, 2_000, edges)
     sql = str(duckdb_kql.to_sql(KQL, schema=schema(con)))
     profile = tmp_path / "profile.json"
     con.execute("PRAGMA enable_profiling='json'")
@@ -130,7 +143,7 @@ def test_each_step_builds_on_the_walks_and_probes_the_edges(tmp_path: Path) -> N
     con.execute("PRAGMA disable_profiling")
 
     def named(node: dict, name: str) -> dict | None:
-        if (node.get("operator_name") or "").strip() == name:
+        if node.get("type") == name:
             return node
         for child in node.get("children", []):
             found = named(child, name)
@@ -138,12 +151,14 @@ def test_each_step_builds_on_the_walks_and_probes_the_edges(tmp_path: Path) -> N
                 return found
         return None
 
-    recursion = named(json.loads(profile.read_text()), "REC_CTE")
+    recursion = named(json.loads(profile.read_text())["operator"][0], "RECURSIVE_CTE")
     assert recursion is not None, "no recursive CTE in the plan"
     step = named(recursion["children"][1], "HASH_JOIN")
     assert step is not None, "the recursive step has no hash join"
-    build = step["children"][1]
-    assert named(build, "REC_CTE_SCAN") is not None, "the step builds on the edges"
+    probe, build = step["children"]
+    assert named(probe, "RECURSIVE_CTE_SCAN") is not None, "the walks are not the probe side"
+    assert build["type"] == "CTE_SCAN", build["type"]
+    assert build["intermediate_rows"] == edges, "a hop read the edges again"
 
 
 # ---------------------------------------------------------------------------

@@ -84,7 +84,7 @@ def test_payload_is_matched_as_a_literal_string(con, payload: str) -> None:
 
 def test_table_survives_a_drop_payload(con) -> None:
     engine.kql(con, LOOKUP, {"name_p": "'; DROP TABLE Users; --"}).fetchall()
-    assert con.sql("SELECT count(*) FROM Users").fetchone()[0] == 2
+    assert con.sql("SELECT count(*) FROM Users").fetchall()[0][0] == 2
 
 
 def test_a_real_value_still_matches(con) -> None:
@@ -230,31 +230,31 @@ def test_value_of_the_wrong_type_is_refused(kind: str, value: object) -> None:
 )
 def test_value_round_trips_with_its_declared_type(con, kind, value, expected) -> None:
     kql = f"declare query_parameters(p:{kind});\nprint x = p"
-    assert engine.kql(con, kql, {"p": value}).fetchone()[0] == expected
+    assert engine.kql(con, kql, {"p": value}).fetchall()[0][0] == expected
 
 
 def test_guid_round_trips(con) -> None:
     g = uuid.UUID("12345678-1234-5678-1234-567812345678")
     kql = "declare query_parameters(p:guid);\nprint x = p"
-    assert engine.kql(con, kql, {"p": str(g)}).fetchone()[0] == g
+    assert engine.kql(con, kql, {"p": str(g)}).fetchall()[0][0] == g
 
 
 def test_dynamic_parameter_is_indexable(con) -> None:
     """A dynamic value crosses as JSON text and must come back as a document."""
     kql = "declare query_parameters(p:dynamic);\nprint x = p.items[1]"
-    assert engine.kql(con, kql, {"p": {"items": [10, 20]}}).fetchone()[0] == "20"
+    assert engine.kql(con, kql, {"p": {"items": [10, 20]}}).fetchall()[0][0] == "20"
 
 
 def test_aware_datetime_is_converted_to_utc(con) -> None:
     """KQL datetimes are UTC (R8); an offset must be applied, not dropped."""
     aware = dt.datetime(2020, 1, 1, 12, tzinfo=dt.timezone(dt.timedelta(hours=2)))
     kql = "declare query_parameters(p:datetime);\nprint x = p"
-    assert engine.kql(con, kql, {"p": aware}).fetchone()[0] == dt.datetime(2020, 1, 1, 10)
+    assert engine.kql(con, kql, {"p": aware}).fetchall()[0][0] == dt.datetime(2020, 1, 1, 10)
 
 
 def test_offset_in_a_datetime_string_is_applied(con) -> None:
     kql = "declare query_parameters(p:datetime);\nprint x = p"
-    got = engine.kql(con, kql, {"p": "2020-01-01T12:00:00+02:00"}).fetchone()[0]
+    got = engine.kql(con, kql, {"p": "2020-01-01T12:00:00+02:00"}).fetchall()[0][0]
     assert got == dt.datetime(2020, 1, 1, 10)
 
 

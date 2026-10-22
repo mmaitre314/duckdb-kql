@@ -52,12 +52,12 @@ _g1_p(_start, _end, _eids, _inner, _len) AS (
     FROM _g1_p p JOIN _g1_e e ON e._dst IS NOT DISTINCT FROM p._end
     WHERE p._len < 5 AND NOT list_contains(p._eids, e._eid)        -- cycles=unique_edges
 )
-SELECT employee.name AS "employee", to_json(list_transform(p._inner, x -> x.name)) AS "reportingPath"
+SELECT employee.name AS "employee", to_json(list_transform(p._inner, lambda x: x.name)) AS "reportingPath"
 FROM _g1_p p
 JOIN _g1_n manager  ON manager._nid  IS NOT DISTINCT FROM p._start
 JOIN _g1_n employee ON employee._nid IS NOT DISTINCT FROM p._end
 WHERE manager.name = 'Alice'
-  AND coalesce(list_bool_and(list_transform(p._inner, x -> coalesce(x.age < 40, false))), true)
+  AND coalesce(list_bool_and(list_transform(p._inner, lambda x: coalesce(x.age < 40, false))), true)
 ```
 
 ## 2. What Kusto does
@@ -328,17 +328,18 @@ The stub is not a nicety. Anchored on its first edge, the walk's working table
 is estimated as a cross product of the edges — a CTE has no statistics — and
 DuckDB builds every step's hash table on the edge relation rather than on the
 walks: the reported five-hop match from one node built five hash tables of 8M
-edges. Anchored on nodes, the estimate is the stubs', so DuckDB builds on the
-walks and probes the edges. The rows are the same, because each edge's start is
+edges. Anchored on nodes, the estimate is the stubs', so DuckDB 1.x builds on
+the walks and probes the edges; DuckDB 2.0 hashes the edges once and keeps them
+across hops either way. The rows are the same, because each edge's start is
 exactly one node: a stub and one step give each one-edge path once.
 
 | KQL | SQL |
 |---|---|
 | `p` | `to_json(_edges)` — each edge as its bag, §2.5 |
-| `map(p, expr)` | `list_transform(_edges, x -> expr)`, properties read from `x` |
+| `map(p, expr)` | `list_transform(_edges, lambda x: expr)`, properties read from `x` |
 | `map(inner_nodes(p), expr)` | the same over `_inner` |
-| `all(p, c)` | `coalesce(list_bool_and(list_transform(_edges, x -> coalesce(c, false))), true)` |
-| `any(p, c)` | `coalesce(list_bool_or(list_transform(_edges, x -> coalesce(c, false))), false)` |
+| `all(p, c)` | `coalesce(list_bool_and(list_transform(_edges, lambda x: coalesce(c, false))), true)` |
+| `any(p, c)` | `coalesce(list_bool_or(list_transform(_edges, lambda x: coalesce(c, false))), false)` |
 | `node_degree_in(n)` | a count over `_g1_e` by `_dst`, joined on the node id |
 | `labels(x)` | `'[]'` — a constant, for a `make-graph` graph |
 | `node_id(x)` | `tostring()` of the id, through the existing R20 rendering |
@@ -378,7 +379,7 @@ constrains still enumerates, and materializes, every walk in range, and needs
 memory or spill space to match. `tests/test_graph_pushdown.py` holds both
 sides: the reported query within 256 MB with spilling disabled, and the
 unconstrained one over it. `tests/test_graph_preparation.py` holds the second
-report's fixture within 128 MB, and pins the step's build side in the plan.
+report's fixture within 128 MB, and pins that no hop reads the edges again.
 
 ### 3.5 `where` and `project`
 

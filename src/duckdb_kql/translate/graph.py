@@ -768,7 +768,7 @@ def _match(g: _Graph, match: ir.GraphMatch) -> tuple[str, list[str]]:
                 conditions.append(f"NOT {_has_node(f'{p}.inn', f'{a}.nid')}")
             for q in paths[i + 1:]:
                 conditions.append(
-                    f"len(list_filter({p}.inn, _gy -> {_has_node(f'{q}.inn', '_gy.nid')})) = 0"
+                    f"len(list_filter({p}.inn, lambda _gy: {_has_node(f'{q}.inn', '_gy.nid')})) = 0"
                 )
 
     state = _Match(g, kinds, aliases)
@@ -1061,11 +1061,11 @@ def _path(
     # Typed empty lists, for the rows with no edge to take a type from. The
     # NULL row makes the subquery answer even for a graph with no edges.
     empty_edges = (
-        f"(SELECT list_filter([{edge_item}], {_ELEM} -> false) FROM "
+        f"(SELECT list_filter([{edge_item}], lambda {_ELEM}: false) FROM "
         f"(SELECT * FROM {g.name('e')} UNION ALL BY NAME SELECT NULL AS eid) e LIMIT 1)"
     )
     empty_inner = (
-        f"(SELECT list_filter([{node_item}], {_ELEM} -> false) FROM "
+        f"(SELECT list_filter([{node_item}], lambda {_ELEM}: false) FROM "
         f"(SELECT * FROM {g.name('n')} UNION ALL BY NAME SELECT NULL AS nid) n LIMIT 1)"
     )
 
@@ -1106,7 +1106,7 @@ def _path(
         fresh = " AND NOT list_contains(p.eids, e.eid)"
     elif simple:
         fresh = (
-            f" AND len(list_filter(p.vis, {_ELEM} -> "
+            f" AND len(list_filter(p.vis, lambda {_ELEM}: "
             f"({_ELEM} IS NOT DISTINCT FROM e.{step}))) = 0"
         )
     else:
@@ -1147,7 +1147,8 @@ def _path(
 
 def _has_node(inner: str, nid: str) -> str:
     """Whether the inner-node list *inner* holds the node *nid* — null-safe."""
-    return f"(len(list_filter({inner}, {_ELEM} -> ({_ELEM}.nid IS NOT DISTINCT FROM {nid}))) > 0)"
+    test = f"({_ELEM}.nid IS NOT DISTINCT FROM {nid})"
+    return f"(len(list_filter({inner}, lambda {_ELEM}: {test})) > 0)"
 
 
 def _refuse_shortest_shape(match: ir.GraphMatch) -> None:
@@ -1274,7 +1275,7 @@ def _bag(struct: str, fields: list[str]) -> str:
     entries = ", ".join(
         f"{{'k': {_string(f)}, 'v': to_json({struct}.{_quote(f)})}}" for f in fields
     )
-    keep = f"{_KEY} -> ({_KEY}.v IS NOT NULL AND {_KEY}.v <> '\"\"')"
+    keep = f"lambda {_KEY}: ({_KEY}.v IS NOT NULL AND {_KEY}.v <> '\"\"')"
     return f"to_json(map_from_entries(list_filter([{entries}], {keep})))"
 
 
@@ -1284,7 +1285,8 @@ def _whole(ctx: _Match, name: str) -> str:
         return _bag(f"{alias}.props", ctx.graph.node_props)
     if kind == "edge":
         return _bag(f"{alias}.props", ctx.graph.edge_cols)
-    return f"to_json(list_transform({alias}.edges, {_ELEM} -> {_bag(_ELEM, ctx.graph.edge_cols)}))"
+    bag = _bag(_ELEM, ctx.graph.edge_cols)
+    return f"to_json(list_transform({alias}.edges, lambda {_ELEM}: {bag}))"
 
 
 def _known(ctx: _Match, kind: str, var: str, prop: str) -> None:
@@ -1307,7 +1309,8 @@ def _property(ctx: _Match, node: ir.GraphProperty) -> str:
                 "map(), all() or any() (Kusto: SEM1054)",
             )
         _known(ctx, "edge", node.var, node.prop)
-        return f"to_json(list_transform({alias}.edges, {_ELEM} -> {_ELEM}.{_quote(node.prop)}))"
+        prop = _quote(node.prop)
+        return f"to_json(list_transform({alias}.edges, lambda {_ELEM}: {_ELEM}.{prop}))"
     _known(ctx, kind, node.var, node.prop)
     return f"{alias}.props.{_quote(node.prop)}"
 
@@ -1396,8 +1399,8 @@ def _path_call(ctx: _Match, node: ir.GraphCall) -> str:
     finally:
         ctx.element = saved
     if node.name == "map":
-        return f"to_json(list_transform({items}, {_ELEM} -> ({body})))"
-    test = f"list_transform({items}, {_ELEM} -> {_holds(body)})"
+        return f"to_json(list_transform({items}, lambda {_ELEM}: ({body})))"
+    test = f"list_transform({items}, lambda {_ELEM}: {_holds(body)})"
     if node.name == "all":
         return f"coalesce(list_bool_and({test}), true)"
     return f"coalesce(list_bool_or({test}), false)"

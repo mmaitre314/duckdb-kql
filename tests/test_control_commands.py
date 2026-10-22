@@ -228,7 +228,7 @@ def test_show_databases_marks_the_current_one(con) -> None:
 
 
 def test_show_version_reports_this_package_and_duckdb(con) -> None:
-    row = duckdb_kql.kql(con, ".show version").fetchone()
+    row = duckdb_kql.kql(con, ".show version").fetchall()[0]
     assert row[0] == duckdb_kql.__version__
     assert "duckdb-kql" in row[3] and "DuckDB" in row[3]
 
@@ -240,10 +240,10 @@ def test_nothing_is_invented_where_there_is_no_answer(con) -> None:
     real-looking timestamp that was never true of any build. A plausible wrong
     value is the failure mode this project exists to avoid; a null is not.
     """
-    version = duckdb_kql.kql(con, ".show version").fetchone()
+    version = duckdb_kql.kql(con, ".show version").fetchall()[0]
     assert version[1] is None, "BuildTime should be null, not a fabricated date"
 
-    databases = duckdb_kql.kql(con, ".show databases").fetchone()
+    databases = duckdb_kql.kql(con, ".show databases").fetchall()[0]
     assert databases[7] is None, "DatabaseId should be null — there is no cluster GUID"
 
 

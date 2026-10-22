@@ -203,7 +203,7 @@ def _same(got: object, want: object) -> bool:
 
 @pytest.mark.parametrize(("expr", "value", "kind"), FOLDED, ids=[e for e, _, _ in FOLDED])
 def test_folded_value_and_type(con, expr: str, value: object, kind: str) -> None:
-    got, got_kind = duckdb_kql.query(con, f"print v = {expr} | extend t = gettype(v)").fetchone()
+    got, got_kind = duckdb_kql.query(con, f"print v = {expr} | extend t = gettype(v)").fetchall()[0]
     assert _same(got, value), got
     assert got_kind == kind
 
@@ -251,5 +251,5 @@ def test_datetime_arithmetic_still_binds(con) -> None:
     """Why `+` widens statically: the run-time widening cannot mix with TIMESTAMP."""
     query = "print t = datetime(2020-01-01) + 1d - 1h | extend k = gettype(t)"
     assert "CASE WHEN false" not in str(duckdb_kql.to_sql(query))
-    t, kind = duckdb_kql.query(con, query).fetchone()
+    t, kind = duckdb_kql.query(con, query).fetchall()[0]
     assert (str(t), kind) == ("2020-01-01 23:00:00", "datetime")

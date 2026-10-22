@@ -70,7 +70,7 @@ dependencies = [
 # It went unnoticed because pandas <3 required pytz and dragged it in; pandas 3
 # dropped it. Drop this line when DuckDB either declares pytz itself or moves to
 # `zoneinfo`.
-duckdb = ["duckdb>=0.10", "pytz"]
+duckdb = ["duckdb>=2.0.0", "pytz"]
 # Layer 2 — the azure-kusto-data-shaped client. dataframe_from_result_table is
 # the reason pandas is here; the client itself works without it.
 kusto = ["duckdb-kql[duckdb]", "pandas"]

@@ -476,19 +476,20 @@ def _numeric_bin(v: str, r: str) -> str:
     `bin(-9223372036854775806, 4)` is 9223372036854775804 there. The same
     expression overflows loudly here instead of answering the mathematically
     right value, which would disagree just as silently. The lambda evaluates
-    each operand once.
+    each operand once, and ``NULLIF`` keeps an integer zero size null on
+    DuckDB 2.0, which raises on a division by zero.
     """
-    q = "(_bin.v // _bin.r)"
+    q = "(_bin.v // NULLIF(_bin.r, 0))"
     body = (
         f"CASE WHEN typeof({q}) IN {_INTEGER_SQL_TYPES} THEN "
         "(CASE WHEN (_bin.v < 0) <> (_bin.r < 0) THEN _bin.v + sign(_bin.r) - _bin.r "
-        "ELSE _bin.v END) // _bin.r * _bin.r "
+        "ELSE _bin.v END) // NULLIF(_bin.r, 0) * _bin.r "
         "WHEN _bin.r = 0 AND _bin.v IS NOT NULL THEN 'NaN' "
         f"WHEN isinf({q}) OR isnan({q}) THEN {q} * _bin.r "
         f"ELSE ({q} - {q} % 1 - CASE WHEN {q} % 1 < 0 THEN 1 ELSE 0 END) * _bin.r END"
     )
     pair = f"struct_pack(v := {long_or_wider(v)}, r := {long_or_wider(r)})"
-    return f"list_transform([{pair}], _bin -> {body})[1]"
+    return f"list_transform([{pair}], lambda _bin: {body})[1]"
 
 
 def _is_timespan_expr(node: ir.Expr) -> bool:
@@ -900,13 +901,13 @@ def render_operator(op: ir.Operator, prev: str, cols: list[str] | None = None) -
             select += [rendered[n] for n in names if n not in cols]
             return f"SELECT {', '.join(select)} FROM {prev}"
         # Without a schema we cannot tell a replacement from an addition, and
-        # `EXCLUDE`/`REPLACE` each error in the opposite case. `COLUMNS(x -> x
-        # NOT IN (...))` filters dynamically, so it is correct either way — but
+        # `EXCLUDE`/`REPLACE` each error in the opposite case. `COLUMNS(lambda x:
+        # x NOT IN (...))` filters dynamically, so it is correct either way — but
         # it appends, so a *replaced* column moves to the end. That is the one
         # residual divergence, and it is why Layer 1 always passes a schema.
         excluded = ", ".join(quote_string(n) for n in names + scope.names)
         added = ", ".join(rendered[n] for n in names)
-        return f"SELECT COLUMNS(x -> x NOT IN ({excluded})), {added} FROM {prev}"
+        return f"SELECT COLUMNS(lambda x: x NOT IN ({excluded})), {added} FROM {prev}"
 
     if isinstance(op, ir.Take):
         # Row order is undefined without a terminal sort (R10).
@@ -2590,7 +2591,7 @@ def _render_in_list(node: ir.InList, value: str) -> str:
         arr = f"CAST({render_expr(node.items[0])} AS VARCHAR[])"
         needle = f"CAST({value} AS VARCHAR)"
         if node.case_insensitive:
-            arr = f"list_transform({arr}, v -> lower(v))"
+            arr = f"list_transform({arr}, lambda v: lower(v))"
             needle = f"lower({needle})"
         sql = f"list_contains({arr}, {needle})"
         return _in_result(sql, node, needle)
@@ -2622,7 +2623,7 @@ def _in_toscalar(node: ir.InList, value: str, item: str) -> str:
     typed = f"({value} = {item})"
     if node.case_insensitive:
         needle = f"lower({needle})"
-        members = f"list_transform({members}, v -> lower(v))"
+        members = f"list_transform({members}, lambda v: lower(v))"
         scalar = f"lower({scalar})"
         typed = f"({needle} = lower(CAST({item} AS VARCHAR)))"
     return (
@@ -2753,7 +2754,7 @@ def _render_has_list(node: ir.HasList, value: str) -> str:
             # rebuilt per row because the lambda variable is not a constant.
             arr = f"CAST({render_expr(item)} AS VARCHAR[])"
             test = term_match_sql(value, "t")
-            matched = f"len(list_filter({arr}, t -> {test}))"
+            matched = f"len(list_filter({arr}, lambda t: {test}))"
             parts.append(f"({matched} = len({arr}))" if node.require_all
                          else f"({matched} > 0)")
         elif isinstance(item, ir.Literal) and item.kind == "string":
@@ -2777,7 +2778,7 @@ def _has_toscalar(node: ir.HasList, value: str, item: str) -> str:
     is an array, measured, and itself as one needle otherwise."""
     json = f"to_json({item})"
     arr = f"CAST({json} AS VARCHAR[])"
-    matched = f"len(list_filter({arr}, t -> {term_match_sql(value, 't')}))"
+    matched = f"len(list_filter({arr}, lambda t: {term_match_sql(value, 't')}))"
     many = f"({matched} = len({arr}))" if node.require_all else f"({matched} > 0)"
     one = term_match_sql(
         value,
@@ -2814,7 +2815,14 @@ def _render_has_subquery(node: ir.HasList, subquery: ir.Query, value: str) -> st
     needle = "CAST(_needle AS VARCHAR)"
     # Sound because `has` implies `contains`, case-insensitively (R3).
     prefilter = f"contains(lower({value}), lower({needle}))"
-    matched = f"({prefilter} AND {term_match_sql(value, needle)})"
+    # A CASE, not `prefilter AND regex`: the gate only pays if it runs first,
+    # and DuckDB 2.0 reorders an AND to run the regex first — the corpus
+    # `has_any` went 57ms -> 1.7s. `ELSE prefilter` keeps the AND's value
+    # exactly, null included: the prefilter is null only for a null haystack or
+    # needle, where the regex is null too. `has_all` reads that null.
+    matched = (
+        f"(CASE WHEN {prefilter} THEN {term_match_sql(value, needle)} ELSE {prefilter} END)"
+    )
     source = f"({inner}) AS _q(_needle)"
     if not node.require_all:
         return _has_list_result(f"EXISTS (SELECT 1 FROM {source} WHERE {matched})", node)
@@ -2893,7 +2901,7 @@ def _unrolled_needles(node: ir.HasList, value: str, item: ir.Expr) -> str | None
     """``has_any``/``has_all`` over a literal array, one constant test per needle.
 
     **This is the difference between 28 milliseconds and 28 seconds.** The
-    run-time form puts the term test inside ``list_filter(arr, t -> …)``, where
+    run-time form puts the term test inside ``list_filter(arr, lambda t: …)``, where
     the regex pattern is concatenated from the lambda variable — so RE2 has no
     constant to compile and rebuilds the pattern for every *(row, needle)* pair.
     On the 5,000-row corpus fixture, `has_all` over four needles meant ~60,000
@@ -3334,7 +3342,7 @@ def render_parse(op: ir.Parse, prev: str, cols: list[str] | None = None) -> str:
         # dynamically and is correct either way — but it appends, so a replaced
         # column moves to the end. Same residual divergence as `extend`.
         excluded = ", ".join(quote_string(str(n)) for n in names)
-        keep = f"COLUMNS(x -> x NOT IN ({excluded}))" if names else "*"
+        keep = f"COLUMNS(lambda x: x NOT IN ({excluded}))" if names else "*"
         select = [keep, *rendered.values()]
 
     inner = f"SELECT *, {captures} AS {quote_ident(_PARSE_CAPTURES)} FROM {prev}"
@@ -3954,12 +3962,12 @@ def _mv_expand_elements(op: ir.MvExpand, target: ir.MvExpandTarget) -> str:
         # a plain array alone.
         bag = (
             f"list_transform(json_keys({col}), "
-            f"k -> json_array(k, json_extract({col}, '$.\"' || k || '\"')))"
+            f"lambda k: json_array(k, json_extract({col}, '$.\"' || k || '\"')))"
         )
     else:
         bag = (
             f"list_transform(json_keys({col}), "
-            f"k -> json_object(k, json_extract({col}, '$.\"' || k || '\"')))"
+            f"lambda k: json_object(k, json_extract({col}, '$.\"' || k || '\"')))"
         )
     elements = (
         f"CAST(CASE json_type({col}) "
@@ -4150,7 +4158,7 @@ def _kql_timespan_text(rendered: str) -> str:
     """
     a = "abs(_us)"
     return (
-        f"list_transform([epoch_us({rendered})], _us -> "
+        f"list_transform([epoch_us({rendered})], lambda _us: "
         f"CASE WHEN _us < 0 THEN '-' ELSE '' END"
         f" || CASE WHEN {a} >= 86400000000 THEN CAST({a} // 86400000000 AS VARCHAR) || '.'"
         f" ELSE '' END"
@@ -4332,8 +4340,11 @@ def _render_strcat_array(node: ir.FunctionCall) -> str:
     # `to_json`, not a CAST: a CAST re-parses a native string list as JSON text.
     array = f"to_json({render_expr(node.args[0])})"
     delimiter = render_kql_tostring(node.args[1])
+    # TRY_CAST although only an array reaches it: DuckDB 2.0 evaluates
+    # `array_to_string` of a *constant* while binding, guard or no guard, so
+    # `strcat_array(dynamic("abc"), "-")` raised "Expected ARRAY" there.
     elements = (
-        f"list_transform(CAST({array} AS JSON[]), _sa -> coalesce(_sa ->> '$', ''))"
+        f"list_transform(TRY_CAST({array} AS JSON[]), lambda _sa: coalesce(_sa ->> '$', ''))"
     )
     return (
         f"CASE WHEN json_type({array}) = 'ARRAY' "
@@ -4451,7 +4462,7 @@ def _render_countof(node: ir.FunctionCall) -> str:
         raise KqlUnsupportedError(f"countof:{kind}")
     text, needle = args[0], args[1]
     starts = f"generate_series(1, length(coalesce({text}, '')) - length({needle}) + 1)"
-    matches = f"list_filter({starts}, i -> substr({text}, i, length({needle})) = {needle})"
+    matches = f"list_filter({starts}, lambda i: substr({text}, i, length({needle})) = {needle})"
     return (
         f"CASE WHEN {needle} IS NULL THEN NULL "
         f"WHEN length({needle}) = 0 THEN 0 "
@@ -4520,7 +4531,7 @@ def _render_zip(node: ir.FunctionCall) -> str:
     return (
         f"to_json(list_transform("
         f"generate_series(CAST(1 AS BIGINT), CAST({longest} AS BIGINT)), "
-        f"i -> [{row}]))"
+        f"lambda i: [{row}]))"
     )
 
 
@@ -4774,7 +4785,7 @@ def _render_gettype(node: ir.FunctionCall) -> str | None:
     held = f"coalesce(CASE json_type(to_json({rendered})) {content} END, 'null')"
     return (
         f"list_transform([{kusto_type_sql(f'typeof({rendered})')}], "
-        f"_k -> CASE WHEN _k = 'dynamic' THEN {held} ELSE _k END)[1]"
+        f"lambda _k: CASE WHEN _k = 'dynamic' THEN {held} ELSE _k END)[1]"
     )
 
 
@@ -4814,7 +4825,7 @@ def _wrap_int32(value: str) -> str:
     """A long wrapped to 32 bits — measured: `toint(9999999999)` is 1410065407."""
     return (
         f"list_transform([({value} % 4294967296 + 4294967296) % 4294967296], "
-        f"_w -> CAST(CASE WHEN _w >= 2147483648 THEN _w - 4294967296 ELSE _w END "
+        f"lambda _w: CAST(CASE WHEN _w >= 2147483648 THEN _w - 4294967296 ELSE _w END "
         f"AS INTEGER))[1]"
     )
 
@@ -4903,7 +4914,7 @@ def _render_tick_conversion(node: ir.FunctionCall) -> str | None:
             f"WHEN typeof({v}) LIKE '%INT%' THEN {from_long(f'TRY_CAST({v} AS BIGINT)')} "
             f"END"
         )
-    return f"list_transform([{render_expr(node.args[0])}], {v} -> {body})[1]"
+    return f"list_transform([{render_expr(node.args[0])}], lambda {v}: {body})[1]"
 
 
 def _render_bag_pack(node: ir.FunctionCall) -> str | None:
@@ -5200,11 +5211,11 @@ def _render_parse_ipv6(node: ir.FunctionCall) -> str:
     )
 
     # Stage 3 — expand `::` into exactly eight groups.
-    left = "list_filter(str_split(split_part(_kqlr, '::', 1), ':'), x -> x <> '')"
-    right = "list_filter(str_split(split_part(_kqlr, '::', 2), ':'), x -> x <> '')"
+    left = "list_filter(str_split(split_part(_kqlr, '::', 1), ':'), lambda x: x <> '')"
+    right = "list_filter(str_split(split_part(_kqlr, '::', 2), ':'), lambda x: x <> '')"
     stage3 = (
         f"SELECT CASE WHEN strpos(_kqlr, '::') > 0 THEN list_concat(list_concat({left}, "
-        f"list_transform(range(8 - len({left}) - len({right})), x -> '0')), {right}) "
+        f"list_transform(range(8 - len({left}) - len({right})), lambda x: '0')), {right}) "
         f"ELSE str_split(_kqlr, ':') END AS _kqlg, "
         f"CASE WHEN _kqld THEN 96 + _kqlp ELSE _kqlp END AS _kqlbits, "
         f"_kqlp BETWEEN 0 AND CASE WHEN _kqld THEN 32 ELSE 128 END "
@@ -5221,9 +5232,9 @@ def _render_parse_ipv6(node: ir.FunctionCall) -> str:
     )
     valid = (
         "_kqlshape AND len(_kqlg) = 8 "
-        "AND len(list_filter(_kqlg, x -> regexp_matches(x, '^[0-9a-f]{1,4}$'))) = 8"
+        "AND len(list_filter(_kqlg, lambda x: regexp_matches(x, '^[0-9a-f]{1,4}$'))) = 8"
     )
-    masked = f"list_transform(_kqlg, (x, i) -> lpad(printf('%x', {kept}), 4, '0'))"
+    masked = f"list_transform(_kqlg, lambda x, i: lpad(printf('%x', {kept}), 4, '0'))"
     return (
         f"(SELECT CASE WHEN {valid} "
         f"THEN list_aggregate({masked}, 'string_agg', ':') ELSE '' END FROM ({stage3}))"
@@ -5301,8 +5312,8 @@ def _render_parse_url(node: ir.FunctionCall) -> str:
     # Stage 2 — the query string split into key/value pairs, once.
     stage2 = (
         "SELECT _kqlm, _kqlu, list_transform(list_filter(str_split(_kqlm.query, '&'), "
-        "p -> strpos(p, '=') > 1 AND length(p) > strpos(p, '=')), "
-        "p -> {'k': p[1:strpos(p, '=') - 1], 'v': p[strpos(p, '=') + 1:]}) AS _kqlps "
+        "lambda p: strpos(p, '=') > 1 AND length(p) > strpos(p, '=')), "
+        "lambda p: {'k': p[1:strpos(p, '=') - 1], 'v': p[strpos(p, '=') + 1:]}) AS _kqlps "
         f"FROM ({stage1})"
     )
 
@@ -5331,14 +5342,15 @@ def _render_parse_url(node: ir.FunctionCall) -> str:
 #: Built as text rather than through `json_object` so the key order is ours to
 #: set: Kusto sorts the keys, and a repeated key becomes an array rather than
 #: the last value winning.
-_URL_VALUES = "list_transform(list_filter(_kqlps, x -> x.k = k), x -> x.v)"
+_URL_VALUES = "list_transform(list_filter(_kqlps, lambda x: x.k = k), lambda x: x.v)"
 _URL_ENTRY = (
     f"to_json(k)::VARCHAR || ':' || CASE WHEN len({_URL_VALUES}) = 1 "
     f"THEN to_json({_URL_VALUES}[1])::VARCHAR ELSE to_json({_URL_VALUES})::VARCHAR END"
 )
 _URL_QUERY_OBJECT = (
     "('{' || coalesce(list_aggregate(list_transform(list_sort(list_distinct("
-    f"list_transform(_kqlps, x -> x.k))), k -> {_URL_ENTRY}), 'string_agg', ','), '') || '}}')"
+    f"list_transform(_kqlps, lambda x: x.k))), lambda k: {_URL_ENTRY}), 'string_agg', ','), '')"
+    " || '}}')"
 ).replace("'}}'", "'}'")
 
 
@@ -5439,7 +5451,7 @@ def _render_extract_all(node: ir.FunctionCall) -> str:
         )
         matches = (
             f"list_transform(regexp_extract_all({subject}, {pattern}), "
-            f"m -> [{per_match}])"
+            f"lambda m: [{per_match}])"
         )
     # `len` of a null list is null, so a null subject falls through the implicit
     # ELSE to null as well — which is what Kusto answers for one.

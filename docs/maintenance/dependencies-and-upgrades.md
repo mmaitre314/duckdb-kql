@@ -7,7 +7,7 @@ ceiling, the emulator image, the dev toolchain.
 that are easy to miss*, and [`../licensing.md`](../licensing.md).
 
 An upgrade is the one maintenance action that can change answers **with no diff
-in this repository at all**. `duckdb>=0.10` is an unpinned range: a new DuckDB
+in this repository at all**. `duckdb>=2.0.0` is an unpinned range: a new DuckDB
 release can change a cast, a collation, a null ordering or a regex dialect, and
 nothing in a code review will show it. Treat every upgrade as a behaviour change
 until the gate says otherwise.
