@@ -426,10 +426,11 @@ def databases(con: DuckDBPyConnection) -> list[str]:
     attached DuckDB file is a Kusto database here.
     """
     try:
-        rows = con.execute(
+        rows = _read_rows(
+            con,
             "SELECT database_name FROM duckdb_databases() "
-            "WHERE NOT internal ORDER BY database_name"
-        ).fetchall()
+            "WHERE NOT internal ORDER BY database_name",
+        )
     except Exception:  # noqa: BLE001 - report it as "none reachable", not a crash
         return []
     return [str(row[0]) for row in rows]
@@ -507,20 +508,42 @@ def arrow(
     ).arrow()
 
 
+def _read_rows(con: DuckDBPyConnection, sql: str) -> list[tuple[Any, ...]]:
+    """*sql*'s rows, run and fetched in one call.
+
+    `con.execute(sql).fetchall()` is two calls, and a second thread's statement
+    in between replaced the pending result: measured, 21 of 600 schema reads
+    came back empty, with no error at all. A relation runs and fetches in one,
+    so it answers or is refused as busy. DuckDB 2.0 also refuses a relation
+    while an earlier `execute` has rows left unread, which `execute` itself
+    never minded — it dropped them — so they are dropped here first, the same.
+    """
+    con.abort()
+    return con.sql(sql).fetchall()
+
+
 def schema(con: DuckDBPyConnection) -> Schema:
     """Read table -> column names from a DuckDB connection.
 
     Only ``join`` consults this, but it is cheap enough to gather
     unconditionally and keeps the public API free of a schema argument.
+
+    **A failure propagates.** It used to answer an empty schema, on the theory
+    that a schema-less connection is not an error — but every connection has an
+    `information_schema`, so the failures that reached it were a busy, closed
+    or interrupted connection, and an empty schema is not "no tables": it sends
+    translation down its schema-free path, which moves a replaced column to the
+    end. Measured, four threads sharing one connection got `T1 | extend a = a +
+    100` back as columns `b, a` instead of `a, b`, with no error.
+
+    **And it is one call** — see :func:`_read_rows`.
     """
-    try:
-        rows = con.execute(
-            "SELECT table_catalog, table_name, column_name, current_database() "
-            "FROM information_schema.columns "
-            "ORDER BY table_catalog, table_name, ordinal_position"
-        ).fetchall()
-    except Exception:  # noqa: BLE001 - a schema-less connection is not an error
-        return {}
+    rows = _read_rows(
+        con,
+        "SELECT table_catalog, table_name, column_name, current_database() "
+        "FROM information_schema.columns "
+        "ORDER BY table_catalog, table_name, ordinal_position",
+    )
     out: Schema = {}
     for catalog, table, column, current in rows:
         # Every table is reachable as `Database.Table`, which is what

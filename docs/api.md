@@ -207,15 +207,18 @@ query wins, and a name bound by a tabular `let` is left alone (it is a CTE).
 A database that is not attached raises `KqlSchemaError` naming it, and listing
 the ones that are.
 
-> **Concurrency.** Translation is safe on any number of threads at once:
-> `to_sql`, `validate` and the translating half of `kql`/`query` keep each
-> statement's state per thread and per asyncio task, so two statements never
-> see each other's. (The defaults set by `set_clusters`, `set_entity_groups`
-> and `set_functions` are shared on purpose, as above.) A DuckDB connection is
-> not safe for concurrent use, and this predates `database=`: reading the
-> schema is an `execute` / `fetchall` pair that a second thread's `execute`
-> invalidates. Serialize access to a shared connection, or give each thread
-> its own. `duckdb-kql serve` holds a lock for exactly this reason.
+> **Concurrency.** *Translation* is safe on any number of threads at once:
+> `to_sql` and `validate` keep each statement's state per thread and per
+> asyncio task, so two statements never see each other's. (The defaults set by
+> `set_clusters`, `set_entity_groups` and `set_functions` are shared on purpose,
+> as above.) A *connection* is not: `kql`, `query` and `df` read its schema and
+> then run the query on it, and DuckDB refuses a connection that is busy with
+> another call. Serialize the calls that share one, or give each thread its own.
+> A `KustoClient` holds its lock for each whole request — the database switch
+> and the schema read included — so one client may be shared by threads, as long
+> as nothing else uses its connection meanwhile; `duckdb-kql serve` holds a lock
+> for the same reason. Measured on standard CPython; a free-threaded build is
+> untested, and the ANTLR runtime's shared parser caches are not synchronized.
 
 `query_now` pins the query clock: `now()` and `ago()` resolve against the value
 given rather than the wall clock, through a single binding shared by the whole

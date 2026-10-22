@@ -44,6 +44,8 @@ if TYPE_CHECKING:
 
     from duckdb import DuckDBPyConnection
 
+    from ..schema import Schema
+
 __all__ = ["KustoClient", "KustoConnectionStringBuilder"]
 
 #: One row of a result, as this module assembles it before conversion.
@@ -218,7 +220,12 @@ class KustoClient:
         functions: FunctionArg | None = None,
     ) -> None:
         self._is_closed = False
-        self._lock = threading.Lock()
+        #: Held for the whole of a request, not only its execution: a request
+        #: switches the connection's database (`USE`) and reads its schema
+        #: before it runs, and a second thread's request in between answered
+        #: from the wrong database — measured, with no error. Re-entrant because
+        #: the steps take it too.
+        self._lock = threading.RLock()
         self._owns_connection = True
         self.default_database = database
         #: Whether ingestion commands may run. True by default, matching
@@ -277,9 +284,11 @@ class KustoClient:
     # -- lifecycle --------------------------------------------------------
 
     def close(self) -> None:
-        if not self._is_closed and self._owns_connection:
-            self._connection.close()
-        self._is_closed = True
+        # After any request in flight, not under it.
+        with self._lock:
+            if not self._is_closed and self._owns_connection:
+                self._connection.close()
+            self._is_closed = True
 
     def __enter__(self) -> KustoClient:
         return self
@@ -321,13 +330,21 @@ class KustoClient:
         ``declare query_parameters`` declarations. They are bound as values, so
         a caller can pass user input directly.
         """
+        with self._lock:
+            return self._execute_query(database, query, properties)
+
+    def _execute_query(
+        self,
+        database: str | None,
+        query: str,
+        properties: ClientRequestProperties | None,
+    ) -> KustoResponseDataSet:
         self._check_open()
         con = self._select_database(database)
         parameters = dict(getattr(properties, "_parameters", {}) or {})
 
         from .. import to_sql
         from ..control import is_write_command
-        from ..engine import schema
 
         if is_write_command(query):
             # Kusto's refusal, word for word (measured on both query endpoints).
@@ -340,6 +357,7 @@ class KustoClient:
                 "the query endpoint unless they are .show control commands."
             )
 
+        tables = self._schema(con)
         try:
             # This client's own mappings, not the process-global ones. Leaving
             # them off is how a `macro-expand` over a named group failed here
@@ -349,7 +367,7 @@ class KustoClient:
             # per-client configuration is nothing.
             translated = to_sql(
                 query,
-                schema=schema(con),
+                schema=tables,
                 parameters=parameters,
                 allow_write=False,
                 clusters=self.clusters,
@@ -385,6 +403,20 @@ class KustoClient:
 
         return self._response(query, columns, types, rows, properties)
 
+    def _schema(self, con: DuckDBPyConnection) -> Schema:
+        """The connection's tables.
+
+        An engine failure is the answer, as it is for the query itself — and no
+        longer an empty schema, which would have translated the query down its
+        schema-free path instead (`engine.schema`).
+        """
+        from ..engine import schema
+
+        try:
+            return schema(con)
+        except Exception as exc:  # any engine failure is the answer
+            raise KustoServiceError(str(exc)) from exc
+
     def execute_mgmt(
         self,
         database: str | None,
@@ -399,6 +431,15 @@ class KustoClient:
         and there is no cluster; a stub returning an empty table would look like
         a command that worked.
         """
+        with self._lock:
+            return self._execute_mgmt(database, query, properties)
+
+    def _execute_mgmt(
+        self,
+        database: str | None,
+        query: str,
+        properties: ClientRequestProperties | None,
+    ) -> KustoResponseDataSet:
         self._check_open()
         con = self._select_database(database)
 
@@ -485,7 +526,6 @@ class KustoClient:
         named after the placeholder.
         """
         from .. import to_sql
-        from ..engine import schema
         from ..errors import KqlUnsupportedError
         from ..options import read_only_requested
 
@@ -503,13 +543,14 @@ class KustoClient:
                 f"this request is read-only (request_readonly is set)"
             )
 
+        tables = self._schema(con)
         try:
             # Same forwarding as the query path. An ingestion command's source is
             # a whole KQL query, so it too can name an entity group or a cluster.
             sql = str(
                 to_sql(
                     query,
-                    schema=schema(con),
+                    schema=tables,
                     database=self._attached(database),
                     clusters=self.clusters,
                     entity_groups=self.entity_groups,
@@ -578,13 +619,16 @@ class KustoClient:
 
     def _attached(self, database: str | None) -> str | None:
         """*database* if it is an attached DuckDB catalog, else ``None``."""
+        from ..engine import _read_rows
+
         if not database:
             return None
         attached = {
             name
-            for (name,) in self._connection.execute(
-                "SELECT database_name FROM duckdb_databases() WHERE NOT internal"
-            ).fetchall()
+            for (name,) in _read_rows(
+                self._connection,
+                "SELECT database_name FROM duckdb_databases() WHERE NOT internal",
+            )
         }
         return database if database in attached else None
 
