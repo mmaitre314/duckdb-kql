@@ -9,8 +9,16 @@ thread read another's — measured, four threads over the corpus gave SQL that
 differed from the serial translation with no error, and crashed outright on
 other queries (tests/test_concurrent_translation.py).
 
-A `ContextVar` holds one value per context instead: every thread starts with
-its own, and an asyncio task works on a copy of its creator's.
+A `ContextVar` holds one value per context instead. A thread on standard
+CPython starts with an empty context; an asyncio task, an `asyncio.to_thread`
+call, and every thread on a free-threaded build start with a *copy* of their
+creator's. A copy is harmless because a statement only ever uses values it bound
+itself with :meth:`State.bound` — with one exception, the default
+:meth:`State.get` creates and caches, which a copy shares with its original.
+Hence the rule: **never mutate what `get` returns outside the `bound` that
+supplied it.** Nothing breaks it today, and nothing enforces it:
+`tests/test_concurrent_translation.py` runs translations in copied contexts,
+and fails on per-statement state kept the old way, as a module global.
 """
 
 from __future__ import annotations
@@ -31,8 +39,8 @@ class State(Generic[T]):
         self._default = default
 
     def get(self) -> T:
-        """The value in force. The first read in a context creates the default,
-        so a mutable one is that context's own rather than shared."""
+        """The value in force, or the default, created by the first read and
+        cached in that context — and shared with any context copied from it."""
         try:
             return self._var.get()
         except LookupError:

@@ -22,6 +22,8 @@ statement would, and a `macro-expand` in B was refused as nested inside A's.
 
 from __future__ import annotations
 
+import ast
+import asyncio
 import sys
 import threading
 from collections.abc import Callable, Iterator
@@ -32,6 +34,7 @@ import pytest
 
 import duckdb_kql
 from duckdb_kql import lower, translate
+from duckdb_kql._state import State
 from duckdb_kql.translate import graph, sharing
 
 A = "let t = datatable(a:long)[1]; t | extend b = a + 2"
@@ -242,30 +245,40 @@ def frequent_switches() -> Iterator[None]:
         sys.setswitchinterval(interval)
 
 
-def test_concurrent_translations_match_serial_ones(frequent_switches: None) -> None:
-    """The whole translator, not two chosen pause points: the corpus queries
-    that translate, four threads at once, each from a different offset."""
+def _corpus_queries(count: int) -> list[str]:
     sys.path.insert(0, str(Path("tools").resolve()))
     try:
         import sql_snapshot
     finally:
         sys.path.pop(0)
+    return [kql for _, kql in sql_snapshot._cases()][:count]
 
-    def translate_one(kql: str) -> str:
-        try:
-            return str(duckdb_kql.to_sql(kql))
-        except Exception as exc:  # noqa: BLE001 - a refusal is an answer too
-            return f"!! {type(exc).__name__}: {exc}"
 
-    # 60 is enough: with the state shared, every run of five failed here.
-    queries = [kql for _, kql in sql_snapshot._cases()][:60]
-    serial = {q: translate_one(q) for q in queries}
+def _translate_one(kql: str) -> str:
+    try:
+        return str(duckdb_kql.to_sql(kql))
+    except Exception as exc:  # noqa: BLE001 - a refusal is an answer too
+        return f"!! {type(exc).__name__}: {exc}"
+
+
+def test_concurrent_translations_match_serial_ones(frequent_switches: None) -> None:
+    """A net for interleavings nobody chose: corpus queries, four threads at
+    once, each from a different offset.
+
+    It is not proof per state — the forced interleavings above are. These
+    queries use no schema, stored function, group, `macro-expand` or `now()`,
+    so on its own this catches a shared CTE-name table or sharing scope and
+    little else; measured, making any other single state shared again left it
+    passing. With all of them shared, it failed in every one of five runs.
+    """
+    queries = _corpus_queries(60)
+    serial = {q: _translate_one(q) for q in queries}
     mismatches: list[str] = []
 
     def run(offset: int) -> None:
         for i in range(len(queries)):
             q = queries[(i + offset) % len(queries)]
-            if translate_one(q) != serial[q]:
+            if _translate_one(q) != serial[q]:
                 mismatches.append(q)
 
     threads = [threading.Thread(target=run, args=(k * 71,)) for k in range(4)]
@@ -274,3 +287,91 @@ def test_concurrent_translations_match_serial_ones(frequent_switches: None) -> N
     for t in threads:
         t.join()
     assert not mismatches, f"{len(mismatches)} translations differed, first: {mismatches[0]!r}"
+
+
+def test_threads_that_inherit_a_context_translate_alone() -> None:
+    """`asyncio.to_thread` runs each call in a copy of the caller's context — as
+    a free-threaded build starts every thread — so whatever the caller had
+    cached is inherited, the defaults `State.get` creates included. Every
+    default is cached here first, so the workers start from shared objects.
+    """
+    for module in (lower, translate, sharing, graph):
+        for value in vars(module).values():
+            if isinstance(value, State):
+                value.get()
+    queries = _corpus_queries(60)
+    serial = [_translate_one(q) for q in queries]
+
+    async def main() -> list[str]:
+        calls = (asyncio.to_thread(_translate_one, q) for q in queries * 4)
+        return list(await asyncio.gather(*calls))
+
+    assert asyncio.run(main()) == serial * 4
+
+
+#: Module globals shared by every thread on purpose: the process-wide defaults
+#: that `set_clusters`, `set_entity_groups` and `set_functions` document as such.
+PROCESS_WIDE = {
+    "clusters.py": {"_DEFAULT"},
+    "entity_groups.py": {"_DEFAULT"},
+    "stored_functions.py": {"_DEFAULT"},
+}
+_MUTATORS = frozenset({
+    "append", "add", "update", "clear", "pop", "popitem", "setdefault", "extend",
+    "insert", "remove", "discard",
+})
+
+
+def test_no_statement_state_is_a_module_global() -> None:
+    """The guard the fix needs: state added the old way fails here, not in a race.
+
+    A function that rebinds a module global (`global X`) or mutates one in place
+    — a container method, an item or attribute assignment — is per-statement
+    state shared by every thread. Per-statement state is a `duckdb_kql._state.State`;
+    process-wide configuration is listed by name above.
+    """
+    offenders: list[str] = []
+    for path in sorted(Path("src/duckdb_kql").rglob("*.py")):
+        if "_antlr" in path.parts:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        module_names = {
+            target.id
+            for node in tree.body
+            if isinstance(node, (ast.Assign, ast.AnnAssign))
+            for target in (node.targets if isinstance(node, ast.Assign) else [node.target])
+            if isinstance(target, ast.Name)
+        }
+        allowed = PROCESS_WIDE.get(path.name, set())
+        for fn in ast.walk(tree):
+            if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            local = {a.arg for a in ast.walk(fn.args) if isinstance(a, ast.arg)} | {
+                n.id
+                for n in ast.walk(fn)
+                if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)
+            }
+            shared = module_names - local
+            for node in ast.walk(fn):
+                where = f"{path}:{getattr(node, 'lineno', '?')}"
+                if isinstance(node, ast.Global):
+                    offenders += [f"{where} global {n}" for n in node.names if n not in allowed]
+                elif (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and isinstance(node.func.value, ast.Name)
+                    and node.func.value.id in shared
+                    and node.func.attr in _MUTATORS
+                ):
+                    offenders.append(f"{where} {node.func.value.id}.{node.func.attr}(...)")
+                elif isinstance(node, (ast.Assign, ast.AugAssign, ast.AnnAssign, ast.Delete)):
+                    multiple = isinstance(node, (ast.Assign, ast.Delete))
+                    targets = node.targets if multiple else [node.target]
+                    offenders += [
+                        f"{where} {t.value.id} assigned into"
+                        for t in targets
+                        if isinstance(t, (ast.Subscript, ast.Attribute))
+                        and isinstance(t.value, ast.Name)
+                        and t.value.id in shared
+                    ]
+    assert not offenders, "\n".join(offenders)
