@@ -97,7 +97,10 @@ def needs_ticks(text: str) -> bool:
         return True
     clock = _CLOCK.match(lowered)
     if clock is not None:
-        return clock.group(2) is not None
+        # A seventh fractional digit is a tick, which DuckDB's INTERVAL drops
+        # without a word: `time(00:00:00.0000005)` was zero. Read as ticks, it
+        # is refused like `1tick` unless the digit is a zero.
+        return clock.group(2) is not None or len(clock.group(6) or "") == 7
     found = _UNIT.match(lowered)
     if found is None:
         return False

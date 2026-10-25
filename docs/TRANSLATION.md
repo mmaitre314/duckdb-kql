@@ -97,7 +97,11 @@ datetime(2024-01-01T12:34:56.1234567Z)   ->  ...1234560Z, the 7 is gone
 Everything downstream inherits it — `tostring` prints a trailing `0` because
 there is nothing else to print (R20), and `datetime_part("nanosecond", …)` is
 **refused** rather than answering a rounded value, since a caller asking for
-nanoseconds is asking for exactly the digit that is missing. Ordinary log
+nanoseconds is asking for exactly the digit that is missing. A **timespan** is
+held to the same standard without the exception: `1tick`,
+`time(00:00:00.0000005)`, `totimespan(123)` and `totimespan('…0000005')` are
+refused — at translation for a literal, by a run-time `error()` otherwise —
+where DuckDB's `INTERVAL` would have dropped the tick without a word. Ordinary log
 timestamps are microsecond-resolution or coarser and are unaffected; a value
 carrying real tick precision is not round-trippable here at all.
 
@@ -167,6 +171,16 @@ is run-time `typeof`, for R20's reason: a column carries no type here. One
 case is refused rather than answered: a real **literal** outside the range,
 because Kusto's constant folder answers `toint(1e10)` with -2147483648 while
 its row engine saturates.
+
+`totimespan` is the mirror image, measured 2026-10-25: a number or bool is a
+**tick count** (`totimespan(1230)` is `00:00:00.0001230`, a real truncates), a
+datetime its ticks since 0001-01-01, a timespan itself, a string — surrounding
+whitespace and all — a parsed timespan, and a dynamic as what it holds
+(`dynamic(50)` is five microseconds; it was null). It short-circuited only an
+argument the IR *knew* was a timespan, so a timespan **column** reached the
+string parser and failed to bind. A tick count, string or literal that is not a
+whole number of microseconds is an **error**, not a rounded answer (§2).
+*Trap: `tests/test_totimespan.py`.*
 
 ---
 

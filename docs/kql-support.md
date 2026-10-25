@@ -358,7 +358,7 @@ Not supported: `arg_max`, `arg_min`, `binary_all_*`, `buildschema`,
 | `startofyear` | Takes an optional offset in whole periods. |
 | `timespan` | Synonym for `totimespan`. |
 | `todatetime` | Accepts a wider set of formats than a plain `TIMESTAMP` cast, and **resolves UTC offsets** rather than keeping the local wall time. Unparseable input yields null (R1). |
-| `totimespan` | Handles the `[d.]hh:mm:ss` form, whose leading day part DuckDB's `INTERVAL` cast silently returns null for. |
+| `totimespan` | Converts by input type, as Kusto does: a number or bool is a tick count, a datetime its ticks since 0001-01-01, a string or a dynamic string a parsed `[d.]hh:mm:ss[.fffffff]`, a dynamic number ticks. A value that is not a whole number of microseconds — `totimespan(123)`, a seventh fractional digit — is an **error**: DuckDB keeps microseconds and would round the tick away. |
 | `week_of_year` | Datetimes are UTC. Needs `SET TimeZone='UTC'` — see the note at the top. |
 | `weekofyear` | Datetimes are UTC. Needs `SET TimeZone='UTC'` — see the note at the top. |
 

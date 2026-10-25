@@ -113,13 +113,27 @@ _TODATETIME = (
 _TIMESPAN_TEXT = (
     "^\\s*-?[0-9]+(\\.[0-9]{{1,2}})?:[0-9]{{1,2}}(:[0-9]{{1,2}})?(\\.[0-9]+)?\\s*$"
 )
+# A seventh fractional digit is a **tick**, 100 ns, and DuckDB keeps whole
+# microseconds. Its INTERVAL cast drops it without a word — measured,
+# `totimespan('00:00:00.0000005')` was zero where Kusto answers five ticks —
+# so a non-zero one is an error at run time, as `1tick` is refused as a
+# literal. An eighth digit and beyond Kusto itself discards.
+_SUB_MICROSECOND = ":[0-9]{{1,2}}\\.[0-9]{{6}}[1-9]"
 _TOTIMESPAN = (
-    f"CASE WHEN NOT regexp_matches(CAST({{0}} AS VARCHAR), '{_TIMESPAN_TEXT}') THEN NULL "
-    "WHEN regexp_matches({0}, '^-?[0-9]+\\.[0-9]{{1,2}}:') THEN "
-    "(CASE WHEN starts_with({0}, '-') THEN -1 ELSE 1 END) * "
-    "(to_days(CAST(regexp_extract(ltrim({0}, '-'), '^([0-9]+)\\.', 1) AS INTEGER)) "
-    "+ CAST(regexp_replace(ltrim({0}, '-'), '^[0-9]+\\.', '') AS INTERVAL)) "
-    "ELSE TRY_CAST({0} AS INTERVAL) END"
+    # Trimmed once, up front: the shape test allows surrounding whitespace, and
+    # the day-prefix branch did not — measured, `totimespan(' 1.00:00:00 ')` is
+    # a day in Kusto and was null here.
+    "list_transform([regexp_replace(CAST({0} AS VARCHAR), '^\\s+|\\s+$', '', 'g')], "
+    "lambda _ts: "
+    f"CASE WHEN NOT regexp_matches(_ts, '{_TIMESPAN_TEXT}') THEN NULL "
+    f"WHEN regexp_matches(_ts, '{_SUB_MICROSECOND}') THEN "
+    "error('duckdb-kql: the timespan ' || _ts || ' has a 100 ns tick, "
+    "and DuckDB keeps whole microseconds') "
+    "WHEN regexp_matches(_ts, '^-?[0-9]+\\.[0-9]{{1,2}}:') THEN "
+    "(CASE WHEN starts_with(_ts, '-') THEN -1 ELSE 1 END) * "
+    "(to_days(CAST(regexp_extract(ltrim(_ts, '-'), '^([0-9]+)\\.', 1) AS INTEGER)) "
+    "+ CAST(regexp_replace(ltrim(_ts, '-'), '^[0-9]+\\.', '') AS INTERVAL)) "
+    "ELSE TRY_CAST(_ts AS INTERVAL) END)[1]"
 )
 
 

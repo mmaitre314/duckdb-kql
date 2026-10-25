@@ -246,12 +246,14 @@ def _render_timespan_literal(text: str) -> str:
     """
     from ..timespans import needs_ticks, ticks
 
-    if not needs_ticks(text):
-        return f"INTERVAL {quote_string(text)}"
     try:
         count = ticks(text)
     except ValueError as exc:
+        # `timespan(l)` reaches here as the text `l`: Kusto refuses it as a
+        # literal, and `INTERVAL 'l'` failed in DuckDB's binder instead.
         raise KqlUnsupportedError("literal:timespan", hint=str(exc)) from None
+    if not needs_ticks(text):
+        return f"INTERVAL {quote_string(text)}"
     if count % 10:
         raise KqlUnsupportedError(
             "literal:timespan",
@@ -4993,15 +4995,71 @@ def _render_todatetime(node: ir.FunctionCall) -> str | None:
 
 
 def _render_totimespan(node: ir.FunctionCall) -> str | None:
-    """`totimespan(4d)` hands us an INTERVAL, not a string.
+    """`totimespan(x)` — KQL's conversion by input type, decided at run time.
 
-    The string parser would fail to bind, and converting an already-converted
-    value is a no-op in KQL too. As with `todatetime`, anything else declines to
-    the registry's template.
+    It used to short-circuit only an argument the IR *knew* was a timespan, and
+    a bare column never is: `totimespan(ts)` over a timespan column reached the
+    string parser and failed to bind, and so did every other non-string type.
+    Measured, Kusto takes them all, and two answers here were quietly wrong:
+
+    * a **timespan** is itself, and a **string** parses as one;
+    * a **number** or **bool** is a tick count — `totimespan(123)` is
+      `00:00:00.0000123` and a real truncates, as `tolong` does;
+    * a **datetime** is its ticks since 0001-01-01, as `tolong(t)` is;
+    * a **dynamic** converts as what it holds: `totimespan(dynamic(5))` is five
+      ticks and `dynamic('01:00:00')` an hour, where both answered null.
+
+    A tick is 100 ns and DuckDB keeps microseconds, so a tick count that is not
+    a whole number of them is an **error** at run time, as `1tick` is refused as
+    a literal: answering `00:00:00.0000120` for 123 ticks would be a wrong
+    answer. A column carries no type here, so the dispatch is DuckDB's
+    `typeof`, bound once through a one-element list as `tolong`'s is.
     """
-    if len(node.args) == 1 and _is_timespan_expr(node.args[0]):
-        return render_expr(node.args[0])
-    return None
+    if len(node.args) != 1:
+        return None
+    arg = node.args[0]
+    if _is_timespan_expr(arg):
+        return render_expr(arg)
+    text = _TOTIMESPAN.format
+    if _is_string_expr(arg):
+        return text(render_expr(arg))
+    v = "_v"
+    j = f"TRY_CAST({v} AS JSON)"
+    inside = f"({j} ->> '$')"
+    real = _integer_from_real(f"CAST({j} AS DOUBLE)", 64)
+    held = (
+        f"CASE json_type({j}) "
+        f"WHEN 'VARCHAR' THEN {text(inside)} "
+        f"WHEN 'BIGINT' THEN {_timespan_from_ticks(f'TRY_CAST({j} AS BIGINT)')} "
+        f"WHEN 'UBIGINT' THEN {_timespan_from_ticks(f'TRY_CAST({j} AS BIGINT)')} "
+        f"WHEN 'DOUBLE' THEN {_timespan_from_ticks(real)} "
+        f"WHEN 'BOOLEAN' THEN {_timespan_from_ticks(f'CAST(CAST({j} AS BOOLEAN) AS BIGINT)')} "
+        "END"
+    )
+    body = (
+        f"CASE WHEN typeof({v}) = 'INTERVAL' THEN CAST({v} AS INTERVAL) "
+        f"WHEN typeof({v}) = 'VARCHAR' THEN {text(f'CAST({v} AS VARCHAR)')} "
+        f"WHEN typeof({v}) = 'JSON' THEN {held} "
+        f"WHEN typeof({v}) = 'TIMESTAMP' "
+        f"THEN to_microseconds(epoch_us(CAST({v} AS TIMESTAMP)) + {_EPOCH_TICKS // 10}) "
+        f"WHEN typeof({v}) IN ('DOUBLE', 'FLOAT') OR typeof({v}) LIKE 'DECIMAL%' "
+        f"THEN {_timespan_from_ticks(_integer_from_real(f'CAST({v} AS DOUBLE)', 64))} "
+        f"WHEN typeof({v}) = 'BOOLEAN' "
+        f"THEN {_timespan_from_ticks(f'CAST(CAST({v} AS BOOLEAN) AS BIGINT)')} "
+        f"WHEN typeof({v}) LIKE '%INT%' THEN {_timespan_from_ticks(f'TRY_CAST({v} AS BIGINT)')} "
+        "END"
+    )
+    return f"list_transform([{render_expr(arg)}], lambda {v}: {body})[1]"
+
+
+def _timespan_from_ticks(ticks: str) -> str:
+    """A tick count as an INTERVAL, or an error when it is not whole microseconds."""
+    return (
+        f"list_transform([{ticks}], lambda _t: CASE WHEN _t % 10 <> 0 THEN "
+        "error('duckdb-kql: totimespan of ' || CAST(_t AS VARCHAR) || ' ticks of 100 ns, "
+        "which is not a whole number of microseconds, all DuckDB keeps') "
+        "ELSE to_microseconds(_t // 10) END)[1]"
+    )
 
 
 #: A function whose SQL needs Python rather than a `{0}`-style template, and
@@ -5011,9 +5069,10 @@ def _render_totimespan(node: ir.FunctionCall) -> str | None:
 #: `lookup()`/`.render()` path takes the call. That is not decoration: five of
 #: these are conditional. `tostring`, `reverse` and the `hash_*` family handle
 #: exactly one argument and let every other arity fall through so the arity
-#: error still names the function; `todatetime` and `totimespan` short-circuit
-#: only when the argument is *already* of that type and otherwise want the
-#: registry's string-parsing template, which is the common case.
+#: error still names the function; `todatetime` short-circuits only when the
+#: argument is *already* a datetime and otherwise wants the registry's
+#: string-parsing template, which is the common case; `totimespan` takes every
+#: one-argument call, dispatching on the run-time type.
 #:
 #: Before this was one mechanism it was two — eight of these were `if
 #: node.name.lower() == …` arms written around the dict lookup, half of them

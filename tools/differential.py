@@ -28,12 +28,20 @@ time and each of which is defended against below:
    comparing raw rows must go through :func:`duckdb_kql.comparison.compare`, or
    at least know that it is comparing spellings — hence `raw=True` being opt-in.
 
-   `compare` does not close the gap for **null strings**, and this one still
+   `compare` closes the gap for a **scalar dynamic** — `3` from the emulator,
+   the JSON text `'3'` from DuckDB — only when the expected side carries its
+   column types, so :meth:`kusto` keeps them. It once dropped them, and
+   `d.a.b` read as a wrong answer that no public surface gives: `KustoClient`
+   and `serve` decode it to `3` as the SDK does, and `kql()` returns DuckDB's
+   JSON by design.
+
+   `compare` cannot close the gap for **null strings**, and this one still
    bites: the emulator renders a null `string` as `''`, indistinguishable in the
-   JSON from a genuine empty string, so a `('',)`-vs-`(None,)` pair is reported
-   as a divergence whether or not one exists. Settle those by asking for
-   `isnull(x)` and `strlen(x)` instead of `x` — a real null answers
-   ``(True, null)`` and a real empty string ``(False, 0)``.
+   JSON from a genuine empty string. With the column types `compare` treats the
+   two as equal in a string column — the corpus's rule — so a `('',)`-vs-
+   `(None,)` pair is reported as *agreeing* whether or not it does. Settle
+   those by asking for `isnull(x)` and `strlen(x)` instead of `x` — a real
+   null answers ``(True, null)`` and a real empty string ``(False, 0)``.
 2. **Asking the wrong evaluator.** Kusto's constant folder and its row engine
    **disagree** — `print x = substring('abcdefg', long(null))` is `'abcdefg'`
    while the same expression over a `datatable` is null. A `print`-only sweep
@@ -103,7 +111,15 @@ class Differential:
                     f"`docker compose up -d kusto` and wait for healthy: {exc}"
                 ) from exc
             return f"REJECTED {found.group(1) if found else str(exc)[:60]}"
-        return {"columns": list(result.columns), "rows": [list(r) for r in result.rows]}
+        # The column types are not decoration: `compare` decodes a `dynamic`
+        # cell from our JSON text only where the *expected* column says
+        # dynamic, so without them `dynamic(3)` was reported as `3` against
+        # `'3'` — a divergence in every scalar dynamic, and none in the product.
+        return {
+            "columns": list(result.columns),
+            "column_types": list(result.column_types),
+            "rows": [list(r) for r in result.rows],
+        }
 
     def ours(self, kql: str) -> Any:
         """Our answer, distinguishing a KQL refusal from a leaked engine error.

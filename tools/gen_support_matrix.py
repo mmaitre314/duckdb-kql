@@ -382,7 +382,7 @@ SPECIAL_NOTES: dict[str, str] = {
     "hash_md5": "Hashes KQL's **string** form of the value, so a datetime or a bool must be spelled the way KQL spells it or the digest silently differs (R20). The empty string hashes to the **empty string**, not to `d41d8cd9…`.",
     "hash_sha1": "Hashes KQL's string form of the value — see `hash_md5`.",
     "hash_sha256": "Hashes KQL's string form of the value — see `hash_md5`.",
-    "totimespan": "Handles the `[d.]hh:mm:ss` form, whose leading day part DuckDB's `INTERVAL` cast silently returns null for.",
+    "totimespan": "Converts by input type, as Kusto does: a number or bool is a tick count, a datetime its ticks since 0001-01-01, a string or a dynamic string a parsed `[d.]hh:mm:ss[.fffffff]`, a dynamic number ticks. A value that is not a whole number of microseconds — `totimespan(123)`, a seventh fractional digit — is an **error**: DuckDB keeps microseconds and would round the tick away.",
     "timespan": "Synonym for `totimespan`.",
 }
 
