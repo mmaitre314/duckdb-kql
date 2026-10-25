@@ -266,7 +266,7 @@ Not supported: `arg_max`, `arg_min`, `binary_all_*`, `buildschema`,
 
 ## Scalar functions
 
-115 supported, grouped by family.
+129 supported, grouped by family.
 
 ### Conditional
 
@@ -344,6 +344,7 @@ Not supported: `arg_max`, `arg_min`, `binary_all_*`, `buildschema`,
 | `endofmonth` | The last instant *inside* the period, not the start of the next one. |
 | `endofweek` | The last instant *inside* the period. KQL weeks start on **Sunday**; DuckDB's `date_trunc('week')` starts Monday. |
 | `endofyear` | The last instant *inside* the period, not the start of the next one. |
+| `format_datetime` | Kusto's format elements, as measured rather than as .NET documents them: `F` keeps trailing zeros and the `.` before an empty one, and a long run repeats (`ddd` is `dd` then `d`). The format must be a literal. **Not supported:** `fffffff`/`FFFFFFF`, the 100ns digit DuckDB does not store, and `yyy`, which Kusto answers only at the end of a format. |
 | `getmonth` | Datetimes are UTC. Needs `SET TimeZone='UTC'` — see the note at the top. |
 | `getyear` | Datetimes are UTC. Needs `SET TimeZone='UTC'` — see the note at the top. |
 | `hourofday` | Datetimes are UTC. Needs `SET TimeZone='UTC'` — see the note at the top. |
@@ -387,13 +388,19 @@ Not supported: `arg_max`, `arg_min`, `binary_all_*`, `buildschema`,
 | `tolower` | A `dynamic` in a string context is its **unwrapped** text — `dynamic('x')` is `x`, not `"x"`, and `dynamic(null)` is the empty string. |
 | `tostring` | Uses .NET's spelling, which differs from DuckDB's for **bools** (`True`, not `true`), datetimes, timespans (`1.00:00:00`, not `1 day`) and dynamics, and it is **total** — a null of any type is the empty string, not null (R20). Getting it wrong changes every hash computed over it. |
 | `toupper` | A `dynamic` in a string context is its **unwrapped** text — `dynamic('x')` is `x`, not `"x"`, and `dynamic(null)` is the empty string. |
-| `trim_start` | The first argument is a **regular expression**, not a set of characters to strip. `trim_start(' ', s)` strips one leading space, not all whitespace. |
+| `trim_end` | A **regular expression**, removed once from the end, as Kusto's pattern `(regex)$`. `$` is the end of the text, not before a final newline. The regex must be a string literal. |
+| `trim_start` | The first argument is a **regular expression**, not a set of characters to strip, and it removes **one** match: `trim_start(' ', s)` strips one leading space, not all whitespace. The regex must be a string literal. Kusto's pattern is `^(regex)`, used verbatim, so an alternation is anchored as a whole. |
+| `trim` | A **regular expression**, removed once from each end. Kusto matches both ends with one pattern, the alternation of `^(regex)` and `(regex)$`, so `trim('a$', 'aa')` is `a`, not `trim_end` of `trim_start`. The regex must be a string literal. |
 
 ### Mathematical
 
 | Function | Limitations and gotchas |
 |---|---|
 | `abs` | An `int` or `bool` gives a `long`, as in Kusto. **Not supported:** a timespan, which DuckDB's `abs` does not take. |
+| `acos` | **Null** outside [-1, 1], as in Kusto, where DuckDB answers NaN; a NaN stays NaN. |
+| `asin` | **Null** outside [-1, 1], as in Kusto, where DuckDB answers NaN; a NaN stays NaN. |
+| `atan2` | `atan2(y, x)` — `y` first. |
+| `atan` | — |
 | `binary_and` | — |
 | `binary_not` | — |
 | `binary_or` | — |
@@ -401,6 +408,9 @@ Not supported: `arg_max`, `arg_min`, `binary_all_*`, `buildschema`,
 | `binary_shift_right` | The shift count is taken as given; KQL masks it to 6 bits, so a count above 63 differs. |
 | `binary_xor` | — |
 | `ceiling` | — |
+| `cos` | — |
+| `cot` | — |
+| `degrees` | A `decimal` argument gives a `real` here and a `decimal` in Kusto. |
 | `exp10` | — |
 | `exp2` | — |
 | `exp` | — |
@@ -411,10 +421,14 @@ Not supported: `arg_max`, `arg_min`, `binary_all_*`, `buildschema`,
 | `log` | **Natural** logarithm, mapped to SQL's `ln`. SQL's own `log()` is base-10 in most dialects, so the naive mapping is off by a factor of `ln(10)`. |
 | `not` | Null-aware: `isempty` (null **or** empty string) is not the same as `isnull`, and arithmetic propagates null. |
 | `notnull` | Null-aware: `isempty` (null **or** empty string) is not the same as `isnull`, and arithmetic propagates null. |
+| `pi` | — |
 | `pow` | — |
+| `radians` | A `decimal` argument gives a `real` here and a `decimal` in Kusto. |
 | `round` | Both arities. The value is cast to DOUBLE first: DuckDB's two-argument `round` returns DECIMAL and rounds the decimal value, so `round(1.005, 2)` is `1.01` there and `1.0` in Kusto, which rounds the double `1.005` actually is. |
 | `sign` | Always a `real`, and 0.0 — not null — for a null or a NaN, as Kusto answers. |
+| `sin` | — |
 | `sqrt` | — |
+| `tan` | — |
 
 ### Conversion
 

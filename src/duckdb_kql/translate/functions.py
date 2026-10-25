@@ -145,6 +145,21 @@ def long_or_wider(sql: str) -> str:
 
 _L0, _L1 = long_or_wider("{0}"), long_or_wider("{1}")
 
+
+def _unit_domain(fn: str) -> str:
+    """`asin` or `acos`, **null** outside [-1, 1] as in Kusto, NaN for a NaN.
+
+    Measured, folded and over rows: `asin(2)`, `acos(-2)` and `asin(+inf)` are
+    null, where DuckDB answers NaN, and `asin(real(nan))` is NaN in both. The
+    obvious guard, `abs(x) > 1 THEN NULL`, turns that NaN into a null as well:
+    DuckDB orders NaN above every number, so `NaN > 1` is *true* there. The
+    lambda evaluates the argument once.
+    """
+    return (
+        f"list_transform([{_L0}], lambda _u: "
+        f"CASE WHEN _u BETWEEN -1 AND 1 OR isnan(_u) THEN {fn}(_u) END)[1]"
+    )
+
 #: Wave 1 scalar and aggregate functions.
 SCALAR_FUNCTIONS: dict[str, FunctionSpec] = {
     s.name: s
@@ -154,7 +169,11 @@ SCALAR_FUNCTIONS: dict[str, FunctionSpec] = {
         _f("toupper", "native", "upper({0})", (1,), ("R17",)),
         _f("tolower", "native", "lower({0})", (1,), ("R17",)),
         _f("strcat", "template", "concat({})", (), ("R17", "R20"), "variadic"),
-        _f("trim_start", "native", "regexp_replace({1}, '^' || {0}, '')", (2,)),
+        # The first argument is a regex spliced into Kusto's own wrapper, so
+        # the three are special forms (`translate._render_trim`).
+        _f("trim_start", "template", "", (2,), note="special"),
+        _f("trim_end", "template", "", (2,), note="special"),
+        _f("trim", "template", "", (2,), note="special"),
         _f("strrep", "native", "repeat({0}, {1})", (2,)),
         _f("reverse", "native", "reverse({0})", (1,), ("R20",)),
         # KQL substring is 0-based, clamps out of range, and counts a NEGATIVE
@@ -319,6 +338,24 @@ SCALAR_FUNCTIONS: dict[str, FunctionSpec] = {
         _f("gamma", "native", "gamma({0})", (1,)),
         _f("exp2", "template", "pow(CAST(2 AS DOUBLE), {0})", (1,)),
         _f("exp10", "template", "pow(CAST(10 AS DOUBLE), {0})", (1,)),
+        # --- trigonometry ----------------------------------------------------
+        # A real for every numeric input, `bool` included — measured,
+        # `sin(true)` is 0.8414709848078965. `long_or_wider` is what makes a
+        # BOOLEAN bind, and a string, datetime or dynamic still fails to, as
+        # Kusto refuses them (SEM0201).
+        _f("sin", "template", f"sin({_L0})", (1,)),
+        _f("cos", "template", f"cos({_L0})", (1,)),
+        _f("tan", "template", f"tan({_L0})", (1,)),
+        _f("cot", "template", f"cot({_L0})", (1,)),
+        _f("atan", "template", f"atan({_L0})", (1,)),
+        _f("atan2", "template", f"atan2({_L0}, {_L1})", (2,), note="atan2(y, x)"),
+        _f("asin", "template", _unit_domain("asin"), (1,)),
+        _f("acos", "template", _unit_domain("acos"), (1,)),
+        _f("pi", "template", "pi()", (0,)),
+        # A `decimal` comes back a `real` here and a `decimal` in Kusto — the
+        # value agrees to a double's precision, the type does not.
+        _f("degrees", "template", f"degrees({_L0})", (1,)),
+        _f("radians", "template", f"radians({_L0})", (1,)),
         # --- bitwise ---------------------------------------------------------
         # Over `long` whatever the operand width — `long_or_wider`.
         _f("binary_and", "template", f"({_L0} & {_L1})", (2,)),
@@ -357,6 +394,7 @@ SCALAR_FUNCTIONS: dict[str, FunctionSpec] = {
         _f("week_of_year", "native", "weekofyear({0})", (1,), ("R8",)),
         _f("make_datetime", "template", "", (3, 6), ("R8",), "variadic:make_datetime"),
         _f("make_timespan", "template", "", (2, 3), ("R8",), "variadic:make_timespan"),
+        _f("format_datetime", "template", "", (2,), ("R8",), "special"),
         # --- conditional -----------------------------------------------------
         _f("iff", "template", "CASE WHEN {0} THEN {1} ELSE {2} END", (3,)),
         _f("iif", "template", "CASE WHEN {0} THEN {1} ELSE {2} END", (3,)),

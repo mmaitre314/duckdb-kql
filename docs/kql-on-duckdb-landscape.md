@@ -114,7 +114,10 @@ as real KQL:
 - **`sin`, `cos`, `tan`**, by handing the name to DuckDB. Missing here too, and
   not recorded anywhere: `asin`, `acos`, `atan`, `atan2`, `cot`, `pi`,
   `degrees`, `radians`, `trim`, `trim_end` and `format_datetime` — 19 corpus
-  cases between them, 22 with `sin`/`cos`/`tan`.
+  cases between them, 22 with `sin`/`cos`/`tan`. **All fourteen are supported
+  here since 2026-10-25**, and two needed more than the name: `asin`/`acos` are
+  null outside [-1, 1] where DuckDB answers NaN, and Kusto's `format_datetime`
+  is not .NET's (`tests/test_trigonometry.py`, `tests/test_format_datetime.py`).
 
 **How it differs.** It translates without a schema and maps a function by
 upper-casing its name, which is short but answers SQL's question where KQL's

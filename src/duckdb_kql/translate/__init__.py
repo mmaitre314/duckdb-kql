@@ -1734,6 +1734,10 @@ _NAME_PRESERVING = frozenset({
     "bin", "bin_at", "floor", "ceiling", "round", "startofday",
     # numeric
     "abs", "sqrt", "log", "log10", "log2", "exp", "exp2",
+    # trigonometry — but not `cot`, `degrees` or `radians`
+    "sin", "cos", "tan", "asin", "acos", "atan", "atan2",
+    # datetime — but not `trim`, `trim_start` or `trim_end` on the string side
+    "format_datetime",
 })
 
 
@@ -3101,7 +3105,6 @@ _REGEX_ARG_POSITIONS: dict[str, tuple[int, ...]] = {
     "extract": (0,),
     "extract_all": (0,),
     "replace_regex": (1,),
-    "trim_start": (0,),
 }
 
 
@@ -3148,6 +3151,58 @@ def render_regex(node: ir.Expr) -> str:
             )
         return render_expr(ir.Literal(to_re2_named_groups(pattern), "string"))
     return render_expr(node)
+
+
+#: Kusto's wrapper around the user's regex, read off its own error messages:
+#: `trim_start('[', s)` is refused as "Regex pattern is ill-formed: ^([)", and
+#: `trim_end` and `trim` print `([)$` and `^([)|([)$`.
+_TRIM_WRAPPERS = {
+    "trim_start": "^({0})",
+    "trim_end": "({0})$",
+    "trim": "^({0})|({0})$",
+}
+
+
+def _render_trim(node: ir.FunctionCall) -> str:
+    """``trim(regex, s)``, ``trim_start`` and ``trim_end`` — Kusto's pattern, verbatim.
+
+    Kusto splices the regex into a group, anchors it, and removes **every**
+    match of the result. DuckDB's RE2, handed the same pattern with `'g'`,
+    answers the same, quirks included — on all 295 probes Kusto answered, of
+    297 measured. Only one match goes at each end (`trim('a', 'aaaa')` is
+    `aa`); `trim('a$', 'aa')` is `a`, because the two anchors are one pattern,
+    not `trim_end` of `trim_start`;
+    and a regex `a)|(b` breaks out of the group in both engines, so
+    `trim_end('a)|(b', 'xaxbx')` is `xxbx` in each.
+
+    The obvious rendering, `'^' || regex`, is what `trim_start` had, and it
+    anchors only the first alternative: `^a|x` strips an `x` anywhere, so
+    `trim_start('a|x', 'bxa')` answered `ba` where Kusto leaves `bxa` alone.
+
+    Kusto requires a string literal (SEM0207), and a non-empty one (SEM0217).
+    A `let` holding one arrives here as the literal, a `strcat` of literals is
+    folded (Kusto refuses it, which costs it nothing here), and a string query
+    parameter is spliced at run time by the same concatenation Kusto does.
+    """
+    name = node.name.lower()
+    if len(node.args) != 2:
+        raise KqlUnsupportedError(name, hint="expects (regex, text)")
+    regex, text = node.args
+    wrapper = _TRIM_WRAPPERS[name]
+    pattern = constant_string(regex)
+    if pattern == "":
+        raise KqlUnsupportedError(name, hint="the regex is empty; Kusto refuses it (SEM0217)")
+    if pattern is not None:
+        rendered = render_regex(ir.Literal(wrapper.format(pattern), "string"))
+    elif isinstance(regex, ir.Parameter) and regex.kind == "string":
+        value = render_expr(regex)
+        pieces = [render_expr(ir.Literal(part, "string")) for part in wrapper.split("{0}")]
+        rendered = "(" + f" || {value} || ".join(pieces) + ")"
+    else:
+        raise KqlUnsupportedError(
+            name, hint="the regex must be a string literal, as Kusto requires (SEM0207)"
+        )
+    return f"regexp_replace({render_expr(text)}, {rendered}, '', 'g')"
 
 
 def _render_arg(name: str, index: int, node: ir.Expr) -> str:
@@ -4649,6 +4704,124 @@ def _render_datetime_part(node: ir.FunctionCall) -> str:
     return f"CAST(date_part('{part}', {render_expr(node.args[1])}) AS BIGINT)"
 
 
+#: A `format_datetime` element -> its `strftime` spelling. Kusto's elements are
+#: runs of one letter, and a longer run is read greedily as repeats of the
+#: longest element — measured, `ddd` is `dd` then `d` (`055` on the 5th) and
+#: `yyyyy` is `yyyy` then `y`. The fractions, `f` and `F`, are not here: they
+#: are `_fraction`.
+_DATETIME_ELEMENTS = {
+    "d": "%-d", "dd": "%d", "h": "%-I", "hh": "%I", "H": "%-H", "HH": "%H",
+    "m": "%-M", "mm": "%M", "M": "%-m", "MM": "%m", "s": "%-S", "ss": "%S",
+    "y": "%-y", "yy": "%y", "yyyy": "%Y", "tt": "%p",
+}
+
+#: The longest element of each letter; `t` has only `tt`, `y` has no `yyy`.
+_ELEMENT_RUNS = {"d": 2, "h": 2, "H": 2, "m": 2, "M": 2, "s": 2, "y": 4, "t": 2, "f": 7, "F": 7}
+
+#: Kusto's documented delimiters. Anything else — `T`, a tab, a quoted literal,
+#: `%d` — is refused there (SEM0255), so it is refused here.
+_DATETIME_DELIMITERS = frozenset(" /-:,._[]")
+
+
+def _format_elements(fmt: str) -> list[str]:
+    """*fmt* split into Kusto's elements and delimiters, or a refusal."""
+    out: list[str] = []
+    i = 0
+    while i < len(fmt):
+        char = fmt[i]
+        if char in _DATETIME_DELIMITERS:
+            out.append(char)
+            i += 1
+            continue
+        longest = _ELEMENT_RUNS.get(char)
+        if longest is None:
+            raise KqlUnsupportedError(
+                f"format_datetime:{char}",
+                hint="not a format element or delimiter; Kusto refuses it (SEM0255)",
+            )
+        end = i
+        while end < len(fmt) and fmt[end] == char:
+            end += 1
+        run = end - i
+        while run:
+            take = min(run, longest)
+            out.append(char * take)
+            run -= take
+        i = end
+    for element in out:
+        if element in ("t", "yyy"):
+            # `t` is refused by Kusto. `yyy` it answers as `yy`, but only at the
+            # very end of the format, and refuses it anywhere else.
+            raise KqlUnsupportedError(
+                f"format_datetime:{element}",
+                hint="Kusto refuses it, or answers it only at the end of the format",
+            )
+        if element in ("fffffff", "FFFFFFF"):
+            raise KqlUnsupportedError(
+                f"format_datetime:{element}",
+                hint="the seventh digit is the 100ns tick, which DuckDB does not "
+                "store; ffffff is the finest available",
+            )
+    return out
+
+
+def _fraction(value: str, element: str) -> str:
+    """`f`… and `F`…: the first *n* digits of the fraction, never rounded.
+
+    `F` is those same digits, zero-padded and **with** trailing zeros, or
+    nothing when all of them are zero — measured, `FFFFFF` of `.0617500` is
+    `061750` and `FF` of `.0050000` is empty. Microsoft's table says otherwise
+    (`FFFFFFF` of `.0001150` -> `000115`), as .NET's own `F` would, and .NET
+    also drops a `.` before an empty `F`; Kusto keeps it, so `ss.FFF` of a
+    whole second is `05.`.
+    """
+    digits = f"substr(strftime({value}, '%f'), 1, {len(element)})"
+    if element[0] == "f":
+        return digits
+    return f"(CASE WHEN {digits} = '{'0' * len(element)}' THEN '' ELSE {digits} END)"
+
+
+def _render_format_datetime(node: ir.FunctionCall) -> str:
+    """``format_datetime(date, format)`` — Kusto's elements, parsed here.
+
+    The format must be a non-empty literal (SEM0207, SEM0217), so it is parsed
+    at translation time into one `strftime` per run of plain elements and one
+    expression per fraction, joined with `||` so a null date stays null: over
+    rows, `format_datetime(datetime(null), …)` is null in Kusto. (Kusto's
+    constant folder answers `''` for the same literal null.) With more than one
+    piece the date goes through a lambda, so it is written and evaluated once.
+    """
+    if len(node.args) != 2:
+        raise KqlUnsupportedError("format_datetime", hint="expects (date, format)")
+    fmt = constant_string(node.args[1])
+    if not fmt:
+        raise KqlUnsupportedError(
+            "format_datetime",
+            hint="the format must be a non-empty string literal, as Kusto requires "
+            "(SEM0207, SEM0217)",
+        )
+    if any(is_kind(node.args[0]) for is_kind in (_is_string_expr, _is_timespan_expr)):
+        raise KqlUnsupportedError(
+            "format_datetime", hint="the date must be a datetime, as Kusto requires (SEM0254)"
+        )
+    date = render_expr(node.args[0])
+    elements = _format_elements(fmt)
+    if not any(element[0] in "fF" for element in elements):
+        return f"strftime({date}, '{''.join(_DATETIME_ELEMENTS.get(e, e) for e in elements)}')"
+    pieces: list[str] = []
+    plain: list[str] = []
+    for element in [*elements, ""]:
+        if element and element[0] not in "fF":
+            plain.append(_DATETIME_ELEMENTS.get(element, element))
+            continue
+        if plain:
+            pieces.append(f"strftime(_fd, '{''.join(plain)}')")
+            plain.clear()
+        if element:
+            pieces.append(_fraction("_fd", element))
+    return f"list_transform([{date}], lambda _fd: {' || '.join(pieces)})[1]"
+
+
 def _render_round(node: ir.FunctionCall) -> str:
     """``round(x)`` and ``round(x, precision)``.
 
@@ -5051,6 +5224,10 @@ _SPECIAL_FORMS: dict[str, Callable[[ir.FunctionCall], str | None]] = {
     "datetime_add": _render_datetime_add,
     "datetime_diff": _render_datetime_diff,
     "datetime_part": _render_datetime_part,
+    "format_datetime": _render_format_datetime,
+    "trim": _render_trim,
+    "trim_start": _render_trim,
+    "trim_end": _render_trim,
 }
 
 

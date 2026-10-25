@@ -1432,7 +1432,7 @@ wrong answer (principle 5).
 
 ## 9. Open items
 
-One item is genuinely open. The rest are kept, struck through and dated, because
+Four items are genuinely open. The rest are kept, struck through and dated, because
 a settled question that vanishes gets re-opened by the next reader — and §10
 sends every contributor through §4 before they map anything.
 
@@ -1447,6 +1447,24 @@ sends every contributor through §4 before they map anything.
   that runs here and fails in production. Untouched so far because the fix is a
   scope rule, not a mapping, and the same spelling *inside* a function body —
   where the column arrives as a parameter — is legal and common.
+- **Regex shorthand classes are Unicode in Kusto and ASCII in RE2.** Measured
+  2026-10-25: `extract(@'\d', 0, '٣x')` is `٣`, `'٣' matches regex @'\d'` is
+  true, `\w` matches `é`, and `trim_start(@'\s', …)` strips a U+00A0. DuckDB's
+  RE2 matches none of them, so every regex function answers differently on
+  non-ASCII text, with no error. Kusto's `$` *is* RE2's (end of text, not
+  before a final newline), so this is not .NET semantics either; the fix is
+  probably a rewrite of `\d` `\w` `\s` and their negations in the literal
+  pattern, and it wants its own measurements first.
+- **`extend` and `project` name an unnamed expression positionally and never
+  after its column.** Measured 2026-10-25: Kusto names `extend abs(x)` `x` —
+  *replacing* `x` — where this adds `Column1` beside it, so a following
+  `where x > 0` reads the wrong values. It counts only the unnamed targets
+  (`project a, a+1` is `a, Column1`; here `Column2`), and a second `x` is `x1`,
+  not `x_1`, in `summarize … by` too. `summarize pow(min(x), 2)` and
+  `degrees(max(x))` are `Column1`, not `min_x`: the aggregate name passes
+  through the same allow-list as a `by` key (`_NAME_PRESERVING`), not every
+  wrapper. Untouched so far because it changes the output columns of every
+  operator that names one.
 - ~~Null-ordering defaults for `sort` (R6).~~ **Settled 2026-08-05:** KQL treats
   null as the **smallest** value — `sort by x asc` returns null first, `desc`
   returns it last. The emitter had this inverted while its comments asserted the

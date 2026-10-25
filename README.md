@@ -181,10 +181,10 @@ Correctness measured against the real KQL engine (the [Kusto Emulator](https://l
 
 | | |
 |---|---|
-| Doc-corpus cases matching ground truth | **356** of 1060 (0 mismatches) |
+| Doc-corpus cases matching ground truth | **371** of 1060 (0 mismatches) |
 | [Azure Monitor's published KQL subset](https://github.com/mmaitre314/duckdb-kql/blob/main/docs/azure-monitor-profile.md) | **115 / 119 (96%)** |
 | Tabular operators | **27 / 48** |
-| Scalar functions / aggregates / binary operators | **115 / 21 / 41** |
+| Scalar functions / aggregates / binary operators | **129 / 21 / 41** |
 
 Supported operators: `where`, `project`, `project-away`, `project-rename`,
 `extend`, `summarize`, `join`, `mv-expand`, `distinct`, `count`,
