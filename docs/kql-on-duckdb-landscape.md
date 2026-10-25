@@ -91,6 +91,49 @@ Kusto language parser* (`Microsoft.Azure.Kusto.Language`). It explicitly targets
 
 These show the extension route is viable, but neither speaks KQL.
 
+### 3.3 `fossiq/root` — `@fossiq/kql-to-duckdb`, in TypeScript
+
+> Added 2026-10-25, read at `fossiq/root` `d981aeb` (2026-03-11). Found after
+> this survey was written.
+
+A KQL → DuckDB SQL translator on npm, with the same architecture as this
+project — one CTE per pipeline operator — in about 600 lines. It sits in a
+monorepo with a Lezer grammar for CodeMirror syntax highlighting
+(`@fossiq/kql-lezer`) and a web app that loads CSV files into **DuckDB-WASM**
+and queries them in the browser.
+
+**What it has that this project does not**, each checked against the emulator
+as real KQL:
+
+- **A browser story**: in-browser execution, an editor with KQL highlighting,
+  CSV upload. This project is Python only; its UI is Azure Data Explorer's, in
+  front of `duckdb-kql serve`.
+- **`project-keep`** and **`project-reorder`** — explicit column lists only:
+  no wildcards, no `asc`/`desc` ordering for `project-reorder`. Both are listed
+  as not supported here (`kql-support.md`).
+- **`sin`, `cos`, `tan`**, by handing the name to DuckDB. Missing here too, and
+  not recorded anywhere: `asin`, `acos`, `atan`, `atan2`, `cot`, `pi`,
+  `degrees`, `radians`, `trim`, `trim_end` and `format_datetime` — 19 corpus
+  cases between them, 22 with `sin`/`cos`/`tan`.
+
+**How it differs.** It translates without a schema and maps a function by
+upper-casing its name, which is short but answers SQL's question where KQL's
+differs. Read in its source, and the SQL forms checked on DuckDB:
+
+- 14 of the function names its README lists — `tolower`, `toupper`,
+  `tostring`, `toint`, `todouble`, `tobool`, `tolong`, `todatetime`,
+  `totimespan`, `strcat`, `indexof`, `dcount`, `format_datetime`, `datetime` —
+  are not DuckDB functions, so the SQL fails when run; and names Kusto refuses
+  (`length`, `ltrim`, `rtrim`, `ceil`, `tofloat`) are accepted.
+- `join kind=K` emits `K JOIN` with the kind upper-cased. DuckDB reads
+  `LEFTOUTER`, `LEFTANTI` and the rest as an *alias* for the left table, so
+  every outer, anti and semi kind runs as an **inner** join, silently; an
+  omitted kind is `inner`, not `innerunique` (R5), and `innerunique` is a
+  syntax error. (Checked by building the same SQL string, not by running it.)
+- `sort` defaults to ascending (R6); `contains`/`startswith`/`endswith` are
+  case-sensitive `LIKE` and `has` a `\b` regex (R3); identifiers are unquoted
+  (R7) and string literals unescaped; `union` is positional `UNION ALL` (R15).
+
 ## 4. Full KQL engines (Strategy B)
 
 If we want *exact* KQL semantics without writing a transpiler, we can embed an
@@ -257,6 +300,7 @@ These findings feed directly into the option set in
 ## 9. Sources
 
 - kql-to-sql (KQL→SQL, DuckDB dialect + DuckDB extension): https://github.com/saoc90/kql-to-sql · demo: https://saoc90.github.io/kql-to-sql/
+- @fossiq/kql-to-duckdb (KQL→DuckDB SQL in TypeScript, DuckDB-WASM web app): https://github.com/fossiq/root/tree/main/packages/kql-to-duckdb · https://www.npmjs.com/package/@fossiq/kql-to-duckdb
 - Microsoft official parser (`Microsoft.Azure.Kusto.Language`, C#+JS): https://github.com/microsoft/Kusto-Query-Language · https://www.nuget.org/packages/Microsoft.Azure.Kusto.Language/
 - Kustology (Python wrapper over the official parser via pythonnet): https://detect.fyi/deep-kql-analysis-with-kustology-f07de9b02829
 - kusto-query-language-parser (pure‑Python ANTLR parser): https://pypi.org/project/kusto-query-language-parser/ · https://github.com/tedyeates/kusto-query-language-python-parser
