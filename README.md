@@ -248,7 +248,7 @@ see [`docs/oracle-harness.md`](https://github.com/mmaitre314/duckdb-kql/blob/mai
 Some other ways to run KQL queries locally:
 - Using Docker, [Azure Data Explorer Kusto emulator](https://learn.microsoft.com/en-us/azure/data-explorer/kusto-emulator-install)
 - In C#, [kusto-loco](https://github.com/NeilMacMullen/kusto-loco) / [BabyKusto](https://github.com/davidnx/baby-kusto-csharp)
-- In TypeScript, [@fossiq/kql-to-duckdb](https://github.com/fossiq/root/tree/main/packages/kql-to-duckdb), which also translates KQL to DuckDB SQL, and the [Fossiq](https://github.com/fossiq/root) web app built on it, which queries CSV files in the browser on DuckDB-WASM
+- In TypeScript, [@fossiq/kql-to-duckdb](https://github.com/fossiq/root/tree/main/packages/kql-to-duckdb)
 
 ## License
 
