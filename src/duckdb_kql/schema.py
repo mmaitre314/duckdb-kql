@@ -390,12 +390,12 @@ def _operator_name(op: ir.Operator) -> str:
 def _operator_columns_unchecked(
     op: ir.Operator, cols: list[str], schema: Schema | None
 ) -> list[str]:
-    from .translate import aggregate_name, output_name, target_names
+    from .translate import naming, summarize_names
 
     if isinstance(op, (ir.Where, ir.Take, ir.Sort, ir.Top)):
         return cols
     if isinstance(op, ir.Project):
-        return [output_name(e, i) for i, e in enumerate(op.expressions)]
+        return naming.project_names(op.expressions)
     if isinstance(op, ir.Extend):
         # `extend` replaces a column of the same name IN PLACE, keeping its
         # position, and appends only genuinely-new names. Returning `kept +
@@ -403,7 +403,7 @@ def _operator_columns_unchecked(
         # then inherited as the wrong column order. Confirmed on the emulator:
         # `datatable(a:int, b:int, c:int) [1,2,3] | extend a = 99` returns
         # a, b, c — not b, c, a.
-        added = [output_name(e, i) for i, e in enumerate(op.expressions)]
+        added = naming.extend_names(op.expressions, cols)
         return cols + [c for c in added if c not in cols]
     if isinstance(op, ir.ProjectAway):
         return [c for c in cols if c not in op.columns]
@@ -419,21 +419,15 @@ def _operator_columns_unchecked(
     if isinstance(op, ir.Count):
         return [op.name]
     if isinstance(op, ir.Distinct):
-        return target_names(op.expressions)
+        return naming.distinct_names(op.expressions)
     if isinstance(op, ir.Summarize):
-        from .translate import arg_max_names
-
-        out = target_names(op.by)
-        for agg in op.aggregates:
-            # `arg_max`/`arg_min` are the only aggregates producing several
-            # output columns from one call. Counting one each left every column
-            # after the first invisible to the next operator, so
-            # `summarize arg_max(stamp, *) by key | project value` was refused
-            # for a column the summarize does produce.
-            several = arg_max_names(agg, list(out), cols)
-            for name in several or [aggregate_name(agg)]:
-                out.append(disambiguate(name, out))
-        return out
+        # `arg_max`/`arg_min` are the only aggregates producing several output
+        # columns from one call. Counting one each left every column after the
+        # first invisible to the next operator, so `summarize arg_max(stamp, *)
+        # by key | project value` was refused for a column the summarize does
+        # produce.
+        keys, aggregates = summarize_names(op, cols)
+        return keys + [name for names in aggregates for name in names]
     if isinstance(op, ir.Join):
         left, right = cols, output_columns(op.right, schema)
         return join_output_columns(left, right, op.kind)

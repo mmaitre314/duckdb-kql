@@ -493,44 +493,58 @@ we must never claim a specific row order absent a terminal `sort`.
 
 ---
 
-### R12 — `summarize` and `distinct` output column naming
-*Traps: `tests/test_summarize.py`, `tests/test_distinct.py`*
+### R12 — Output column naming: `project`, `extend`, `summarize`, `distinct`
+*Traps: `tests/test_column_naming.py`, `tests/test_summarize.py`, `tests/test_distinct.py`*
 
-Auto-generated names are user-visible and must match exactly: `count()` →
-`count_`, `avg(X)` → `avg_X`, etc. Group-by keys come first, in source order, then
-aggregates. An explicit `Name =` overrides. Null group keys form their own group.
+Auto-generated names are user-visible and must match exactly — a later operator
+reads the column by them. One rule serves every operator that names a column
+(`translate/naming.py`), measured on 693 probes on 2026-10-25.
 
-An aggregate may be wrapped in a scalar expression — `round(sum(y), 2)`,
-`sum(x) / count()` — and then the name comes from the **aggregate**, not the
-wrapper: `round(sum(y), 2)` is `sum_y`. The rule is positional, following first
-arguments only, so `strcat('n=', tostring(count()))` is `Column1`. A column
+**An aggregate's name** is its prefix and its argument's name: `count()` →
+`count_`, `avg(X)` → `avg_X`, `sum(x + z)` → `sum_`, `make_list(x)` →
+`list_x`. Group-by keys come first, in source order, then aggregates. An
+explicit `Name =` overrides. Null group keys form their own group. A column
 outside an aggregate is refused, as Kusto refuses it — *including* a `by` key,
 which plain SQL would accept.
 
-**A `by` key names itself after its inner column only for an allow-listed set of
-functions**, and `distinct` — which also takes expressions, despite a documented
-syntax of a column list — follows the same rule. This is a list, not a
-principle, and every entry was measured:
+**An expression is named after its column only through an allow-list** — in
+`project`, `extend`, a `by` key, a `distinct` target, an aggregate's argument
+and a scalar wrapping an aggregate alike. This is a list, not a principle, and
+every entry was measured:
 
 | | |
 |---|---|
-| passes the name through | `tostring` `toint` `tolong` `todouble` `toreal` `tobool` `todatetime` `totimespan` `toguid` `todecimal` `tohex` `bin` `bin_at` `floor` `ceiling` `round` `startofday` `abs` `sqrt` `log` `log10` `log2` `exp` `exp2` |
-| falls back to `ColumnN` | everything else — including `tolower`, `toupper`, `isempty`, `strcat`, `sign`, `pow`, `exp10`, `startofweek`, `dayofweek` |
+| passes the name through | `tostring` `toint` `tolong` `todouble` `toreal` `tobool` `toboolean` `todatetime` `totimespan` `timespan` `toguid` `todecimal` `tohex` `todynamic` `parse_json` `split` `bin` `bin_at` `floor` `ceiling` `round` `startofday` `abs` `sqrt` `log` `log10` `log2` `exp` `exp2` `gamma` `sin` `cos` `tan` `asin` `acos` `atan` `atan2` `binary_and` `binary_or` `binary_xor` `binary_not` `binary_shift_left` `binary_shift_right` `format_datetime` |
+| adds a prefix | `strlen(s)` → `strlen_s`, `gettype(x)` → `type_x`; with no name to add, `strlen_` |
+| adds a suffix | `array_sort_asc(d)` → `d_sorted`, but `array0_sorted` for anything other than a bare column |
+| falls back to `ColumnN` | everything else — including `tolower`, `toupper`, `isempty`, `strcat`, `sign`, `pow`, `exp10`, `cot`, `degrees`, `startofweek`, `dayofweek`, and any operator |
 
-So `tostring(B)` is `B` while `tolower(B)` is `Column1`, and `startofday(T)` is
-`T` while `startofweek(T)` is `Column1`. The pass-through nests —
-`tostring(toint(C))` is `C` — but a call outside the list **breaks the chain**:
-`abs(-C)` and `tolower(tostring(B))` are both `Column1`.
+So `tostring(B)` is `B` while `tolower(B)` is `Column1`, and `round(sum(y), 2)`
+is `sum_y` while `pow(min(x), 2)` is `Column1`. The pass-through nests —
+`tostring(toint(C))` is `C`, `strlen(tostring(count()))` is `strlen_count_` —
+but a call outside the list **breaks the chain**: `abs(-C)` and
+`tolower(tostring(B))` are both `Column1`. A path is its steps joined: `d.a`
+and `d['a']` are `d_a`, `d.b[-1]` is `d_b__1`; `d[i]` is a random GUID there,
+so it is refused unnamed.
 
-The positional fallback counts **only the targets that need one**:
-`distinct C, tolower(B)` is `C, Column1`, not `C, Column2`.
+**`extend` replaces.** A generated name equal to an input column writes over
+that column, as an explicit one does: `extend abs(x)` replaces `x`. Two equal
+names in one `extend` are refused, as Kusto refuses them (SEM0034).
 
-**Known residue.** Arithmetic gets a number one higher than expected —
-`distinct -C` and `distinct C + 0` are both `Column2` on a table of any width,
-with no second column to explain it — and `strlen(B)` is named `strlen_B`, the
-aggregate convention appearing on a scalar. Neither is reproduced; both are rare
-enough that guessing a rule from two data points would be worse than the
-positional name. See the support matrix.
+**Assignment, left to right.** A positional `ColumnN` counts **only the targets
+that need one** — `project a, a+1` is `a, Column1`. Each column takes its name
+unless an earlier one has it, and then the first of `name1`, `name2`, … that is
+neither taken nor spelled out anywhere in the list: `project abs(x), sqrt(x),
+x1 = 100` is `x, x2, x1`, and `project i + 1, Column1 = 100` is `Column1,
+Column11` — the *explicit* name moves. In `extend` and `summarize` a `ColumnN`
+steps past an input column's name (`Column2` when `Column1` exists); in
+`project` it does not. A name spelled out twice is refused (SEM0034).
+
+**Known residue.** `distinct` numbers some positional names one higher, by no
+rule the measurements give — `distinct i + 1`, `distinct -C` and `distinct
+cot(x)` are `Column2` — and here they count from one; and a `gettype` naming a
+`distinct` target is positional there (`distinct gettype(s)` is `Column1`,
+though `distinct strlen(gettype(x))` is `strlen_type_x`), which is reproduced.
 
 ### R13 — `/` on two integers is **integer** division
 
@@ -1432,7 +1446,7 @@ wrong answer (principle 5).
 
 ## 9. Open items
 
-Four items are genuinely open. The rest are kept, struck through and dated, because
+Three items are genuinely open. The rest are kept, struck through and dated, because
 a settled question that vanishes gets re-opened by the next reader — and §10
 sends every contributor through §4 before they map anything.
 
@@ -1455,16 +1469,11 @@ sends every contributor through §4 before they map anything.
   before a final newline), so this is not .NET semantics either; the fix is
   probably a rewrite of `\d` `\w` `\s` and their negations in the literal
   pattern, and it wants its own measurements first.
-- **`extend` and `project` name an unnamed expression positionally and never
-  after its column.** Measured 2026-10-25: Kusto names `extend abs(x)` `x` —
-  *replacing* `x` — where this adds `Column1` beside it, so a following
-  `where x > 0` reads the wrong values. It counts only the unnamed targets
-  (`project a, a+1` is `a, Column1`; here `Column2`), and a second `x` is `x1`,
-  not `x_1`, in `summarize … by` too. `summarize pow(min(x), 2)` and
-  `degrees(max(x))` are `Column1`, not `min_x`: the aggregate name passes
-  through the same allow-list as a `by` key (`_NAME_PRESERVING`), not every
-  wrapper. Untouched so far because it changes the output columns of every
-  operator that names one.
+- ~~`extend` and `project` name an unnamed expression positionally and never
+  after its column.~~ **Settled 2026-10-25:** `extend abs(x)` is named `x` and
+  replaces it, and the positional, renaming and aggregate-wrapper rules were
+  wrong too. One rule now serves every operator — **R12**, pinned by
+  `tests/test_column_naming.py`.
 - ~~Null-ordering defaults for `sort` (R6).~~ **Settled 2026-08-05:** KQL treats
   null as the **smallest** value — `sort by x asc` returns null first, `desc`
   returns it last. The emitter had this inverted while its comments asserted the

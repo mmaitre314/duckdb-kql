@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING, Any
 from .. import ir
 from .._state import State
 from ..errors import KqlUnsupportedError
-from . import sharing
+from . import naming, sharing
 from .functions import (
     _TODATETIME,
     _TOTIMESPAN,
@@ -533,45 +533,6 @@ def print_column_name(named: ir.NamedExpr, position: int) -> str:
     return f"print_{position}"
 
 
-def output_name(named: ir.NamedExpr, position: int) -> str:
-    """Derive a column's output name.
-
-    An explicit ``name =`` wins; a bare column keeps its own name; anything else
-    gets a positional fallback (R12 covers the ``summarize`` naming rules, which
-    arrive with that operator).
-    """
-    if named.name:
-        return named.name
-    if isinstance(named.expr, ir.ColumnRef):
-        return named.expr.name
-    _refuse_scalar_name(named.expr)
-    # KQL numbers unnamed columns from ONE, per operator: `project x+1, x+2`
-    # yields Column1, Column2. Zero-based would be off by one on every one.
-    return f"Column{position + 1}"
-
-
-def _refuse_scalar_name(expr: ir.Expr) -> None:
-    """An unnamed column whose name Kusto would take from a `toscalar`.
-
-    Measured: `extend toscalar(…)`, `distinct toscalar(…)`, `by toscalar(…)`,
-    `extend tostring(toscalar(…))` and `max(toscalar(…))` are named
-    `__scalar_` and a fresh GUID, different on every run — no name here could
-    match. The name reaches through the same calls `_argument_name` follows,
-    and stops where they stop: `toscalar(…) + 1` is `Column1` and
-    `sum(i * toscalar(…))` is `sum_`, both measured, and neither is refused.
-    """
-    while isinstance(expr, ir.FunctionCall) and expr.args:
-        if expr.name.lower() not in _NAME_PRESERVING:
-            return
-        expr = expr.args[0]
-    if isinstance(expr, ir.ToScalar):
-        raise KqlUnsupportedError(
-            "toscalar",
-            hint="name this column (`x = toscalar(…)`): Kusto names it `__scalar_` "
-            "and a random GUID, so no name given here could match",
-        )
-
-
 # ---------------------------------------------------------------------------
 # Sources
 # ---------------------------------------------------------------------------
@@ -864,11 +825,12 @@ def render_operator(op: ir.Operator, prev: str, cols: list[str] | None = None) -
         return f"SELECT {kept} FROM {scope.source} WHERE {predicate}"
 
     if isinstance(op, ir.Project):
+        names = naming.project_names(op.expressions)
         scope = sharing.bind_repeats([e.expr for e in op.expressions], prev, cols)
         try:
             projected = [
-                f"{render_expr(e.expr)} AS {quote_ident(output_name(e, i))}"
-                for i, e in enumerate(op.expressions)
+                f"{render_expr(e.expr)} AS {quote_ident(name)}"
+                for e, name in zip(op.expressions, names, strict=True)
             ]
         finally:
             sharing.release()
@@ -879,8 +841,9 @@ def render_operator(op: ir.Operator, prev: str, cols: list[str] | None = None) -
         # `extend` REPLACES a column whose name already exists, **in its original
         # position**, and appends otherwise. A plain `SELECT *, expr AS c` is
         # silently wrong on a collision — DuckDB emits two columns named `c`
-        # without complaining.
-        names = [output_name(e, i) for i, e in enumerate(op.expressions)]
+        # without complaining. A *generated* name replaces too: `extend abs(x)`
+        # is named `x` (naming.py).
+        names = naming.extend_names(op.expressions, cols)
         scope = sharing.bind_repeats(
             [e.expr for e in op.expressions],
             prev,
@@ -924,7 +887,7 @@ def render_operator(op: ir.Operator, prev: str, cols: list[str] | None = None) -
         targets = ", ".join(
             f"{render_expr(e.expr)} AS {quote_ident(name)}"
             for e, name in zip(
-                op.expressions, target_names(op.expressions), strict=True
+                op.expressions, naming.distinct_names(op.expressions), strict=True
             )
         )
         return f"SELECT DISTINCT {targets} FROM {prev}"
@@ -1719,152 +1682,35 @@ def _source_cols(query: ir.Query, schema: Schema | None) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
-#: Functions that pass their first argument's column name through to the output
-#: name of a `summarize` key or a `distinct` target. Measured one by one on the
-#: emulator, because it is an **allow-list and not a rule**: `tostring(B)` is
-#: named `B` but `tolower(B)` is `Column1`; `startofday(T)` is `T` but
-#: `startofweek(T)` is `Column1`; `log2` and `exp2` pass through, `pow` and
-#: `exp10` do not. Anything absent falls back to the positional name, which is
-#: also what an unrecognised function should do.
-_NAME_PRESERVING = frozenset({
-    # conversions
-    "tostring", "toint", "tolong", "todouble", "toreal", "tobool", "todatetime",
-    "totimespan", "toguid", "todecimal", "tohex",
-    # bucketing and rounding
-    "bin", "bin_at", "floor", "ceiling", "round", "startofday",
-    # numeric
-    "abs", "sqrt", "log", "log10", "log2", "exp", "exp2",
-    # trigonometry — but not `cot`, `degrees` or `radians`
-    "sin", "cos", "tan", "asin", "acos", "atan", "atan2",
-    # datetime — but not `trim`, `trim_start` or `trim_end` on the string side
-    "format_datetime",
-})
+def summarize_names(
+    op: ir.Summarize, cols: list[str] | None
+) -> tuple[list[str], list[list[str]]]:
+    """`summarize`'s output names: one per key, and one or more per aggregate.
 
+    One namespace, keys first — measured, `summarize sum(x) by sum_x = i` is
+    `sum_x, sum_x1` with the *key* keeping the name — and the same rule as
+    every other operator (:class:`naming.Namer`). An aggregate wrapped in a
+    scalar takes its name through the same allow-list a key does:
+    `round(sum(y), 2)` is `sum_y` and `strlen(tostring(count()))`
+    `strlen_count_`, but `pow(min(x), 2)` is `Column1`. A `ColumnN` steps past
+    an input column of that name, as in `extend`.
 
-def _argument_name(expr: ir.Expr) -> str | None:
-    """The column name an expression contributes to an auto-generated name.
-
-    A bare column gives its own name. A call listed in `_NAME_PRESERVING` gives
-    its first argument's name, and nests — `tostring(toint(C))` is `C`, and so
-    is `bin(tolong(C), 2)`. A call outside the list contributes nothing *and
-    breaks the chain*: `abs(-C)` and `tolower(tostring(B))` are both `Column1`.
-
-    This used to treat **any** single-argument call as name-preserving, which
-    named `summarize ... by tolower(x)` after `x` where Kusto names it
-    `Column1` — a wrong column name, silently, on one of the most-used
-    operators.
+    `arg_max`/`arg_min` are the one aggregate producing several columns, and
+    their names come from :func:`arg_max_names`, renamed past any taken.
     """
-    if isinstance(expr, ir.ColumnRef):
-        return expr.name
-    _refuse_scalar_name(expr)
-    if isinstance(expr, ir.FunctionCall) and expr.args:
-        if expr.name.lower() in _NAME_PRESERVING:
-            return _argument_name(expr.args[0])
-        return None
-    return None
-
-
-def _wrapped_aggregate(expr: ir.Expr) -> ir.FunctionCall | None:
-    """The aggregate a scalar call wraps, following **first arguments only**.
-
-    `round(sum(y), 2)` -> `sum(y)`; `round(round(sum(y),1),2)` -> `sum(y)`;
-    `strcat('n=', tostring(count()))` -> ``None``, because the first argument is
-    a literal and the name falls back to `Column1`. Every one of those is what
-    the emulator returns — the rule is positional, not a search.
-    """
-    while isinstance(expr, ir.FunctionCall):
-        if lookup_aggregate(expr.name) is not None:
-            return expr
-        if not expr.args:
-            return None
-        expr = expr.args[0]
-    return None
-
-
-def aggregate_name(named: ir.NamedExpr) -> str:
-    """KQL's auto-generated name for one summarize aggregate (R12).
-
-    Every rule here was read off the emulator, because they are not guessable:
-
-        count()             -> count_          (no argument in the name)
-        countif(x > 1)      -> countif_        (predicate contributes nothing)
-        sum(x)              -> sum_x
-        sum(x + z)          -> sum_            (not a bare column)
-        make_list(x)        -> list_x          ('make_' is dropped)
-        make_set(y)         -> set_y
-        percentile(x, 50)   -> percentile_x_50
-        take_any(x)         -> x               (keeps the column's own name)
-
-    Output names are user-visible, so a near-miss here is a wrong answer.
-    """
-    if named.name:
-        return named.name
-
-    expr = named.expr
-    if not isinstance(expr, ir.FunctionCall):
-        # A binary or unary expression over aggregates is `Column1`, whatever it
-        # contains: `sum(x) + max(x)`, `count() * 2` and `-sum(x)` all measure
-        # as `Column1` on the emulator.
-        return "Column1"
-
-    spec = lookup_aggregate(expr.name)
-    if spec is None:
-        # A scalar function wrapping an aggregate takes the *aggregate's* name,
-        # not the function's: `round(sum(y), 2)` is `sum_y` and
-        # `tostring(count())` is `count_`. Measured, and not the obvious guess.
-        inner = _wrapped_aggregate(expr)
-        if inner is not None:
-            return aggregate_name(ir.NamedExpr(inner))
-        return "Column1"
-
-    if spec.name_is_argument:
-        if not expr.args:
-            return spec.prefix
-        return _argument_name(expr.args[0]) or spec.prefix
-
-    if spec.name_ignores_args or not expr.args:
-        return f"{spec.prefix}_"
-
-    arg = _argument_name(expr.args[0]) or ""
-    name = f"{spec.prefix}_{arg}"
-
-    # percentile carries the percentile itself: percentile_x_50.
-    if spec.name == "percentile" and len(expr.args) > 1:
-        p = expr.args[1]
-        if isinstance(p, ir.Literal) and isinstance(p.value, (int, float)):
-            suffix = int(p.value) if float(p.value).is_integer() else p.value
-            name = f"{name}_{suffix}"
-    return name
-
-
-def target_names(targets: Sequence[ir.NamedExpr]) -> list[str]:
-    """Output names for a ``summarize by`` key list or a ``distinct`` list.
-
-    One rule for both — measured, they agree on every function probed.
-
-    The positional fallback counts **only the targets that need one**:
-    `distinct C, tolower(B)` is `C, Column1`, not `C, Column2`. Numbering by
-    absolute position, which is what this did, shifted every fallback name
-    sitting after a resolvable one.
-    """
-    out: list[str] = []
-    unnamed = 0
-    for target in targets:
-        name = target.name or _argument_name(target.expr)
-        if name is None:
-            unnamed += 1
-            name = f"Column{unnamed}"
-        out.append(name)
-    return out
-
-
-def group_key_name(named: ir.NamedExpr, position: int) -> str:
-    """Name for one ``by`` key, ignoring its neighbours.
-
-    Prefer :func:`target_names`, which gets the positional fallback right; this
-    remains for the single-key case, where the two agree.
-    """
-    return target_names([named])[0] if not named.name else named.name
+    namer = naming.Namer(
+        naming.declared([*op.by, *(a for a in op.aggregates if a.name)], "summarize"),
+        skip=cols or (),
+    )
+    keys = [namer.name(key) for key in op.by]
+    aggregates: list[list[str]] = []
+    for agg in op.aggregates:
+        several = arg_max_names(agg, keys, cols)
+        if several is not None:
+            aggregates.append([namer.take(name) for name in several])
+        else:
+            aggregates.append([namer.name(agg)])
+    return keys, aggregates
 
 
 def _render_aggregate_call(expr: ir.FunctionCall) -> str:
@@ -2143,7 +1989,7 @@ def render_summarize(op: ir.Summarize, prev: str, cols: list[str] | None = None)
 
     select: list[str] = []
     group: list[str] = []
-    key_names = target_names(op.by)
+    key_names, aggregate_names = summarize_names(op, cols)
     for i, key in enumerate(op.by):
         # The aggregate *list* has been guarded since `sum(sum(x))`; the `by`
         # keys went through a bare `render_expr` and reached DuckDB's binder,
@@ -2166,22 +2012,15 @@ def render_summarize(op: ir.Summarize, prev: str, cols: list[str] | None = None)
     # Two aggregates can generate the same name (`summarize make_set(y),
     # make_set(y)`). KQL suffixes the later one -- set_y, set_y1 -- with no
     # separator; DuckDB's own de-duplication would produce set_y_1.
-    from ..schema import disambiguate
-
-    taken = list(target_names(op.by))
-    for agg in op.aggregates:
+    for agg, names in zip(op.aggregates, aggregate_names, strict=True):
         # `arg_max` is the one aggregate that produces *several* output columns
         # from one call, so it yields a list rather than a single item.
         argmax = _render_arg_max(agg, key_names, cols)
         if argmax is not None:
-            for name, sql in argmax:
-                name = disambiguate(name, taken)
-                taken.append(name)
+            for name, (_, sql) in zip(names, argmax, strict=True):
                 select.append(f"{sql} AS {quote_ident(name)}")
             continue
-        name = disambiguate(aggregate_name(agg), taken)
-        taken.append(name)
-        select.append(f"{render_aggregate(agg)} AS {quote_ident(name)}")
+        select.append(f"{render_aggregate(agg)} AS {quote_ident(names[0])}")
 
     sql = f"SELECT {', '.join(select)} FROM {prev}"
     if group:
