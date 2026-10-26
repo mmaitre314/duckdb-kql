@@ -949,13 +949,19 @@ def _lower_operator(node: Any) -> ir.Operator | list[ir.Operator] | None:
     if kind == "SummarizeOperator":
         aggregates: list[ir.NamedExpr] = []
         by: list[ir.NamedExpr] = []
+        parameters: list[Any] = []
         for k in kids:
             if _cls(k) == "SummarizeOperatorByClause":
                 by.extend(_lower_named(c) for c in _rule_children(k))
-            elif _cls(k) == "SummarizeOperatorParameters":
-                raise _unsupported(k, "summarize hint")
+            elif _cls(k) == "StrictQueryOperatorParameter":
+                # This used to test for a class the grammar never produces, so a
+                # hint fell through and was lowered as an *aggregate* — refused
+                # as `expression:StrictQueryOperatorParameter`.
+                parameters.append(k)
             else:
                 aggregates.append(_lower_named(k))
+        for parameter in parameters:
+            _check_summarize_parameter(parameter, by)
         return ir.Summarize(tuple(aggregates), tuple(by))
 
     if kind == "SortOperator":
@@ -2023,6 +2029,67 @@ def _lower_join(node: Any, kids: list[Any]) -> ir.Join:
         raise _unsupported(node, "join", )
 
     return ir.Join(_lower_join_right(right_node), tuple(keys), kind)
+
+
+def _check_summarize_parameter(node: Any, by: list[ir.NamedExpr]) -> None:
+    """Accept a `summarize` shuffle hint as the no-op it is here, or refuse it.
+
+    `hint.strategy = shuffle`, `hint.shufflekey` and `hint.num_partitions`
+    choose how a *cluster* partitions the aggregation; Microsoft documents
+    shuffle as preserving the result, and DuckDB is one node, so ignoring them
+    is correct rather than a shortcut. Measured on the emulator, 2026-10-26:
+
+    * `hint.strategy` takes `shuffle` alone — any case, quoted or not — and
+      refuses every other value, `broadcast` included (SEM0249);
+    * `hint.shufflekey` takes a bare column that a group key reads, as `by k`
+      and `by kk = k` do, and refuses a string (SEM0259), an alias, a column
+      no key reads, and a `summarize` with no `by`. Kusto also takes
+      `by tostring(k)`, but not `by bin(k, 1)`, a rule two points cannot
+      give; only a key that *is* the column is accepted here;
+    * `hint.num_partitions` Kusto takes with any value at all, `'a'` and `-1`
+      included. Only a positive integer is accepted here.
+
+    Kusto also ignores every other name the grammar allows — `kind = foo`,
+    `isfuzzy`, `hint.materialized` — on a `summarize`. Those are refused, so
+    a typo or a parameter meant for another operator is not taken silently.
+    """
+    name, _, value = node.getText().partition("=")
+    key = name.strip().lower()
+    value = value.strip()
+
+    def refuse(construct: str, hint: str) -> KqlUnsupportedError:
+        return KqlUnsupportedError(construct, span=_span(node), hint=hint)
+
+    if key == "hint.strategy":
+        spelling = _string_value(value) if value[:1] in "'\"@" else value
+        if spelling.strip().lower() != "shuffle":
+            raise refuse(
+                f"summarize hint.strategy:{value}",
+                "a summarize takes only hint.strategy = shuffle; Kusto refuses "
+                "any other strategy (SEM0249)",
+            )
+    elif key == "hint.shufflekey":
+        keys = {b.expr.name for b in by if isinstance(b.expr, ir.ColumnRef)}
+        if value not in keys:
+            raise refuse(
+                f"summarize hint.shufflekey:{value}",
+                "the shuffle key must be a column that is itself a group key "
+                "(`by k`, `by kk = k`); Kusto refuses a string, an alias, or a "
+                "column no key reads",
+            )
+    elif key == "hint.num_partitions":
+        if not value.isdigit() or int(value) < 1:
+            raise refuse(
+                f"summarize hint.num_partitions:{value}",
+                "the partition count must be a positive integer",
+            )
+    else:
+        raise refuse(
+            f"summarize parameter:{name.strip()}",
+            "a summarize takes hint.strategy = shuffle, hint.shufflekey and "
+            "hint.num_partitions; Kusto ignores the rest there, so a parameter "
+            "meant for another operator would pass unnoticed",
+        )
 
 
 #: The only two kinds `lookup` has. Measured: the emulator rejects every other

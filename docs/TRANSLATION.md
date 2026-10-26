@@ -1408,6 +1408,16 @@ halves of that, so branches are emitted as-is and the final projection names the
 unified column set in KQL's order. `kind=inner` restricts to common columns.
 `union` is **not** deduplicating → `UNION ALL`. Full rules in R15.
 
+**Execution hints are no-ops, and only the ones Kusto takes.** A hint chooses
+how a *cluster* runs an operator, not what it answers, and DuckDB is one node,
+so honouring one is ignoring it. `join` ignores every `hint.*`; `lookup` takes
+`hint.remote` and `hint.strategy` only. `summarize` takes `hint.strategy =
+shuffle` — any case, quoted or not, but no other strategy, which Kusto refuses
+(SEM0249) — `hint.shufflekey` naming a column that is itself a group key, and a
+positive `hint.num_partitions`. Every other parameter on a `summarize` is
+refused, though Kusto ignores them there, so a typo is not taken silently.
+Measured 2026-10-26; *trap: `tests/test_summarize_hints.py`*.
+
 ## 6. Scalar function registry
 
 Function mappings live in a **reviewable data file** (TSV/YAML), not in code — the
