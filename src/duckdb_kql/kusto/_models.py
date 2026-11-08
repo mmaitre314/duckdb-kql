@@ -74,6 +74,20 @@ COMPLETION_COLUMNS = (
 )
 
 
+#: Everything after the ids in a successful query's completion row, as the
+#: service sends it — `S_OK (0)`, and the payload as compact JSON. Measured on
+#: the emulator's v2 frames; the client had `S_OK`, the server a spaced payload.
+COMPLETION_SUCCESS = (
+    4,
+    "Info",
+    0,
+    "S_OK (0)",
+    4,
+    "QueryInfo",
+    '{"Count":1,"Text":"Query completed successfully"}',
+)
+
+
 def wire_columns(columns: tuple[tuple[str, str], ...]) -> list[dict[str, str]]:
     """A table's ``Columns`` as the wire spells them — a fresh list each call."""
     return [{"ColumnName": name, "ColumnType": kind} for name, kind in columns]

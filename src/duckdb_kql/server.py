@@ -195,7 +195,12 @@ def v2_response(result: Result, client_request_id: str) -> list[dict[str, Any]]:
     `QueryCompletionInformation` — and a response missing the bookends is
     reported to the user as a failed query rather than as an empty one.
     """
-    from .kusto._models import COMPLETION_COLUMNS, QUERY_PROPERTIES_COLUMNS, wire_columns
+    from .kusto._models import (
+        COMPLETION_COLUMNS,
+        COMPLETION_SUCCESS,
+        QUERY_PROPERTIES_COLUMNS,
+        wire_columns,
+    )
 
     now = _iso(dt.datetime.now(dt.UTC))
     activity = str(uuid.uuid4())
@@ -240,13 +245,7 @@ def v2_response(result: Result, client_request_id: str) -> list[dict[str, Any]]:
                     activity,
                     activity,
                     activity,
-                    4,
-                    "Info",
-                    0,
-                    "S_OK (0)",
-                    4,
-                    "QueryInfo",
-                    json.dumps({"Count": 1, "Text": "Query completed successfully"}),
+                    *COMPLETION_SUCCESS,
                 ]
             ],
         },

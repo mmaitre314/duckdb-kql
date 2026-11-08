@@ -36,6 +36,7 @@ from ..stored_functions import FunctionArg
 from ..translate import quote_ident
 from ._models import (
     COMPLETION_COLUMNS,
+    COMPLETION_SUCCESS,
     QUERY_PROPERTIES_COLUMNS,
     WellKnownDataSet,
     kusto_type,
@@ -693,13 +694,7 @@ class KustoClient:
                     str(uuid.uuid4()),
                     str(uuid.uuid4()),
                     str(uuid.uuid4()),
-                    4,
-                    "Info",
-                    0,
-                    "S_OK",
-                    4,
-                    "QueryInfo",
-                    '{"Count":1,"Text":"Query completed successfully"}',
+                    *COMPLETION_SUCCESS,
                 ]
             ],
         }
