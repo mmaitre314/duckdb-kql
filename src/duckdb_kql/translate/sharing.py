@@ -32,9 +32,9 @@ at depth 14 took 4.3s), and it is flat at depth 5 where the others already lose.
 **What may not be bound.** Two guards, and neither is theoretical:
 
 * **Volatility.** Binding collapses N evaluations into one, which is precisely
-  the difference `rand()` shows. No volatile KQL function has a DuckDB mapping
-  today — that is why this is safe at all right now — and
-  ``tests/test_let_sharing.py`` fails the day one gains one.
+  the difference `rand()` shows. `new_guid()` is the one volatile KQL function
+  with a DuckDB mapping, and `_bindable` refuses it; ``tests/test_let_sharing.py``
+  fails the day another gains one.
 * **Conditional evaluation.** A binding becomes a column, and a column is
   computed for every row whether or not the `iff` that reads it takes that
   branch. Hoisting an expression out of an untaken branch can turn an answer
@@ -71,9 +71,11 @@ from .. import ir
 from .._state import State
 
 #: KQL functions whose value may differ between two evaluations in one row.
-#: Binding one would turn N draws into one. None of these has a DuckDB mapping
-#: today; the list is here so that adding one is a decision rather than an
-#: accident, and `tests/test_let_sharing.py` notices if it stops being true.
+#: Binding one would turn N draws into one. Only `new_guid` has a DuckDB
+#: mapping; the list is here so that adding another is a decision rather than
+#: an accident, and `tests/test_let_sharing.py` notices if one gains a mapping.
+#: The translator also reads it to evaluate a `let` or `toscalar` body that
+#: calls one at every read, as Kusto does (`translate._is_volatile_query`).
 #:
 #: `now()` and `ago()` are deliberately absent: Kusto fixes `now()` for the
 #: query and DuckDB fixes it for the transaction, so two evaluations already
@@ -243,7 +245,7 @@ def _rebuildable(node: object, guard: Path) -> bool:
         if owner is None:
             return False
         for condition in _conditions_before(owner, index):
-            if any(child is node for child in _descend(condition)):
+            if any(child is node for child in descend(condition)):
                 return False
     return True
 
@@ -355,7 +357,7 @@ def _bindable(node: object) -> bool:
         return False
     if isinstance(node, (ir.Literal, ir.ColumnRef, ir.Parameter, ir.Wildcard)):
         return False  # one token, or `*` — a stage could only add characters
-    for child in _descend(node):
+    for child in descend(node):
         if isinstance(child, ir.RenderedAggregate):
             # Already-rendered aggregate SQL. An aggregate inside the derived
             # table would be computing over the wrong rows, if it bound at all.
@@ -365,7 +367,7 @@ def _bindable(node: object) -> bool:
     return True
 
 
-def _descend(node: object) -> Iterable[object]:
+def descend(node: object) -> Iterable[object]:
     """*node* and every dataclass below it, by field rather than by isinstance.
 
     Walking generically is the point: a node type added later is descended into
@@ -390,7 +392,7 @@ def _descend(node: object) -> Iterable[object]:
 
 def _column_names(node: object) -> set[str]:
     """Every column name read below *node*."""
-    return {n.name for n in _descend(node) if isinstance(n, ir.ColumnRef)}
+    return {n.name for n in descend(node) if isinstance(n, ir.ColumnRef)}
 
 
 def _reach(exprs: Sequence[object]) -> tuple[dict[int, int], dict[int, Path]]:

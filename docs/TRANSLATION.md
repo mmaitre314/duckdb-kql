@@ -464,11 +464,22 @@ reads as a table. `let a` and `let A` are two bindings, as in Kusto.
 ---
 
 ### R10 — Nondeterministic operators must be asserted as sets
-*Trap: `tests/test_behavior.py` (`NONDETERMINISTIC_BY_DATA`)*
+*Traps: `tests/test_behavior.py` (`NONDETERMINISTIC_BY_DATA`), `tests/test_new_guid.py`*
 
 `take`/`limit`, `sample`, and `top … by` tie-breaking are **not deterministic** in
 KQL. The translation is still `LIMIT`, but tests must compare **unordered**, and
 we must never claim a specific row order absent a terminal `sort`.
+
+**A volatile function is evaluated where Kusto evaluates it.** `new_guid()` is
+DuckDB's `uuid()`, a fresh value per call, and measured 2026-11-08: two calls in
+one row differ, a scalar `let` holding it read twice is two values (R22), and a
+column holding one is stable downstream. Caching is where the engines part. A
+tabular `let` is evaluated at every read and `materialize()` once — over three
+rows `T | union T` is six GUIDs, or three materialized — where DuckDB computes a
+CTE read twice only once; so a `let` whose body is volatile, or reads one that
+is, is `NOT MATERIALIZED`, and `MATERIALIZED` when written so. Every other body
+keeps its SQL. `sharing.VOLATILE` is the list, and nothing on it is ever bound
+to a shared column.
 
 ---
 
@@ -1348,7 +1359,10 @@ R22 substitutes a scalar `let` at every use, so a `toscalar` bound by one would
 be evaluated once per use if it were rendered inline. It is a `MATERIALIZED`
 CTE instead, with exactly one row: in the outermost scope that binds every
 table its body reads, so a body read from a `let`'s body and from the query is
-still one evaluation, and the same body text there is the same CTE. The CTE
+still one evaluation, and the same body text there is the same CTE — unless
+the body is volatile (R10): `toscalar(print new_guid()) == toscalar(print
+new_guid())` is false, two evaluations, while one `toscalar` read twice through
+a `let` is one, so such a body is keyed by its node instead of its text. The CTE
 also has no outer row: a name the body cannot resolve is SEM0100 in Kusto, and
 inline DuckDB would resolve it against the row around the subquery and
 correlate, silently. A scalar function's parameter bound to a row value reaching

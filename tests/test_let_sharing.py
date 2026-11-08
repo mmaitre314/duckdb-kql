@@ -103,24 +103,30 @@ def test_a_let_is_substituted_not_shared() -> None:
     scalar `let` is a macro, not one evaluation, so for a nondeterministic body
     the duplication *is* the semantics.
 
-    (`new_guid()` looks like a counter-example and is not: two separate calls to
-    it compare equal within a row, so it says nothing about `let`. That is the
-    probe that nearly answered this question backwards.)
+    `new_guid()` is the same, and is the first volatile function with a
+    mapping: ``let g = new_guid(); print a = g, b = g`` is two GUIDs, measured
+    2026-11-08. This docstring used to say two calls to it compare *equal*
+    within a row; re-measured, ``new_guid() == new_guid()`` is false, folded
+    and over rows alike. Two references must still emit two calls, and do,
+    because `sharing._bindable` refuses anything in `sharing.VOLATILE`.
 
-    Nothing in this test needs `rand` to work, because it does not: no volatile
-    KQL function has a DuckDB mapping today, which is the only reason the
-    emitter may currently share a repeated sub-expression at all. This test
-    fails the day one is added, so the sharing rule gets revisited rather than
-    silently turning three draws into one.
+    The rest have no mapping, and this fails the day one gains one, so the
+    sharing rule is revisited rather than silently turning three draws into
+    one.
     """
     from duckdb_kql.translate.functions import lookup
 
-    unmapped = [n for n in ("rand", "new_guid", "ingestion_time", "current_principal")
-                if lookup(n) is None]
-    assert unmapped == ["rand", "new_guid", "ingestion_time", "current_principal"], (
+    unmapped = [n for n in ("rand", "ingestion_time", "current_principal") if lookup(n) is None]
+    assert unmapped == ["rand", "ingestion_time", "current_principal"], (
         "a volatile function gained a mapping. Two references to a `let` that "
         "calls it must still emit two calls — see this test's docstring"
     )
+
+    sql = str(duckdb_kql.to_sql("let g = new_guid(); print a = g, b = g"))
+    assert sql.count("uuid()") == 2
+    with duckdb_kql.connect() as con:
+        ((a, b),) = duckdb_kql.kql(con, "let g = new_guid(); print a = g, b = g").fetchall()
+    assert a != b
 
     # `now()` is the one volatile-*looking* mapping, and it is not volatile in
     # the sense that matters: Kusto fixes it for the query, DuckDB for the

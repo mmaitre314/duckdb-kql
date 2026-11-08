@@ -2565,7 +2565,9 @@ def _resolve_in_subqueries(query: ir.Query, tabular_names: set[str]) -> ir.Query
                 dataclasses.replace(e, expr=fix(e.expr)) for e in source.expressions
             ),
         )
-    return ir.Query(source, ops, lets, list(query.parameters))
+    return dataclasses.replace(
+        query, source=source, operators=ops, lets=lets, parameters=list(query.parameters)
+    )
 
 
 def _find_all(node: Any, class_name: str) -> list[Any]:
@@ -3095,10 +3097,11 @@ def _substitute_query(query: ir.Query, scalars: Scalars) -> ir.Query:
 
         source = map_queries(source, lambda q: _substitute_query(q, scalars))
         source = map_expressions(source, lambda e: _substitute(e, scalars))
-    return ir.Query(
-        source,
-        [_substitute_operator(op, scalars) for op in query.operators],
-        list(query.lets),
+    return dataclasses.replace(
+        query,
+        source=source,
+        operators=[_substitute_operator(op, scalars) for op in query.operators],
+        lets=list(query.lets),
     )
 
 
@@ -3215,9 +3218,13 @@ def _lower_lets(
             _GRAPH_LETS[name] = (parts[0], parts[1:])
             continue
         if kind == "LetMaterializeDeclaration" or _is_tabular_value(value, scalars):
-            # `materialize()` is a caching hint for a distributed engine; it
-            # cannot change the result, so unwrapping it is correct.
+            # `materialize()` caches the body, and for a deterministic body that
+            # cannot change the result. For one calling `new_guid()` it does —
+            # measured, `T | union T` is six distinct GUIDs over three rows, and
+            # three when `T` is materialized — so the IR keeps it.
             bound = _substitute_query(_lower_query_node(value), _pipeline_scope(scalars))
+            if kind == "LetMaterializeDeclaration":
+                bound = dataclasses.replace(bound, materialized=True)
             # A stored function called in the value is a binding of its own,
             # placed just before this one: it sees the `let`s this one sees.
             tabulars.extend(_drain_pending())
@@ -3711,8 +3718,9 @@ def _qualify_query(
         _qualify_operator(op, database, scope, clusters) for op in query.operators
     ]
 
-    out = ir.Query(source, operators, lets, list(query.parameters))
-    return out
+    return dataclasses.replace(
+        query, source=source, operators=operators, lets=lets, parameters=list(query.parameters)
+    )
 
 
 def _qualify_table(

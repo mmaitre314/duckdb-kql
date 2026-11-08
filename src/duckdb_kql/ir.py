@@ -681,6 +681,10 @@ class Query(Node):
     #: ``declare query_parameters`` declarations, in declaration order. Values
     #: are supplied at execution time, not here.
     parameters: list[ParameterDeclaration] = field(default_factory=list)
+    #: A `let` body written `materialize(…)`: evaluated once however often it is
+    #: read. It only matters for a body that calls a volatile function — every
+    #: other body answers the same either way — so it is otherwise ignored.
+    materialized: bool = False
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
         ops = " | ".join(type(o).__name__ for o in self.operators)

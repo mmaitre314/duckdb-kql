@@ -156,6 +156,7 @@ SPECIFIC_GOTCHAS: dict[str, str] = {
     "base64_decodestring": "Azure Monitor's spelling of `base64_decode_tostring`, and shares its UTF-8 divergence.",
     "base64_encodestring": "Azure Monitor's spelling of `base64_encode_tostring`.",
     "rand": "Nondeterministic, so results cannot be compared against a frozen expectation (R10).",
+    "new_guid": "A fresh GUID per **call**: two calls in one row differ, and a `let` holding it read twice is two GUIDs. A tabular `let` calling it is evaluated at every read, and once if `materialize()`d, as in Kusto (R10).",
     "now": "Evaluated **once per query**, not once per row, so repeated references agree.",
     "ago": "`ago(x)` is `now() - x`, with `now()` evaluated once per query.",
     "dayofweek": "Returns a **timespan** (days since Sunday), not an integer.",

@@ -1045,6 +1045,9 @@ class _CteNames:
     #: Per scope: a hoisted `toscalar` body's SQL -> its CTE, so that the same
     #: body is evaluated once wherever it is read.
     hoisted: list[dict[str, str]] = dataclasses.field(default_factory=list)
+    #: The CTEs of `let`s evaluated afresh at every read: a body calling a
+    #: volatile function, or reading such a `let`, and not `materialize`d.
+    volatile: set[str] = dataclasses.field(default_factory=set)
     #: Per scope: the schema its pipeline renders with, `let`s included — what
     #: a nested query read from an expression (`toscalar`, `in (T | …)`) needs
     #: for a `join` or `lookup` of its own.
@@ -1090,14 +1093,43 @@ def render_toscalar(node: ir.ToScalar) -> str:
     assert _NAMES is not None
     target = _toscalar_scope(node.query)
     body = str(to_sql(node.query, _nested_schema()))
-    cte = _NAMES.hoisted[target].get(body)
+    # Two copies of a *volatile* body do not agree: measured, `toscalar(print
+    # new_guid()) == toscalar(print new_guid())` is false. One copy read twice
+    # through a `let` does — `let x = toscalar(print new_guid()); print x == x`
+    # is true — and a `let` puts the same node at every read, so such a body
+    # is keyed by the node rather than by its text.
+    key = f"{body}\0{id(node)}" if _is_volatile_query(node.query) else body
+    cte = _NAMES.hoisted[target].get(key)
     if cte is None:
         cte = _NAMES.binding_name("scalar")
-        _NAMES.hoisted[target][body] = cte
+        _NAMES.hoisted[target][key] = cte
         _NAMES.withs[target].append(
             f"{quote_ident(cte)} AS MATERIALIZED ({_first_value(body)})"
         )
     return f'(SELECT "v" FROM {quote_ident(cte)})'
+
+
+def _is_volatile_query(query: ir.Query) -> bool:
+    """Whether *query* may answer differently each time it is evaluated.
+
+    It calls a volatile function (`sharing.VOLATILE`), or reads a `let` that is
+    evaluated afresh at every read. A `materialize`d one is evaluated once, so
+    reading it is as stable as reading a table — measured, a `let` over a
+    materialized `new_guid()` body, read twice, is the same three GUIDs.
+    """
+    names = _NAMES_STATE.get()
+    afresh = names.volatile if names is not None else set()
+    for node in sharing.descend(query):
+        if isinstance(node, ir.FunctionCall) and node.name.lower() in sharing.VOLATILE:
+            return True
+        if (
+            isinstance(node, ir.TableRef)
+            and node.database is None
+            and node.cluster is None
+            and _let_cte(node.name) in afresh
+        ):
+            return True
+    return False
 
 
 def _reads_toscalar(node: object) -> bool:
@@ -1298,7 +1330,17 @@ def _render_scoped(
         if not isinstance(bound, ir.Query):
             continue
         cte = _NAMES.binding_name(name)
-        let_ctes.append(f"{quote_ident(cte)} AS ({to_sql(bound, schema)})")
+        # A volatile body is the one place caching shows: Kusto evaluates a
+        # `let` at every read, and `materialize()` once — measured, `T | union
+        # T` over three rows of `new_guid()` is six GUIDs, and three
+        # materialized. DuckDB caches a CTE read twice, so each is spelled out;
+        # every other body keeps the SQL it had.
+        how = ""
+        if _is_volatile_query(bound):
+            how = "MATERIALIZED " if bound.materialized else "NOT MATERIALIZED "
+            if not bound.materialized:
+                _NAMES.volatile.add(cte)
+        let_ctes.append(f"{quote_ident(cte)} AS {how}({to_sql(bound, schema)})")
         _NAMES.labels[-1][name] = _alias_label(bound)
         scope[name] = cte
         schema = _schema_with_let(schema, name, bound)

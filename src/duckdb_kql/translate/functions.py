@@ -271,6 +271,11 @@ SCALAR_FUNCTIONS: dict[str, FunctionSpec] = {
            "KQL timespans carry a d. prefix that DuckDB's INTERVAL cast rejects"),
         _f("timespan", "template", _TOTIMESPAN, (1,), ("R1", "R8"), "alias of totimespan"),
         _f("toguid", "template", "TRY_CAST({0} AS UUID)", (1,), ("R1",)),
+        # A fresh random (version 4) GUID per *call*, as DuckDB's `uuid()` is —
+        # measured: `new_guid() == new_guid()` is false in one row, and a `let`
+        # holding it read twice is two values. It is volatile, so
+        # `translate/sharing.py` never hoists it into a shared column.
+        _f("new_guid", "native", "uuid()", (0,), ("R10",)),
         # --- dynamic / JSON (R9: missing -> null, never an error) -----------
         _f("parse_json", "template", "TRY_CAST({0} AS JSON)", (1,), ("R9",)),
         _f("todynamic", "template", "TRY_CAST({0} AS JSON)", (1,), ("R9",)),

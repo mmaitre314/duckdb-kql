@@ -266,7 +266,7 @@ Not supported: `arg_max`, `arg_min`, `binary_all_*`, `buildschema`,
 
 ## Scalar functions
 
-129 supported, grouped by family.
+130 supported, grouped by family.
 
 ### Conditional
 
@@ -441,6 +441,12 @@ Not supported: `arg_max`, `arg_min`, `binary_all_*`, `buildschema`,
 | `toint` | As `tolong`, then to 32 bits the way Kusto does it: a long, timespan or datetime **wraps** (`toint(9999999999)` is 1410065407), a real **saturates**, and a string out of range is null. |
 | `tolong` | KQL's conversion by input type, not a cast (R1): a timespan is its ticks, a datetime its ticks since 0001-01-01, a string an integer only in KQL's syntax (`"5.7"` and `"1e3"` are null), a real truncates and saturates, a dynamic converts as what it holds. A real *literal* out of range is refused: Kusto folds it differently than it computes it over rows. |
 | `toreal` | Synonym for `todouble`. |
+
+### Other
+
+| Function | Limitations and gotchas |
+|---|---|
+| `new_guid` | A fresh GUID per **call**: two calls in one row differ, and a `let` holding it read twice is two GUIDs. A tabular `let` calling it is evaluated at every read, and once if `materialize()`d, as in Kusto (R10). |
 
 ## Data types
 
