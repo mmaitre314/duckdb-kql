@@ -257,11 +257,6 @@ def strip_leading_comments(text: str) -> str:
     return text[i:]
 
 
-def _normalize(text: str) -> str:
-    """`  .SHOW   Tables ` -> `.show tables`. Kusto is case-insensitive here."""
-    return _WHITESPACE.sub(" ", text.strip().rstrip(";").strip()).lower()
-
-
 def split_command(text: str) -> tuple[str, str]:
     """Split `.show tables | limit 3` into its command and its pipeline.
 

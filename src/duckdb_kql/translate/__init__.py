@@ -1781,10 +1781,6 @@ def _render_aggregate_call(expr: ir.FunctionCall) -> str:
         raise KqlUnsupportedError(f"aggregate:{expr.name}", hint=str(e)) from None
 
 
-def _is_aggregate_call(expr: ir.Expr) -> bool:
-    return isinstance(expr, ir.FunctionCall) and lookup_aggregate(expr.name) is not None
-
-
 def _nested_aggregate(expr: ir.Expr) -> str | None:
     """The name of an aggregate anywhere inside *expr*, if there is one."""
     if isinstance(expr, ir.FunctionCall):
@@ -4111,11 +4107,6 @@ def _kql_timespan_text(rendered: str) -> str:
         f" || CASE WHEN {a} % 1000000 <> 0"
         f" THEN '.' || lpad(CAST({a} % 1000000 AS VARCHAR), 6, '0') || '0' ELSE '' END)[1]"
     )
-
-
-def _kql_ticks(rendered: str) -> str:
-    """An INTERVAL as KQL's tick count (100 ns): what `tolong(1d)` answers."""
-    return f"(epoch_us({rendered}) * 10)"
 
 
 def _kql_datetime_text(rendered: str) -> str:
