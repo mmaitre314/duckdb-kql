@@ -54,6 +54,22 @@ def _cls(node: Any) -> str:
     return type(node).__name__.removesuffix("Context")
 
 
+#: The parameter rules `join`, `lookup`, `union` and `macro-expand` read;
+#: `summarize` and `mv-expand` take `StrictQueryOperatorParameter` instead.
+_PARAMETER_RULES = ("RelaxedQueryOperatorParameter", "QueryOperatorParameter")
+
+
+def _parameter(node: Any) -> tuple[str, str]:
+    """An operator parameter's `name = value`, each stripped of whitespace.
+
+    The name is returned as written, not folded: several refusals quote it
+    back, and what they quote is behaviour (M3). Every parameter rule in the
+    grammar requires the `=`, so the value is always the text after it.
+    """
+    name, _, value = node.getText().partition("=")
+    return name.strip(), value.strip()
+
+
 def _span(node: Any) -> SourceSpan | None:
     tok = getattr(node, "start", None)
     return SourceSpan(tok.line, tok.column) if tok is not None else None
@@ -1857,11 +1873,9 @@ def _lower_macro_expand(node: Any, kids: list[Any], rest: list[Any]) -> ir.Query
 
     for k in kids:
         cls = _cls(k)
-        if cls in ("RelaxedQueryOperatorParameter", "QueryOperatorParameter"):
-            text = k.getText()
-            key, _, value = text.partition("=")
-            key = key.strip().lower()
-            value = value.strip()
+        if cls in _PARAMETER_RULES:
+            name, value = _parameter(k)
+            key = name.lower()
             if key == "isfuzzy":
                 isfuzzy = value.lower() == "true"
             elif key in ("withsource", "with_source"):
@@ -2002,10 +2016,9 @@ def _lower_join(node: Any, kids: list[Any]) -> ir.Join:
 
     for k in kids:
         cls = _cls(k)
-        if cls in ("RelaxedQueryOperatorParameter", "QueryOperatorParameter"):
-            text = k.getText()
-            name, _, value = text.partition("=")
-            key = name.strip().lower()
+        if cls in _PARAMETER_RULES:
+            name, value = _parameter(k)
+            key = name.lower()
             if key.startswith("hint."):
                 # Distribution hints (hint.strategy, hint.shufflekey, ...) tune
                 # how a *cluster* executes the join. They cannot change the
@@ -2013,10 +2026,10 @@ def _lower_join(node: Any, kids: list[Any]) -> ir.Join:
                 # ignoring them is correct rather than a shortcut.
                 continue
             if key != "kind":
-                raise _unsupported(k, f"join parameter:{name.strip()}")
-            canonical = _JOIN_KINDS.get(value.strip().lower())
+                raise _unsupported(k, f"join parameter:{name}")
+            canonical = _JOIN_KINDS.get(value.lower())
             if canonical is None:
-                raise _unsupported(k, f"join kind:{value.strip()}")
+                raise _unsupported(k, f"join kind:{value}")
             kind = canonical
         elif cls == "JoinOperatorOnClause":
             keys.extend(_lower_join_key(c) for c in _rule_children(k))
@@ -2053,9 +2066,8 @@ def _check_summarize_parameter(node: Any, by: list[ir.NamedExpr]) -> None:
     `isfuzzy`, `hint.materialized` — on a `summarize`. Those are refused, so
     a typo or a parameter meant for another operator is not taken silently.
     """
-    name, _, value = node.getText().partition("=")
-    key = name.strip().lower()
-    value = value.strip()
+    name, value = _parameter(node)
+    key = name.lower()
 
     def refuse(construct: str, hint: str) -> KqlUnsupportedError:
         return KqlUnsupportedError(construct, span=_span(node), hint=hint)
@@ -2085,7 +2097,7 @@ def _check_summarize_parameter(node: Any, by: list[ir.NamedExpr]) -> None:
             )
     else:
         raise refuse(
-            f"summarize parameter:{name.strip()}",
+            f"summarize parameter:{name}",
             "a summarize takes hint.strategy = shuffle, hint.shufflekey and "
             "hint.num_partitions; Kusto ignores the rest there, so a parameter "
             "meant for another operator would pass unnoticed",
@@ -2118,19 +2130,18 @@ def _lower_lookup(node: Any, kids: list[Any]) -> ir.Lookup:
 
     for k in kids:
         cls = _cls(k)
-        if cls in ("RelaxedQueryOperatorParameter", "QueryOperatorParameter"):
-            text = k.getText()
-            name, _, value = text.partition("=")
-            key = name.strip().lower()
+        if cls in _PARAMETER_RULES:
+            name, value = _parameter(k)
+            key = name.lower()
             if key in _LOOKUP_HINTS:
                 # Cluster distribution only; cannot change the result, and
                 # DuckDB is single-node.
                 continue
             if key != "kind":
-                raise _unsupported(k, f"lookup parameter:{name.strip()}")
-            spelling = value.strip().lower()
+                raise _unsupported(k, f"lookup parameter:{name}")
+            spelling = value.lower()
             if spelling not in _LOOKUP_KINDS:
-                raise _unsupported(k, f"lookup kind:{value.strip()}")
+                raise _unsupported(k, f"lookup kind:{value}")
             kind = spelling
         elif cls == "JoinOperatorOnClause":
             keys.extend(_lower_join_key(c) for c in _rule_children(k))
@@ -2161,11 +2172,9 @@ def _lower_union(node: Any, kids: list[Any]) -> ir.Union:
 
     for k in kids:
         cls = _cls(k)
-        if cls in ("RelaxedQueryOperatorParameter", "QueryOperatorParameter"):
-            text = k.getText()
-            name, _, value = text.partition("=")
-            key = name.strip().lower()
-            value = value.strip()
+        if cls in _PARAMETER_RULES:
+            name, value = _parameter(k)
+            key = name.lower()
             if key == "kind":
                 if value.lower() not in _UNION_KINDS:
                     raise _unsupported(k, f"union kind:{value}")
@@ -2179,7 +2188,7 @@ def _lower_union(node: Any, kids: list[Any]) -> ir.Union:
                 # Distribution only; cannot change the result.
                 continue
             else:
-                raise _unsupported(k, f"union parameter:{name.strip()}")
+                raise _unsupported(k, f"union parameter:{name}")
         elif cls == "UnionOperatorExpression":
             branches.append(_lower_union_branch(k))
 
@@ -3541,12 +3550,12 @@ def _lower_mv_expand(node: Any, kids: list[Any]) -> ir.Operator | list[ir.Operat
             limit = int(text[len("limit"):])
             continue
         if "Parameter" in cls:
-            key, _, value = text.partition("=")
-            key, value = key.strip().lower(), value.strip().lower()
+            name, value = _parameter(k)
+            key = name.lower()
             if key == "with_itemindex":
-                item_index = text.split("=", 1)[1].strip()
-            elif key in ("kind", "bagexpansion") and value in _BAG_EXPANSION:
-                array_expansion = _BAG_EXPANSION[value]
+                item_index = value
+            elif key in ("kind", "bagexpansion") and value.lower() in _BAG_EXPANSION:
+                array_expansion = _BAG_EXPANSION[value.lower()]
             else:
                 raise _unsupported(k, f"mv-expand parameter:{text}")
             continue

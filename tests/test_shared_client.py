@@ -34,7 +34,7 @@ import pytest
 duckdb = pytest.importorskip("duckdb")
 
 from duckdb_kql.engine import schema  # noqa: E402 - after the importorskip
-from duckdb_kql.kusto import KustoClient  # noqa: E402 - after the importorskip
+from duckdb_kql.kusto import KustoClient  # noqa: E402 - once duckdb is known present
 
 
 def test_a_schema_read_that_fails_is_an_error_not_an_empty_schema() -> None:
