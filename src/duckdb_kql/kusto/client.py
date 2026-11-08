@@ -34,7 +34,15 @@ from ..entity_groups import EntityGroupArg
 from ..errors import KqlError
 from ..stored_functions import FunctionArg
 from ..translate import quote_ident
-from ._models import WellKnownDataSet, kusto_type, to_wire, widen_out_of_range
+from ._models import (
+    COMPLETION_COLUMNS,
+    QUERY_PROPERTIES_COLUMNS,
+    WellKnownDataSet,
+    kusto_type,
+    to_wire,
+    widen_out_of_range,
+    wire_columns,
+)
 from .client_request_properties import ClientRequestProperties
 from .exceptions import KustoClosedError, KustoServiceError, KustoUnsupportedError
 from .response import KustoResponseDataSet
@@ -670,31 +678,14 @@ class KustoClient:
             "TableName": "@ExtendedProperties",
             "TableId": 1,
             "TableKind": WellKnownDataSet.QueryProperties.value,
-            "Columns": [
-                {"ColumnName": "TableId", "ColumnType": "int"},
-                {"ColumnName": "Key", "ColumnType": "string"},
-                {"ColumnName": "Value", "ColumnType": "dynamic"},
-            ],
+            "Columns": wire_columns(QUERY_PROPERTIES_COLUMNS),
             "Rows": [],
         }
         completion = {
             "TableName": "QueryCompletionInformation",
             "TableId": 2,
             "TableKind": WellKnownDataSet.QueryCompletionInformation.value,
-            "Columns": [
-                {"ColumnName": "Timestamp", "ColumnType": "datetime"},
-                {"ColumnName": "ClientRequestId", "ColumnType": "string"},
-                {"ColumnName": "ActivityId", "ColumnType": "guid"},
-                {"ColumnName": "SubActivityId", "ColumnType": "guid"},
-                {"ColumnName": "ParentActivityId", "ColumnType": "guid"},
-                {"ColumnName": "Level", "ColumnType": "int"},
-                {"ColumnName": "LevelName", "ColumnType": "string"},
-                {"ColumnName": "StatusCode", "ColumnType": "int"},
-                {"ColumnName": "StatusCodeName", "ColumnType": "string"},
-                {"ColumnName": "EventType", "ColumnType": "int"},
-                {"ColumnName": "EventTypeName", "ColumnType": "string"},
-                {"ColumnName": "Payload", "ColumnType": "string"},
-            ],
+            "Columns": wire_columns(COMPLETION_COLUMNS),
             "Rows": [
                 [
                     to_wire(dt.datetime.now(dt.UTC), "datetime"),

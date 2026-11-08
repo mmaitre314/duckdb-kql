@@ -195,6 +195,8 @@ def v2_response(result: Result, client_request_id: str) -> list[dict[str, Any]]:
     `QueryCompletionInformation` — and a response missing the bookends is
     reported to the user as a failed query rather than as an empty one.
     """
+    from .kusto._models import COMPLETION_COLUMNS, QUERY_PROPERTIES_COLUMNS, wire_columns
+
     now = _iso(dt.datetime.now(dt.UTC))
     activity = str(uuid.uuid4())
     return [
@@ -210,11 +212,7 @@ def v2_response(result: Result, client_request_id: str) -> list[dict[str, Any]]:
             "TableId": 0,
             "TableKind": "QueryProperties",
             "TableName": "@ExtendedProperties",
-            "Columns": [
-                {"ColumnName": "TableId", "ColumnType": "int"},
-                {"ColumnName": "Key", "ColumnType": "string"},
-                {"ColumnName": "Value", "ColumnType": "dynamic"},
-            ],
+            "Columns": wire_columns(QUERY_PROPERTIES_COLUMNS),
             "Rows": [[1, "Visualization", _VISUALIZATION]],
         },
         {
@@ -234,20 +232,7 @@ def v2_response(result: Result, client_request_id: str) -> list[dict[str, Any]]:
             "TableId": 2,
             "TableKind": "QueryCompletionInformation",
             "TableName": "QueryCompletionInformation",
-            "Columns": [
-                {"ColumnName": "Timestamp", "ColumnType": "datetime"},
-                {"ColumnName": "ClientRequestId", "ColumnType": "string"},
-                {"ColumnName": "ActivityId", "ColumnType": "guid"},
-                {"ColumnName": "SubActivityId", "ColumnType": "guid"},
-                {"ColumnName": "ParentActivityId", "ColumnType": "guid"},
-                {"ColumnName": "Level", "ColumnType": "int"},
-                {"ColumnName": "LevelName", "ColumnType": "string"},
-                {"ColumnName": "StatusCode", "ColumnType": "int"},
-                {"ColumnName": "StatusCodeName", "ColumnType": "string"},
-                {"ColumnName": "EventType", "ColumnType": "int"},
-                {"ColumnName": "EventTypeName", "ColumnType": "string"},
-                {"ColumnName": "Payload", "ColumnType": "string"},
-            ],
+            "Columns": wire_columns(COMPLETION_COLUMNS),
             "Rows": [
                 [
                     now,

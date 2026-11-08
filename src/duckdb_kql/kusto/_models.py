@@ -53,6 +53,32 @@ JsonTable = dict[str, Any]
 WireRow = list[Any]
 
 
+#: `(name, type)` of the ``QueryProperties`` and ``QueryCompletionInformation``
+#: tables a v2 response carries around its result. The client and the REST
+#: server (`duckdb_kql.server`) both emit them, and a schema spelled twice is
+#: one a fix reaches only half of.
+QUERY_PROPERTIES_COLUMNS = (("TableId", "int"), ("Key", "string"), ("Value", "dynamic"))
+COMPLETION_COLUMNS = (
+    ("Timestamp", "datetime"),
+    ("ClientRequestId", "string"),
+    ("ActivityId", "guid"),
+    ("SubActivityId", "guid"),
+    ("ParentActivityId", "guid"),
+    ("Level", "int"),
+    ("LevelName", "string"),
+    ("StatusCode", "int"),
+    ("StatusCodeName", "string"),
+    ("EventType", "int"),
+    ("EventTypeName", "string"),
+    ("Payload", "string"),
+)
+
+
+def wire_columns(columns: tuple[tuple[str, str], ...]) -> list[dict[str, str]]:
+    """A table's ``Columns`` as the wire spells them — a fresh list each call."""
+    return [{"ColumnName": name, "ColumnType": kind} for name, kind in columns]
+
+
 class WellKnownDataSet(str, Enum):  # noqa: UP042 - StrEnum would change str(member)
     """Categorizes data tables according to the role they play in a result."""
 
