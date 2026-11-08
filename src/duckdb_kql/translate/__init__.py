@@ -2411,6 +2411,44 @@ def _in_result(sql: str, node: ir.InList, value: str) -> str:
     return f"coalesce({rendered}, {'TRUE' if node.negated else 'FALSE'})"
 
 
+def _row_column(expr: ir.Expr) -> str | None:
+    """A column *expr* reads from the row, if any — a `toscalar` reads none."""
+    stack: list[object] = [expr]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, (list, tuple)):
+            stack.extend(node)
+        elif isinstance(node, (ir.ColumnRef, ir.RowContext)):
+            return node.name
+        elif dataclasses.is_dataclass(node) and not isinstance(node, ir.ToScalar):
+            stack.extend(getattr(node, f.name) for f in dataclasses.fields(node))
+    return None
+
+
+def _require_constant_items(node: ir.InList | ir.HasList) -> None:
+    """Refuse a list operand that reads the row, as Kusto does (SEM0040).
+
+    Measured on the emulator for `in`, `!in`, `in~`, `has_any` and `has_all`
+    alike: every item must be a constant — a literal, a `let` constant, a query
+    parameter, a `toscalar`, or a function of those. `s in (w)`, `s has_any (n)`,
+    `pack_array(w)`, `n[0]` and `strcat(w, '')` are all SEM0040. They were
+    answered here, and wrongly for a dynamic column: `s has_any (n)` was 0
+    with the needle in `n`, and `s in (n)` leaked a DuckDB conversion error.
+    """
+    if isinstance(node, ir.HasList):
+        operator = "has_all" if node.require_all else "has_any"
+    else:
+        operator = f"{'!' if node.negated else ''}in{'~' if node.case_insensitive else ''}"
+    for item in node.items:
+        column = _row_column(item)
+        if column is not None:
+            raise KqlUnsupportedError(
+                f"{operator}:{column}",
+                hint=f"the right-hand side of {operator} must be constant, and this "
+                f"reads the column {column!r}; Kusto refuses it (SEM0040)",
+            )
+
+
 def render_in_list(node: ir.InList) -> str:
     """``x in (a, b, ...)`` and its ``!in`` / ``in~`` variants.
 
@@ -2430,6 +2468,7 @@ def render_in_list(node: ir.InList) -> str:
     the guard exists to protect (`ts in (T)` must still compare datetimes), so
     the subquery form keeps today's behaviour and the residue is recorded.
     """
+    _require_constant_items(node)
     string_context = node.subquery is None and (
         node.case_insensitive
         or any(_is_string_expr(i) or _is_dynamic(i) for i in node.items)
@@ -2615,6 +2654,7 @@ def render_has_list(node: ir.HasList) -> str:
     Nulls follow `has`: a null left operand makes both **false** (measured), so
     the result is coalesced rather than left as SQL's NULL.
     """
+    _require_constant_items(node)
     if node.subquery is not None:
         # See render_in_list: guarding around a subquery duplicates it and
         # defeats the guard, because DuckDB computes the join key eagerly.
@@ -2642,10 +2682,11 @@ def _render_has_list(node: ir.HasList, value: str) -> str:
             if unrolled is not None:
                 parts.append(unrolled)
                 continue
-            # A list whose needles are only known at run time — a column, a
-            # bound parameter, or a literal array this cannot read (see
-            # `_literal_needles`). One `list_filter`, and the term pattern is
-            # rebuilt per row because the lambda variable is not a constant.
+            # A list whose needles are only known at run time — a bound
+            # parameter, or a literal array this cannot read (see
+            # `_literal_needles`); a column is refused above. One
+            # `list_filter`, and the term pattern is rebuilt per needle
+            # because the lambda variable is not a constant.
             arr = f"CAST({render_expr(item)} AS VARCHAR[])"
             t = lambdas.parameter("t", value)
             matched = f"len(list_filter({arr}, lambda {t}: {term_match_sql(value, t)}))"
