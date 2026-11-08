@@ -12,6 +12,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from .lambdas import bind_once
+
 __all__ = [
     "FunctionSpec", "SCALAR_FUNCTIONS", "lookup", "BINARY_OPERATORS", "BinarySpec",
     "AggregateSpec", "AGGREGATE_FUNCTIONS", "lookup_aggregate", "term_match_sql",
@@ -119,12 +121,12 @@ _TIMESPAN_TEXT = (
 # so a non-zero one is an error at run time, as `1tick` is refused as a
 # literal. An eighth digit and beyond Kusto itself discards.
 _SUB_MICROSECOND = ":[0-9]{{1,2}}\\.[0-9]{{6}}[1-9]"
-_TOTIMESPAN = (
-    # Trimmed once, up front: the shape test allows surrounding whitespace, and
-    # the day-prefix branch did not — measured, `totimespan(' 1.00:00:00 ')` is
-    # a day in Kusto and was null here.
-    "list_transform([regexp_replace(CAST({0} AS VARCHAR), '^\\s+|\\s+$', '', 'g')], "
-    "lambda _ts: "
+# Trimmed once, up front: the shape test allows surrounding whitespace, and
+# the day-prefix branch did not — measured, `totimespan(' 1.00:00:00 ')` is a
+# day in Kusto and was null here.
+_TOTIMESPAN = bind_once(
+    "regexp_replace(CAST({0} AS VARCHAR), '^\\s+|\\s+$', '', 'g')",
+    "_ts",
     f"CASE WHEN NOT regexp_matches(_ts, '{_TIMESPAN_TEXT}') THEN NULL "
     f"WHEN regexp_matches(_ts, '{_SUB_MICROSECOND}') THEN "
     "error('duckdb-kql: the timespan ' || _ts || ' has a 100 ns tick, "
@@ -133,7 +135,7 @@ _TOTIMESPAN = (
     "(CASE WHEN starts_with(_ts, '-') THEN -1 ELSE 1 END) * "
     "(to_days(CAST(regexp_extract(ltrim(_ts, '-'), '^([0-9]+)\\.', 1) AS INTEGER)) "
     "+ CAST(regexp_replace(ltrim(_ts, '-'), '^[0-9]+\\.', '') AS INTERVAL)) "
-    "ELSE TRY_CAST(_ts AS INTERVAL) END)[1]"
+    "ELSE TRY_CAST(_ts AS INTERVAL) END",
 )
 
 
@@ -169,10 +171,7 @@ def _unit_domain(fn: str) -> str:
     DuckDB orders NaN above every number, so `NaN > 1` is *true* there. The
     lambda evaluates the argument once.
     """
-    return (
-        f"list_transform([{_L0}], lambda _u: "
-        f"CASE WHEN _u BETWEEN -1 AND 1 OR isnan(_u) THEN {fn}(_u) END)[1]"
-    )
+    return bind_once(_L0, "_u", f"CASE WHEN _u BETWEEN -1 AND 1 OR isnan(_u) THEN {fn}(_u) END")
 
 #: Wave 1 scalar and aggregate functions.
 SCALAR_FUNCTIONS: dict[str, FunctionSpec] = {

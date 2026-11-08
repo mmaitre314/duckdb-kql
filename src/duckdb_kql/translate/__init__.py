@@ -499,7 +499,7 @@ def _numeric_bin(v: str, r: str) -> str:
         f"ELSE ({q} - {q} % 1 - CASE WHEN {q} % 1 < 0 THEN 1 ELSE 0 END) * {br} END"
     )
     pair = f"struct_pack(v := {long_or_wider(v)}, r := {long_or_wider(r)})"
-    return f"list_transform([{pair}], lambda _bin: {body})[1]"
+    return lambdas.bind_once(pair, "_bin", body)
 
 
 def _is_timespan_expr(node: ir.Expr) -> bool:
@@ -4177,8 +4177,9 @@ def _kql_timespan_text(rendered: str) -> str:
     substituting *rendered* into each of the eight places it is read.
     """
     a = "abs(_us)"
-    return (
-        f"list_transform([epoch_us({rendered})], lambda _us: "
+    return lambdas.bind_once(
+        f"epoch_us({rendered})",
+        "_us",
         f"CASE WHEN _us < 0 THEN '-' ELSE '' END"
         f" || CASE WHEN {a} >= 86400000000 THEN CAST({a} // 86400000000 AS VARCHAR) || '.'"
         f" ELSE '' END"
@@ -4186,7 +4187,7 @@ def _kql_timespan_text(rendered: str) -> str:
         f" || ':' || lpad(CAST({a} // 60000000 % 60 AS VARCHAR), 2, '0')"
         f" || ':' || lpad(CAST({a} // 1000000 % 60 AS VARCHAR), 2, '0')"
         f" || CASE WHEN {a} % 1000000 <> 0"
-        f" THEN '.' || lpad(CAST({a} % 1000000 AS VARCHAR), 6, '0') || '0' ELSE '' END)[1]"
+        f" THEN '.' || lpad(CAST({a} % 1000000 AS VARCHAR), 6, '0') || '0' ELSE '' END",
     )
 
 
@@ -4778,7 +4779,7 @@ def _render_format_datetime(node: ir.FunctionCall) -> str:
             plain.clear()
         if element:
             pieces.append(_fraction("_fd", element))
-    return f"list_transform([{date}], lambda _fd: {' || '.join(pieces)})[1]"
+    return lambdas.bind_once(date, "_fd", " || ".join(pieces))
 
 
 def _render_round(node: ir.FunctionCall) -> str:
@@ -4921,9 +4922,10 @@ def _render_gettype(node: ir.FunctionCall) -> str | None:
     )
     held = f"coalesce(CASE json_type(to_json({rendered})) {content} END, 'null')"
     k = lambdas.parameter("_k", rendered)
-    return (
-        f"list_transform([{kusto_type_sql(f'typeof({rendered})')}], "
-        f"lambda {k}: CASE WHEN {k} = 'dynamic' THEN {held} ELSE {k} END)[1]"
+    return lambdas.bind_once(
+        kusto_type_sql(f"typeof({rendered})"),
+        k,
+        f"CASE WHEN {k} = 'dynamic' THEN {held} ELSE {k} END",
     )
 
 
@@ -4961,10 +4963,10 @@ def _integer_from_real(real: str, bits: int) -> str:
 
 def _wrap_int32(value: str) -> str:
     """A long wrapped to 32 bits — measured: `toint(9999999999)` is 1410065407."""
-    return (
-        f"list_transform([({value} % 4294967296 + 4294967296) % 4294967296], "
-        f"lambda _w: CAST(CASE WHEN _w >= 2147483648 THEN _w - 4294967296 ELSE _w END "
-        f"AS INTEGER))[1]"
+    return lambdas.bind_once(
+        f"({value} % 4294967296 + 4294967296) % 4294967296",
+        "_w",
+        "CAST(CASE WHEN _w >= 2147483648 THEN _w - 4294967296 ELSE _w END AS INTEGER)",
     )
 
 
@@ -5052,7 +5054,7 @@ def _render_tick_conversion(node: ir.FunctionCall) -> str | None:
             f"WHEN typeof({v}) LIKE '%INT%' THEN {from_long(f'TRY_CAST({v} AS BIGINT)')} "
             f"END"
         )
-    return f"list_transform([{render_expr(node.args[0])}], lambda {v}: {body})[1]"
+    return lambdas.bind_once(render_expr(node.args[0]), v, body)
 
 
 def _render_bag_pack(node: ir.FunctionCall) -> str | None:
@@ -5168,16 +5170,18 @@ def _render_totimespan(node: ir.FunctionCall) -> str | None:
         f"WHEN typeof({v}) LIKE '%INT%' THEN {_timespan_from_ticks(f'TRY_CAST({v} AS BIGINT)')} "
         "END"
     )
-    return f"list_transform([{render_expr(arg)}], lambda {v}: {body})[1]"
+    return lambdas.bind_once(render_expr(arg), v, body)
 
 
 def _timespan_from_ticks(ticks: str) -> str:
     """A tick count as an INTERVAL, or an error when it is not whole microseconds."""
-    return (
-        f"list_transform([{ticks}], lambda _t: CASE WHEN _t % 10 <> 0 THEN "
+    return lambdas.bind_once(
+        ticks,
+        "_t",
+        "CASE WHEN _t % 10 <> 0 THEN "
         "error('duckdb-kql: totimespan of ' || CAST(_t AS VARCHAR) || ' ticks of 100 ns, "
         "which is not a whole number of microseconds, all DuckDB keeps') "
-        "ELSE to_microseconds(_t // 10) END)[1]"
+        "ELSE to_microseconds(_t // 10) END",
     )
 
 

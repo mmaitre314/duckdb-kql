@@ -59,3 +59,17 @@ def parameter(name: str, *captured: str) -> str:
     while name.lower() in taken:
         name = "_" + name
     return name
+
+
+def bind_once(value: str, name: str, body: str) -> str:
+    """*body*, with *name* bound to *value* — which DuckDB evaluates once.
+
+    DuckDB has no `LET`. A one-element ``list_transform`` is the expression
+    form of one: *value* is computed once and read through the parameter
+    however often *body* reads it, where substituting it would repeat it — and
+    re-evaluate it, which for `rand()` or `new_guid()` is a different answer.
+
+    The parameter shadows a column of its name inside *body* (see above), so
+    a *body* that embeds rendered user SQL takes *name* from :func:`parameter`.
+    """
+    return f"list_transform([{value}], lambda {name}: {body})[1]"
