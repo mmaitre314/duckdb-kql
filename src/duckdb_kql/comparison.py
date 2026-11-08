@@ -682,42 +682,7 @@ def compare(
                     break
     else:
         # Multiset comparison: same rows, any order.
-        from collections import Counter
-
-        try:
-            exp_c = Counter(_row_key(r) for r in exp_rows)
-            act_c = Counter(_row_key(r) for r in act_rows)
-        except TypeError:  # pragma: no cover - unhashable payload
-            diffs.append("rows are not hashable; use ordered comparison")
-            return ComparisonResult(False, diffs)
-
-        # Exact multiset match handles the common case cheaply. Anything left
-        # over may still match *within tolerance* — hashing is exact, so
-        # without this second pass every approximate aggregate (dcount,
-        # percentile — R11) would falsely fail in the default unordered mode.
-        missing = list((exp_c - act_c).elements())
-        unexpected = list((act_c - exp_c).elements())
-
-        if missing and unexpected:
-            leftover_expected: list[RowKey] = []
-            remaining = list(unexpected)
-            for key in missing:
-                for i, other in enumerate(remaining):
-                    if len(key) == len(other) and all(
-                        _values_equal(x, y, opts) for x, y in zip(key, other, strict=True)
-                    ):
-                        remaining.pop(i)
-                        break
-                else:
-                    leftover_expected.append(key)
-            missing, unexpected = leftover_expected, remaining
-
-        for key in missing:
-            diffs.append(f"missing row {list(key)!r}")
-        for key in unexpected:
-            diffs.append(f"unexpected row {list(key)!r}")
-        if len(diffs) > 8:
-            diffs = diffs[:8] + ["... (further differences suppressed)"]
+        return _compare_unordered(exp_rows, act_rows, opts, diffs)
 
     return ComparisonResult(not diffs, diffs)
 
@@ -738,6 +703,10 @@ def _compare_unordered(
         diffs.append("rows are not hashable; use ordered comparison")
         return ComparisonResult(False, diffs)
 
+    # Exact multiset match handles the common case cheaply. Anything left over
+    # may still match *within tolerance* — hashing is exact, so without this
+    # second pass every approximate aggregate (dcount, percentile — R11) would
+    # falsely fail in the default unordered mode.
     missing = list((exp_c - act_c).elements())
     unexpected = list((act_c - exp_c).elements())
 
