@@ -2707,9 +2707,7 @@ def _has_item(node: ir.HasList, value: str, item: ir.Expr) -> str:
     the text `["world"]` — 0 where Kusto has 1. So the shape is asked of
     `typeof` at run time, and a JSON or LIST operand is flattened by
     :func:`_runtime_needles`. Only where the IR carries the type — a literal,
-    or a parameter declared as other than `dynamic` — is the question skipped;
-    the unselected branch is not free (DuckDB plans the `json_tree` subquery
-    whichever branch a row takes).
+    or a parameter declared as other than `dynamic` — is the question skipped.
     """
     if isinstance(item, ir.Literal) and item.kind == "dynamic" and _holds_a_bag(item.value):
         operator = "has_all" if node.require_all else "has_any"
@@ -2745,20 +2743,36 @@ def _holds_a_bag(text: object) -> bool:
     return False
 
 
+#: The error a bag needle raises — Kusto refuses one outright (SEM0022).
+_BAG_NEEDLE = (
+    "error('duckdb-kql: a bag is not a has_any/has_all needle; Kusto refuses it (SEM0022)')"
+)
+
+
 def _runtime_needles(sql: str) -> str:
     """Every leaf of the JSON form of *sql*, as text, `''` for a null; a bag raises.
+
+    A scalar expression, not a subquery over ``json_tree``, which this was:
+    the operand is often a `toscalar` the sharing pass has bound into a
+    column, and a subquery over a column is correlated — DuckDB ran
+    ``json_tree`` for every row, whichever branch of `_has_item` the row took.
+    ``json_extract(j, '$..*')`` is every descendant of *j*, in one call.
 
     One `list_filter` over these, and the term pattern is rebuilt per needle
     because the lambda variable is not a constant — see `_unrolled_needles`
     for why a literal array does not come here.
     """
-    leaves = "list(coalesce(value ->> '$', '')) FILTER (WHERE type NOT IN ('ARRAY', 'OBJECT'))"
-    return (
-        "(SELECT CASE WHEN bool_or(type = 'OBJECT') THEN error('duckdb-kql: a bag is "
-        "not a has_any/has_all needle; Kusto refuses it (SEM0022)') "
-        f"ELSE coalesce({leaves}, []) END "
-        f"FROM json_tree(coalesce(to_json({sql}), 'null'::JSON)))"
+    descendants = "json_extract(_j, '$..*')"
+    body = (
+        f"CASE json_type(_j) WHEN 'OBJECT' THEN {_BAG_NEEDLE} "
+        "WHEN 'ARRAY' THEN CASE "
+        f"WHEN len(list_filter({descendants}, lambda _e: json_type(_e) = 'OBJECT')) > 0 "
+        f"THEN {_BAG_NEEDLE} "
+        f"ELSE list_transform(list_filter({descendants}, lambda _e: json_type(_e) <> 'ARRAY'), "
+        "lambda _e: coalesce(_e ->> '$', '')) END "
+        "ELSE [coalesce(_j ->> '$', '')] END"
     )
+    return lambdas.bind_once(f"coalesce(to_json({sql}), 'null'::JSON)", "_j", body)
 
 
 def _render_has_subquery(node: ir.HasList, subquery: ir.Query, value: str) -> str:
@@ -2809,13 +2823,15 @@ def _render_has_subquery(node: ir.HasList, subquery: ir.Query, value: str) -> st
     )
 
 
-#: The `has` family, and whether each is case-sensitive and negated. Only these
+#: The `has` family — each operator's `(case_sensitive, negated, lead, trail)`,
+#: *lead* and *trail* being the boundaries `term_match_sql` requires. Only these
 #: build a term pattern; the rest of the string operators are LIKE-based.
 _TERM_OPERATORS = {
-    "has": (False, False),
-    "!has": (False, True),
-    "has_cs": (True, False),
-    "!has_cs": (True, True),
+    f"{neg}{op}{cs}": (cs == "_cs", neg == "!", lead, trail)
+    for op, lead, trail in (("has", True, True), ("hasprefix", True, False),
+                            ("hassuffix", False, True))
+    for neg in ("", "!")
+    for cs in ("", "_cs")
 }
 
 
@@ -2836,12 +2852,14 @@ def _render_term_operator(node: ir.BinaryOp, sqls: Sequence[str]) -> str | None:
         return None
     if not (isinstance(node.right, ir.Literal) and node.right.kind == "string"):
         return None
-    case_sensitive, negated = spec
+    case_sensitive, negated, lead, trail = spec
     matched = term_match_sql(
         sqls[0],
         quote_string(str(node.right.value)),
         case_sensitive=case_sensitive,
         needle_text=str(node.right.value),
+        lead=lead,
+        trail=trail,
     )
     return f"NOT {matched}" if negated else matched
 

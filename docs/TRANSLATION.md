@@ -1495,7 +1495,7 @@ wrong answer (principle 5).
 
 ## 9. Open items
 
-Three items are genuinely open. The rest are kept, struck through and dated, because
+Four items are genuinely open. The rest are kept, struck through and dated, because
 a settled question that vanishes gets re-opened by the next reader — and §10
 sends every contributor through §4 before they map anything.
 
@@ -1518,6 +1518,14 @@ sends every contributor through §4 before they map anything.
   before a final newline), so this is not .NET semantics either; the fix is
   probably a rewrite of `\d` `\w` `\s` and their negations in the literal
   pattern, and it wants its own measurements first.
+- **Case-insensitive `has` folds two characters Kusto does not.** Measured
+  2026-11-08, folded and over rows: `'\u212a' has 'k'` (the Kelvin sign) and
+  `'ſ' has 's'` (the long s) are false in Kusto and true here, because RE2's
+  `(?i)` folds both to ASCII — for a literal needle and a run-time one alike
+  (`tests/test_runtime_needles.py`). Neither `lower()` nor .NET's invariant
+  casing explains both answers, so the rule wants measuring across the scripts
+  with case before anything changes; the `has_any (T)` prefilter, which uses
+  `lower()`, answers these two the way Kusto does and `has` does not.
 - ~~`extend` and `project` name an unnamed expression positionally and never
   after its column.~~ **Settled 2026-10-25:** `extend abs(x)` is named `x` and
   replaces it, and the positional, renaming and aggregate-wrapper rules were

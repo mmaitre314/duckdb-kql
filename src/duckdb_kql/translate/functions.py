@@ -607,6 +607,20 @@ def term_match_sql(
         if end:
             pattern += f" || '{end}'"
         return f"regexp_matches({haystack}, {pattern})"
+    unicode = _unicode_term_match(haystack, needle, flag, lead=lead, trail=trail)
+    return _runtime_term_match(
+        haystack, needle, unicode, case_sensitive=case_sensitive, lead=lead, trail=trail
+    )
+
+
+def _unicode_term_match(haystack: str, needle: str, flag: str, *, lead: bool, trail: bool) -> str:
+    """The exact term test for a needle known only at run time.
+
+    Exact, and slow: the pattern is concatenated per row, so RE2 compiles a
+    Unicode program per row — about 1.5 ms each, measured, which made `has_any`
+    over a `toscalar` take minutes on a few hundred thousand rows. Only
+    :func:`_runtime_term_match` should reach it.
+    """
     start = (
         f"CASE WHEN regexp_matches({needle}, '^[\\pL\\pN]') "
         f"THEN '{_TERM_START}' ELSE '' END"
@@ -622,6 +636,73 @@ def term_match_sql(
     return (
         f"regexp_matches({haystack}, '{flag}' || {start} "
         f"|| regexp_escape({needle}) || {end})"
+    )
+
+
+#: ASCII's term characters and its delimiters, as RE2 classes. On ASCII text
+#: `[\pL\pN]` is exactly these: ASCII has no other letter or number.
+_ASCII_TERM = "A-Za-z0-9"
+_IS_ASCII = "NOT regexp_matches({0}, '[^\\x00-\\x7F]')"
+
+
+def _runtime_term_match(
+    haystack: str,
+    needle: str,
+    unicode: str,
+    *,
+    case_sensitive: bool,
+    lead: bool,
+    trail: bool,
+) -> str:
+    """The run-time term test, without a per-row RE2 compile where none is needed.
+
+    When the haystack and the needle are both ASCII, RE2's ``(?i)`` is exactly
+    ``lower()`` on both — the only non-ASCII characters it folds to ASCII, the
+    Kelvin sign and the long s, cannot be in an ASCII haystack — and its
+    ``[^\\pL\\pN]`` is exactly ``[^A-Za-z0-9]``. So:
+
+    * a needle made **only of term characters** (a word, an id, a number) is a
+      whole term exactly when it is a substring of the haystack with every
+      delimiter run turned into one space and a space added at each end —
+      ``' ' || n || ' '`` for `has`, ``' ' || n`` for `hasprefix`, ``n || ' '``
+      for `hassuffix`. Every regex involved is a constant, compiled once.
+    * any other ASCII needle is the same pattern as the Unicode test, written
+      with ASCII classes over lowered text: still compiled per row, but a
+      program a fraction the size.
+    * anything else is :func:`_unicode_term_match`, unchanged.
+
+    Every tier answers exactly what the last one does — `tests/test_runtime_needles.py`
+    compares them over randomised text — and a null haystack or needle falls
+    through to the last, so nulls behave as they did. Measured on 200,000 ASCII
+    rows: `has_any (toscalar(print 'world'))` went from about 110 s to 0.2 s,
+    and `has_any (split('world,x', ','))` from about 530 s to 0.6 s.
+    """
+    h, n = (haystack, needle) if case_sensitive else (f"lower({haystack})", f"lower({needle})")
+    both_ascii = f"{_IS_ASCII.format(needle)} AND {_IS_ASCII.format(haystack)}"
+    one_term = f"regexp_full_match({needle}, '[{_ASCII_TERM}]+')"
+    spaced = f"(' ' || regexp_replace({h}, '[^{_ASCII_TERM}]+', ' ', 'g') || ' ')"
+    term = n
+    if lead:
+        term = f"' ' || {term}"
+    if trail:
+        term = f"{term} || ' '"
+    start = (
+        f"CASE WHEN regexp_matches({needle}, '^[{_ASCII_TERM}]') "
+        f"THEN '(?:^|[^{_ASCII_TERM}])' ELSE '' END || "
+        if lead
+        else ""
+    )
+    end = (
+        f" || CASE WHEN regexp_matches({needle}, '[{_ASCII_TERM}]$') "
+        f"THEN '(?:$|[^{_ASCII_TERM}])' ELSE '' END"
+        if trail
+        else ""
+    )
+    ascii_regex = f"regexp_matches({h}, {start}regexp_escape({n}){end})"
+    return (
+        f"(CASE WHEN {both_ascii} AND {one_term} THEN contains({spaced}, {term}) "
+        f"WHEN {both_ascii} THEN {ascii_regex} "
+        f"ELSE {unicode} END)"
     )
 
 
