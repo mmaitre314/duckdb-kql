@@ -421,6 +421,17 @@ sees the ones declared before it, not itself), and the generated names — the
 bindings' and the stages' `_s0`, `_s1`… — step around every name the statement
 reads as a table. `let a` and `let A` are two bindings, as in Kusto.
 
+**Lambda parameters: named against what the body embeds.**
+*Trap: `tests/test_lambda_capture.py`.* Inside a DuckDB `lambda t: …` an
+unqualified `t` — or `"t"`, or `"T"` — is the parameter, whatever column of that
+name is in scope. A body that embeds a rendered user expression therefore
+captures the user's column `t`: `t has_any (p)` matched every row, and
+`gettype(_k)` and `mv-expand k` answered wrong values with no error. Every such
+lambda takes its parameter name from `translate.lambdas.parameter`, which
+lengthens it until nothing the body embeds resolves to it. A *qualified*
+reference resolves the other way — `t.v` prefers a column `t` — so a lambda
+reads a struct field as `t['v']`.
+
 ---
 
 ### R8 — datetime is UTC; binning has an origin

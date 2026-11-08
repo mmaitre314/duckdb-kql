@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING, Any
 from .. import ir
 from .._state import State
 from ..errors import KqlUnsupportedError
-from . import naming, sharing
+from . import lambdas, naming, sharing
 from .functions import (
     _TODATETIME,
     _TOTIMESPAN,
@@ -2641,8 +2641,8 @@ def _render_has_list(node: ir.HasList, value: str) -> str:
             # `_literal_needles`). One `list_filter`, and the term pattern is
             # rebuilt per row because the lambda variable is not a constant.
             arr = f"CAST({render_expr(item)} AS VARCHAR[])"
-            test = term_match_sql(value, "t")
-            matched = f"len(list_filter({arr}, lambda t: {test}))"
+            t = lambdas.parameter("t", value)
+            matched = f"len(list_filter({arr}, lambda {t}: {term_match_sql(value, t)}))"
             parts.append(f"({matched} = len({arr}))" if node.require_all
                          else f"({matched} > 0)")
         elif isinstance(item, ir.Literal) and item.kind == "string":
@@ -2666,7 +2666,8 @@ def _has_toscalar(node: ir.HasList, value: str, item: str) -> str:
     is an array, measured, and itself as one needle otherwise."""
     json = f"to_json({item})"
     arr = f"CAST({json} AS VARCHAR[])"
-    matched = f"len(list_filter({arr}, lambda t: {term_match_sql(value, 't')}))"
+    t = lambdas.parameter("t", value)
+    matched = f"len(list_filter({arr}, lambda {t}: {term_match_sql(value, t)}))"
     many = f"({matched} = len({arr}))" if node.require_all else f"({matched} > 0)"
     one = term_match_sql(
         value,
@@ -3895,19 +3896,15 @@ def _mv_expand_elements(op: ir.MvExpand, target: ir.MvExpandTarget) -> str:
     none — `json_array(NULL)` is `[null]`, not `[]`.
     """
     col = quote_ident(target.column)
-    if op.array_expansion:
-        # `kind=array` / `bagexpansion=array`: a bag becomes two-element
-        # `[key, value]` arrays rather than single-key bags. Measured to leave
-        # a plain array alone.
-        bag = (
-            f"list_transform(json_keys({col}), "
-            f"lambda k: json_array(k, json_extract({col}, '$.\"' || k || '\"')))"
-        )
-    else:
-        bag = (
-            f"list_transform(json_keys({col}), "
-            f"lambda k: json_object(k, json_extract({col}, '$.\"' || k || '\"')))"
-        )
+    k = lambdas.parameter("k", col)
+    # `kind=array` / `bagexpansion=array`: a bag becomes two-element
+    # `[key, value]` arrays rather than single-key bags. Measured to leave a
+    # plain array alone.
+    pair = "json_array" if op.array_expansion else "json_object"
+    bag = (
+        f"list_transform(json_keys({col}), "
+        f"lambda {k}: {pair}({k}, json_extract({col}, '$.\"' || {k} || '\"')))"
+    )
     elements = (
         f"CAST(CASE json_type({col}) "
         f"WHEN 'ARRAY' THEN json_extract({col}, '$[*]') "
@@ -4396,7 +4393,10 @@ def _render_countof(node: ir.FunctionCall) -> str:
         raise KqlUnsupportedError(f"countof:{kind}")
     text, needle = args[0], args[1]
     starts = f"generate_series(1, length(coalesce({text}, '')) - length({needle}) + 1)"
-    matches = f"list_filter({starts}, lambda i: substr({text}, i, length({needle})) = {needle})"
+    i = lambdas.parameter("i", text, needle)
+    matches = (
+        f"list_filter({starts}, lambda {i}: substr({text}, {i}, length({needle})) = {needle})"
+    )
     return (
         f"CASE WHEN {needle} IS NULL THEN NULL "
         f"WHEN length({needle}) = 0 THEN 0 "
@@ -4461,11 +4461,12 @@ def _render_zip(node: ir.FunctionCall) -> str:
     # fails to parse.
     lists = [f"CAST(to_json({render_expr(a)}) AS JSON[])" for a in node.args]
     longest = "greatest(" + ", ".join(f"len({x})" for x in lists) + ")"
-    row = ", ".join(f"{x}[i]" for x in lists)
+    i = lambdas.parameter("i", *lists)
+    row = ", ".join(f"{x}[{i}]" for x in lists)
     return (
         f"to_json(list_transform("
         f"generate_series(CAST(1 AS BIGINT), CAST({longest} AS BIGINT)), "
-        f"lambda i: [{row}]))"
+        f"lambda {i}: [{row}]))"
     )
 
 
@@ -4835,9 +4836,10 @@ def _render_gettype(node: ir.FunctionCall) -> str | None:
         f"WHEN {quote_string(j)} THEN {quote_string(k)}" for j, k in _DYNAMIC_GETTYPE.items()
     )
     held = f"coalesce(CASE json_type(to_json({rendered})) {content} END, 'null')"
+    k = lambdas.parameter("_k", rendered)
     return (
         f"list_transform([{kusto_type_sql(f'typeof({rendered})')}], "
-        f"lambda _k: CASE WHEN _k = 'dynamic' THEN {held} ELSE _k END)[1]"
+        f"lambda {k}: CASE WHEN {k} = 'dynamic' THEN {held} ELSE {k} END)[1]"
     )
 
 
@@ -5559,12 +5561,13 @@ def _render_extract_all(node: ir.FunctionCall) -> str:
         # returns the whole match, which is the bug this replaced.
         matches = f"regexp_extract_all({subject}, {pattern}, {wanted[0]})"
     else:
+        m = lambdas.parameter("m", pattern)
         per_match = ", ".join(
-            f"regexp_extract(m, {pattern}, {g})" for g in wanted
+            f"regexp_extract({m}, {pattern}, {g})" for g in wanted
         )
         matches = (
             f"list_transform(regexp_extract_all({subject}, {pattern}), "
-            f"lambda m: [{per_match}])"
+            f"lambda {m}: [{per_match}])"
         )
     # `len` of a null list is null, so a null subject falls through the implicit
     # ELSE to null as well — which is what Kusto answers for one.
