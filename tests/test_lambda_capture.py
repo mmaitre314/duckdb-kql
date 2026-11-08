@@ -21,9 +21,14 @@ measured on the emulator (2026-11-08); here, before the fix:
 the body actually embeds. `translate.lambdas.parameter` does that, lengthening
 the name as `sharing._prefix` does for its slots.
 
-The opposite rule holds for a *qualified* reference — `t.v` prefers a column
-`t` over the parameter — which `test_a_qualified_reference_prefers_the_column`
-records for the sites that read a struct field.
+The opposite rule holds for a *qualified* reference: `t.v` prefers a column
+`t` in scope over the parameter. Numeric `bin` read its operands as `_bin.v`
+and `_bin.r`, so `bin(x, 5)` beside a column `_bin` leaked a binder error —
+and beside a DuckDB STRUCT column `_bin` with those fields, which `kql()` over
+a user's own table can see, answered from the column: `bin(7, 5)` was 100. It
+reads `_bin['v']` now. graph-match reads `_gz.nid` and the like as well, but
+its scope never holds a user column: properties and pattern variables named
+`_gz`, `_gk` or `_gy` were measured to agree.
 """
 
 from __future__ import annotations
@@ -89,6 +94,27 @@ def test_the_parameter_steps_around_its_own_lengthened_name() -> None:
     )
     assert _rows(query) == [(1,)]
     assert "lambda __t:" in str(duckdb_kql.to_sql(query))
+
+
+@pytest.mark.parametrize(
+    ("query", "expected"),
+    [
+        ("datatable(_bin:long)[7] | project b = bin(_bin, 5)", [(5,)]),
+        ("datatable(x:long, _bin:long)[7, 1] | project b = bin(x, 5)", [(5,)]),
+        ("datatable(x:real, _BIN:long)[7.5, 1] | project b = bin(x, 2.0)", [(6.0,)]),
+        ("datatable(x:long, _bin:long)[7, 1, -7, 2] "
+         "| summarize c = count() by b = bin(x, 5) | order by b asc", [(-10, 1), (5, 1)]),
+    ],
+)
+def test_bin_beside_a_column_named_like_its_parameter(query: str, expected: list[tuple]) -> None:
+    """Measured. Each leaked `Cannot extract field 'v' from expression "_bin"`."""
+    assert _rows(query) == expected
+
+
+def test_bin_does_not_read_a_struct_column_for_its_operands() -> None:
+    con = duckdb_kql.connect()
+    con.execute("CREATE TABLE T AS SELECT 7::BIGINT AS x, {'v': 100, 'r': 1} AS _bin")
+    assert duckdb_kql.kql(con, "T | project b = bin(x, 5)").fetchall() == [(5,)]
 
 
 def test_the_unqualified_name_is_the_parameter_in_duckdb() -> None:

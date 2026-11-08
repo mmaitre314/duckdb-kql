@@ -482,15 +482,21 @@ def _numeric_bin(v: str, r: str) -> str:
     right value, which would disagree just as silently. The lambda evaluates
     each operand once, and ``NULLIF`` keeps an integer zero size null on
     DuckDB 2.0, which raises on a division by zero.
+
+    The fields are read as ``_bin['v']``, not ``_bin.v``: a qualified name
+    prefers a *column* `_bin` in scope over the lambda's parameter, and
+    `bin(x, 5)` beside a column `_bin` failed to bind
+    (`tests/test_lambda_capture.py`).
     """
-    q = "(_bin.v // NULLIF(_bin.r, 0))"
+    bv, br = "_bin['v']", "_bin['r']"
+    q = f"({bv} // NULLIF({br}, 0))"
     body = (
         f"CASE WHEN typeof({q}) IN {_INTEGER_SQL_TYPES} THEN "
-        "(CASE WHEN (_bin.v < 0) <> (_bin.r < 0) THEN _bin.v + sign(_bin.r) - _bin.r "
-        "ELSE _bin.v END) // NULLIF(_bin.r, 0) * _bin.r "
-        "WHEN _bin.r = 0 AND _bin.v IS NOT NULL THEN 'NaN' "
-        f"WHEN isinf({q}) OR isnan({q}) THEN {q} * _bin.r "
-        f"ELSE ({q} - {q} % 1 - CASE WHEN {q} % 1 < 0 THEN 1 ELSE 0 END) * _bin.r END"
+        f"(CASE WHEN ({bv} < 0) <> ({br} < 0) THEN {bv} + sign({br}) - {br} "
+        f"ELSE {bv} END) // NULLIF({br}, 0) * {br} "
+        f"WHEN {br} = 0 AND {bv} IS NOT NULL THEN 'NaN' "
+        f"WHEN isinf({q}) OR isnan({q}) THEN {q} * {br} "
+        f"ELSE ({q} - {q} % 1 - CASE WHEN {q} % 1 < 0 THEN 1 ELSE 0 END) * {br} END"
     )
     pair = f"struct_pack(v := {long_or_wider(v)}, r := {long_or_wider(r)})"
     return f"list_transform([{pair}], lambda _bin: {body})[1]"
