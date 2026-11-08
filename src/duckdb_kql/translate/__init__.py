@@ -2673,32 +2673,14 @@ def _render_has_list(node: ir.HasList, value: str) -> str:
 
     parts = []
     for item in node.items:
-        if isinstance(item, ir.ToScalar):
-            # An array of needles or one needle — which, only DuckDB knows.
-            parts.append(_has_toscalar(node, value, render_expr(item)))
-            continue
-        if _is_dynamic(item):
-            unrolled = _unrolled_needles(node, value, item)
-            if unrolled is not None:
-                parts.append(unrolled)
-                continue
-            # A list whose needles are only known at run time — a bound
-            # parameter, or a literal array this cannot read (see
-            # `_literal_needles`); a column is refused above. One
-            # `list_filter`, and the term pattern is rebuilt per needle
-            # because the lambda variable is not a constant.
-            arr = f"CAST({render_expr(item)} AS VARCHAR[])"
-            t = lambdas.parameter("t", value)
-            matched = f"len(list_filter({arr}, lambda {t}: {term_match_sql(value, t)}))"
-            parts.append(f"({matched} = len({arr}))" if node.require_all
-                         else f"({matched} > 0)")
-        elif isinstance(item, ir.Literal) and item.kind == "string":
+        if isinstance(item, ir.Literal) and item.kind == "string":
             parts.append(
                 term_match_sql(value, quote_string(str(item.value)),
                                needle_text=str(item.value))
             )
-        else:
-            parts.append(term_match_sql(value, f"CAST({render_expr(item)} AS VARCHAR)"))
+            continue
+        unrolled = _unrolled_needles(node, value, item)
+        parts.append(unrolled if unrolled is not None else _has_item(node, value, item))
 
     if not parts:
         # `has_any ()` cannot be written — the grammar needs at least one item.
@@ -2708,20 +2690,75 @@ def _render_has_list(node: ir.HasList, value: str) -> str:
     return _has_list_result(sql, node)
 
 
-def _has_toscalar(node: ir.HasList, value: str, item: str) -> str:
-    """One `has_any`/`has_all` item that is a `toscalar`: its elements when it
-    is an array, measured, and itself as one needle otherwise."""
-    json = f"to_json({item})"
-    arr = f"CAST({json} AS VARCHAR[])"
+def _has_item(node: ir.HasList, value: str, item: ir.Expr) -> str:
+    """One `has_any`/`has_all` operand whose needles are not literal strings.
+
+    Measured on the emulator, an operand's needles are:
+
+    * a **scalar's** string form, one needle — and a null is `''`, which every
+      value has: `s has_any (long(null))` and `has_any (dynamic(null))` are
+      true for every row;
+    * an **array's** leaves, flattened however deep — `dynamic([['x'],
+      ['world']])` has the needles `x` and `world` — with a null leaf `''`;
+    * never a **bag**: SEM0022, at any depth and through a `toscalar` too.
+
+    Which an operand is, only DuckDB knows: `split(…)` is an array that no
+    predicate over the IR recognised, and treating it as a scalar searched for
+    the text `["world"]` — 0 where Kusto has 1. So the shape is asked of
+    `typeof` at run time, and a JSON or LIST operand is flattened by
+    :func:`_runtime_needles`. Only where the IR carries the type — a literal,
+    or a parameter declared as other than `dynamic` — is the question skipped;
+    the unselected branch is not free (DuckDB plans the `json_tree` subquery
+    whichever branch a row takes).
+    """
+    if isinstance(item, ir.Literal) and item.kind == "dynamic" and _holds_a_bag(item.value):
+        operator = "has_all" if node.require_all else "has_any"
+        raise KqlUnsupportedError(
+            f"{operator}:bag",
+            hint=f"a property bag is not a {operator} needle; Kusto refuses it (SEM0022)",
+        )
+    sql = render_expr(item)
+    one = term_match_sql(value, f"coalesce(CAST({sql} AS VARCHAR), '')")
+    if isinstance(item, (ir.Literal, ir.Parameter)) and item.kind != "dynamic":
+        return one
+    needles = _runtime_needles(sql)
     t = lambdas.parameter("t", value)
-    matched = f"len(list_filter({arr}, lambda {t}: {term_match_sql(value, t)}))"
-    many = f"({matched} = len({arr}))" if node.require_all else f"({matched} > 0)"
-    one = term_match_sql(
-        value,
-        f"(CASE WHEN typeof({item}) = 'JSON' THEN json_extract_string({json}, '$') "
-        f"ELSE CAST({item} AS VARCHAR) END)",
+    matched = f"len(list_filter({needles}, lambda {t}: {term_match_sql(value, t)}))"
+    many = f"({matched} = len({needles}))" if node.require_all else f"({matched} > 0)"
+    shaped = f"typeof({sql}) = 'JSON' OR typeof({sql}) LIKE '%]'"
+    return f"(CASE WHEN {shaped} THEN {many} ELSE {one} END)"
+
+
+def _holds_a_bag(text: object) -> bool:
+    """Whether a literal dynamic's JSON has an object at any depth."""
+    try:
+        value = json.loads(str(text))
+    except (TypeError, ValueError):
+        return False
+    stack = [value]
+    while stack:
+        current = stack.pop()
+        if isinstance(current, dict):
+            return True
+        if isinstance(current, list):
+            stack.extend(current)
+    return False
+
+
+def _runtime_needles(sql: str) -> str:
+    """Every leaf of the JSON form of *sql*, as text, `''` for a null; a bag raises.
+
+    One `list_filter` over these, and the term pattern is rebuilt per needle
+    because the lambda variable is not a constant — see `_unrolled_needles`
+    for why a literal array does not come here.
+    """
+    leaves = "list(coalesce(value ->> '$', '')) FILTER (WHERE type NOT IN ('ARRAY', 'OBJECT'))"
+    return (
+        "(SELECT CASE WHEN bool_or(type = 'OBJECT') THEN error('duckdb-kql: a bag is "
+        "not a has_any/has_all needle; Kusto refuses it (SEM0022)') "
+        f"ELSE coalesce({leaves}, []) END "
+        f"FROM json_tree(coalesce(to_json({sql}), 'null'::JSON)))"
     )
-    return f"(CASE WHEN json_type({json}) = 'ARRAY' THEN {many} ELSE {one} END)"
 
 
 def _render_has_subquery(node: ir.HasList, subquery: ir.Query, value: str) -> str:
