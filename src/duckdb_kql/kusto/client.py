@@ -386,22 +386,7 @@ class KustoClient:
                 semantic=True,
             )
 
-        bound = translated.parameters
-        with self._deadline(properties):
-            try:
-                with self._lock:
-                    rel = (
-                        con.sql(str(translated), params=bound)
-                        if bound
-                        else con.sql(str(translated))
-                    )
-                    columns = list(rel.columns)
-                    types = [kusto_type(t) for t in rel.types]
-                    rows = rel.fetchall()
-            except Exception as exc:  # any engine failure is the answer
-                raise KustoServiceError(str(exc)) from exc
-
-        return self._response(query, columns, types, rows, properties)
+        return self._run(con, query, str(translated), properties, translated.parameters)
 
     def _schema(self, con: DuckDBPyConnection) -> Schema:
         """The connection's tables.
@@ -487,17 +472,7 @@ class KustoClient:
         except KqlError as exc:
             raise _semantic_error(exc) from exc
 
-        with self._deadline(properties):
-            try:
-                with self._lock:
-                    rel = con.sql(sql)
-                    columns = list(rel.columns)
-                    types = [kusto_type(t) for t in rel.types]
-                    rows = rel.fetchall()
-            except Exception as exc:  # any engine failure is the answer
-                raise KustoServiceError(str(exc)) from exc
-
-        return self._response(query, columns, types, rows, properties)
+        return self._run(con, query, sql, properties)
 
     def _execute_write(
         self,
@@ -565,19 +540,33 @@ class KustoClient:
         except KqlError as exc:
             raise _semantic_error(exc) from exc
 
+        # `render_ingestion` emits several `;`-separated statements
+        # (create-if-absent, delete, insert, then the extents row). DuckDB runs
+        # them all and returns the last result.
+        return self._run(con, query, sql, properties)
+
+    def _run(
+        self,
+        con: Any,
+        query: str,
+        sql: str,
+        properties: ClientRequestProperties | None,
+        params: Any = None,
+    ) -> KustoResponseDataSet:
+        """Run *sql* under the request's deadline and the connection lock.
+
+        Any engine failure is the service's answer, as a `KustoServiceError`
+        — the one shape a query, a control command and an ingestion share.
+        """
         with self._deadline(properties):
             try:
                 with self._lock:
-                    # `render_ingestion` emits several `;`-separated statements
-                    # (create-if-absent, delete, insert, then the extents row).
-                    # DuckDB runs them all and returns the last result.
-                    rel = con.sql(sql)
+                    rel = con.sql(sql, params=params) if params else con.sql(sql)
                     columns = list(rel.columns)
                     types = [kusto_type(t) for t in rel.types]
                     rows = rel.fetchall()
             except Exception as exc:  # any engine failure is the answer
                 raise KustoServiceError(str(exc)) from exc
-
         return self._response(query, columns, types, rows, properties)
 
     # -- internals --------------------------------------------------------
