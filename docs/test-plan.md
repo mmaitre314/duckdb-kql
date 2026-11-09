@@ -313,6 +313,44 @@ exposure was latent and inverted: implementing `partition` would have graded a
    thing that moved. With it, a full sweep on the pinned digest checks **983**
    and reports no drift — so these three were the only casualties.
 
+#### 2026-11-08 — `geo_info_from_ip_address` reads a database Microsoft refreshes
+
+**Symptom.** The scheduled Oracle runs of 2026-11-08 (`main` @ `28f44fe`) and
+2026-11-09 (@ `7162331`) each reported drift in one case,
+`geo-info-from-ip-address-function-00`: Sydney's latitude went from `-33.8672`
+to `-33.8715`. The 2026-11-07 run had none.
+
+**The emulator image, this time.** Unlike 2026-08-04, the obvious suspect is
+the right one. The scheduled lane pulls `:latest`, and each failing run pulled a
+build published hours earlier: 11-07 passed on `ca7f2a6f…`, 11-08 ran
+`57558615…`, 11-09 ran `3ea94e9c…`. Reproduced locally: the pinned digest
+`de542bb2…` returns the frozen `(-33.8672, 151.1997)`, and the `:latest` of
+2026-11-09 (`863c97c3…`, a fourth build) returns `(-33.8715, 151.2006)`. A full
+`--check --include-fixture-cases` sweep on that build checks **1007** frozen
+expectations and drifts on this one alone. Microsoft's page for the function now
+prints the new coordinates for this very query.
+
+**Cause.** The function reads MaxMind's GeoLite2-City data, which ships with the
+engine (its documentation says so) and which a new build refreshes. That is a
+change of data, not of KQL semantics, and it will recur: `:latest` moved three
+times in two days. The docs' other example, `geo-info-from-ip-address-function-01`
+(an IPv6 address), has not drifted yet — every build here answers Miami — while
+Microsoft's page prints Boca Raton for the same query: the deployments do not
+even share one snapshot.
+
+**Impact: none on the numbers.** We do not translate `geo_info_from_ip_address`
+(`status: xfail`), so the case never reached a comparison; the L3 baseline of
+372 is unchanged.
+
+**Fixed — by classification, not by re-freezing.** A value re-frozen on today's
+build is the next refresh's drift. `geo_info_from_ip_address` joins
+`NONDETERMINISTIC_FUNCTIONS` in `comparison.py`, as `cursor_current()` did when
+this lane caught it, so the drift lane and the acceptance suite skip both cases
+(the sweep above then checks 1005 and reports no drift). The frozen expectations
+are left as the pinned digest's answers, which no check reads.
+`tests/test_comparison.py::test_geo_info_from_ip_address_reads_a_database_that_moves`
+pins the classification.
+
 ## 6. Behavioral divergence catalog (L5 — hand-authored trap tests)
 
 These are the "almost the same" cases that silently return wrong results. Each

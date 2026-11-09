@@ -76,6 +76,11 @@ NONDETERMINISTIC_FUNCTIONS = frozenset(
         # a different value on every run.
         "cursor_current", "current_cursor", "cursor_after",
         "current_database", "current_cluster_endpoint", "current_principal_details",
+        # Reads the MaxMind GeoLite2-City database the engine ships, which
+        # Microsoft refreshes: the same IP's coordinates moved between emulator
+        # builds (drift log, docs/test-plan.md 5.3, 2026-11-08). Data, not
+        # semantics, so no build's answer is a ground truth to freeze.
+        "geo_info_from_ip_address",
     }
 )
 

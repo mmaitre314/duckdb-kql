@@ -212,3 +212,13 @@ def test_sample_operator_is_nondeterministic():
     assert is_nondeterministic("T | sample-distinct 5 of x")
     assert is_nondeterministic("print cursor_current()")
     assert not is_nondeterministic("T | take 5")
+
+
+def test_geo_info_from_ip_address_reads_a_database_that_moves():
+    """Caught by the drift lane, 2026-11-08: `geo_info_from_ip_address('20.53.203.50')`
+    is Sydney at (-33.8672, 151.1997) on the pinned emulator digest, latitude
+    -33.8715 on both builds the nightly pulled since, and (-33.8715, 151.2006)
+    on the 2026-11-09 build — what Microsoft's own page now prints. The
+    function reads a GeoLite2 database the engine ships; re-freezing would only
+    move the failure to the next refresh."""
+    assert is_nondeterministic("print ip_location=geo_info_from_ip_address('20.53.203.50')")
